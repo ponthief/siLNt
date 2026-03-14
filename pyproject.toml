@@ -1,12 +1,16 @@
 [project]
-name = "lnbits-example"
-version = "0.0.0"
+name = "silnt"
+version = "0.1.0"
 requires-python = ">=3.10,<3.13"
-description = "LNbits, free and open-source Lightning wallet and accounts system."
-authors = [{ name = "Alan Bits", email = "alan@lnbits.com" }]
-urls = { Homepage = "https://lnbits.com", Repository = "https://github.com/lnbits/example" }
+description = "Silent Payments OnChain Wallet for LNBits"
+authors = [{ name = "Bitaurus", email = "ponthief@bitaurus.net" }]
+urls = { Homepage = "https://bitaurus.net", Repository = "https://github.com/ponthief/silnt" }
 
-dependencies = [ "lnbits>1" ]
+dependencies = [
+ "bitcoinlib>=0.6.12.1",
+ "embit>=0.8.0",
+ "lnbits>1",
+]
 
 [tool.uv]
 dev-dependencies = [
@@ -30,6 +34,7 @@ warn_untyped_fields = true
 
 [[tool.mypy.overrides]]
 module = [
+  "embit.*",
   "lnbits.*",
   "lnurl.*",
   "loguru.*",

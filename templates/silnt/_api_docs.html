@@ -1,0 +1,266 @@
+<q-expansion-item
+  group="extras"
+  icon="info"
+  label="Guide"
+  :content-inset-level="0.5"
+>
+  <q-card>
+    <p>
+      <q-card-section>        
+          Silnt<br />
+          <small>
+            Created by: 
+            <a
+              class="text-secondary"
+              target="_blank"
+              style="color: unset"
+              href="https://github.com/ponthief"
+              >Ponthief</a
+            >
+            </small
+          >
+          <br />       
+        <strong>Usage</strong><br />
+
+        1. Add Nostr Account - private key ('Nsec')<br />
+        2. Add Nostr Relay(s) for Account to  connect to<br />
+        3. Add existing BOLTCARD:<br />
+        - enter card's UID<br />
+        - enter Nostr 'npub' of the user who owns the card<br />
+        - enter card Name to use when issuing commands via Nostr<br />
+                               
+      </q-card-section>
+    </p>
+  </q-card>
+</q-expansion-item>
+
+<q-expansion-item
+  group="extras"
+  icon="api"
+  label="API info"
+  :content-inset-level="0.5"
+>
+  <q-btn flat label="Swagger API" type="a" href="../docs#/silnt"></q-btn>
+  <q-expansion-item group="api" dense expand-separator label="List Accounts">
+    <q-card>
+      <q-card-section>
+        <code
+          ><span class="text-blue">GET</span> /cardanostra/api/v1/accounts</code
+        >
+        <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
+        <code>{"X-Api-Key": &lt;admin_key&gt;}</code><br />
+        <h5 class="text-caption q-mt-sm q-mb-none">Body (application/json)</h5>
+        <h5 class="text-caption q-mt-sm q-mb-none">
+          Returns 200 OK (application/json)
+        </h5>
+        <code>[&lt;account_object&gt;, ...]</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
+        <code
+          >curl -X GET {{ request.base_url }}cardanostra/api/v1/accounts -H
+          "X-Api-Key: &lt;admin_key&gt;"
+        </code>
+      </q-card-section>
+    </q-card>
+  </q-expansion-item>
+
+  <q-expansion-item group="api" dense expand-separator label="List Relays">
+    <q-card>
+      <q-card-section>
+        <code
+          ><span class="text-blue">GET</span> /cardanostra/api/v1/relays</code
+        >
+        <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
+        <code>{"X-Api-Key": &lt;admin_key&gt;}</code><br />
+        <h5 class="text-caption q-mt-sm q-mb-none">Body (application/json)</h5>
+        <h5 class="text-caption q-mt-sm q-mb-none">
+          Returns 200 OK (application/json)
+        </h5>
+        <code>[&lt;relay_object&gt;, ...]</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
+        <code
+          >curl -X GET {{ request.base_url }}cardanostra/api/v1/relays -H
+          "X-Api-Key: &lt;admin_key&gt;"
+        </code>
+      </q-card-section>
+    </q-card>
+  </q-expansion-item>  
+
+  <q-expansion-item group="api" dense expand-separator label="Add Account">
+    <q-card>
+      <q-card-section>
+        <code
+          ><span class="text-blue">POST</span> /cardanostra/api/v1/account</code
+        >
+        <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
+        <code>{"X-Api-Key": &lt;admin_key&gt;}</code><br />
+        <h5 class="text-caption q-mt-sm q-mb-none">Body (application/json)</h5>
+        <h5 class="text-caption q-mt-sm q-mb-none">
+          Returns 200 OK (application/json)
+        </h5>
+        <code>{account_object}</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
+        <code
+          >curl -X POST {{ request.base_url }}cardanostra/api/v1/account -H
+          "X-Api-Key: &lt;admin_key&gt;"
+        </code>
+      </q-card-section>
+    </q-card>
+  </q-expansion-item>
+
+  <q-expansion-item group="api" dense expand-separator label="Add Relay">
+    <q-card>
+      <q-card-section>
+        <code
+          ><span class="text-blue">POST</span>
+          /cardanostra/api/v1/relay</code
+        >
+        <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
+        <code>{"X-Api-Key": &lt;admin_key&gt;}</code><br />
+        <h5 class="text-caption q-mt-sm q-mb-none">Body (application/json)</h5>
+        <h5 class="text-caption q-mt-sm q-mb-none">
+          Returns 200 OK (application/json)
+        </h5>
+        <code>{relay_object}</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
+        <code
+          >curl -X POST {{ request.base_url
+          }}cardanostra/api/v1/relay -H "X-Api-Key:
+          &lt;admin_key&gt;"
+        </code>
+      </q-card-section>
+    </q-card>
+  </q-expansion-item>
+
+  <q-expansion-item
+    group="api"
+    dense
+    expand-separator
+    label="Add Card"
+  >
+    <q-card>
+      <q-card-section>
+        <code
+          ><span class="text-blue">POST</span>
+          /cardanostra/api/v1/register</code
+        >
+        <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
+        <h5 class="text-caption q-mt-sm q-mb-none">Body (application/json)</h5>
+        <h5 class="text-caption q-mt-sm q-mb-none">
+          Returns 200 OK (application/json)
+        </h5>
+        <code>{card_object}</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
+        <code
+          >curl -X POST {{ request.base_url
+          }}cardanostra/api/v1/register -H "X-Api-Key:
+          &lt;admin_key&gt;"
+        </code>
+      </q-card-section>
+    </q-card>
+  </q-expansion-item>
+
+  <q-expansion-item
+    group="api"
+    dense
+    expand-separator
+    label="Delete Account"
+  >
+    <q-card>
+      <q-card-section>
+        <code
+          ><span class="text-blue">DELETE</span>
+          /cardanostra/api/v1/accounts/{id}</code
+        >
+        <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
+        <h5 class="text-caption q-mt-sm q-mb-none">Body (application/json)</h5>
+        <h5 class="text-caption q-mt-sm q-mb-none">
+          Returns 200 OK (application/json)
+        </h5>
+        <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
+        <code
+          >curl -X DELETE {{ request.base_url
+          }}cardanostra/api/v1/accounts/{id} -H
+          "X-Api-Key: &lt;admin_key&gt;"
+        </code>
+      </q-card-section>
+    </q-card>
+  </q-expansion-item>
+  <q-expansion-item
+    group="api"
+    dense
+    expand-separator
+    label="Delete Relay"
+  >
+    <q-card>
+      <q-card-section>
+        <code
+          ><span class="text-blue">DELETE</span>
+          /cardanostra/api/v1/relays/{id}</code
+        >
+        <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
+        <h5 class="text-caption q-mt-sm q-mb-none">Body (application/json)</h5>
+        <h5 class="text-caption q-mt-sm q-mb-none">
+          Returns 200 OK (application/json)
+        </h5>
+        <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
+        <code
+          >curl -X DELETE {{ request.base_url
+          }}cardanostra/api/v1/relays/{id} -H
+          "X-Api-Key: &lt;admin_key&gt;"
+        </code>
+      </q-card-section>
+    </q-card>
+  </q-expansion-item>
+  <q-expansion-item
+    group="api"
+    dense
+    expand-separator
+    label="Delete Card"
+  >
+    <q-card>
+      <q-card-section>
+        <code
+          ><span class="text-blue">DELETE</span>
+          /cardanostra/api/v1/cards/{id}</code
+        >
+        <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
+        <h5 class="text-caption q-mt-sm q-mb-none">Body (application/json)</h5>
+        <h5 class="text-caption q-mt-sm q-mb-none">
+          Returns 200 OK (application/json)
+        </h5>
+        <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
+        <code
+          >curl -X DELETE {{ request.base_url
+          }}cardanostra/api/v1/cards/{card_uid} -H
+          "X-Api-Key: &lt;admin_key&gt;"
+        </code>
+      </q-card-section>
+    </q-card>
+  </q-expansion-item>
+  <q-expansion-item
+    group="api"
+    dense
+    expand-separator
+    label="Restart Nostr Connection"
+  >
+    <q-card>
+      <q-card-section>
+        <code
+          ><span class="text-blue">PUT</span>
+          /cardanostra/api/v1/restart</code
+        >
+        <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
+        <h5 class="text-caption q-mt-sm q-mb-none">Body (application/json)</h5>
+        <h5 class="text-caption q-mt-sm q-mb-none">
+          Returns 200 OK (application/json)
+        </h5>
+        <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
+        <code
+          >curl -X PUT {{ request.base_url
+          }}cardanostra/api/v1/restart -H
+          "X-Api-Key: &lt;admin_key&gt;"
+        </code>
+      </q-card-section>
+    </q-card>
+  </q-expansion-item>
+</q-expansion-item>

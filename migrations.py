@@ -1,12 +1,39 @@
-# migrations.py is for building your database
+async def m001_initial(db):
+    """
+    Initial wallet table.
+    """
+    await db.execute(
+        f"""
+        CREATE TABLE silnt.wallets (
+            id TEXT NOT NULL PRIMARY KEY,
+            "user" TEXT,
+            network TEXT DEFAULT 'mainnet',
+            title TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT {db.timestamp_now},
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT {db.timestamp_now},
+            scan_secret TEXT NOT NULL,
+            spend_key TEXT NOT NULL,
+            sp_address TEXT NOT NULL,
+            hr_address TEXT NOT NULL,
+            last_height INTEGER,
+            balance {db.big_int}
+        );
+    """
+    )
 
-# async def m001_initial(db):
-#    await db.execute(
-#        f"""
-#        CREATE TABLE example.example (
-#            id TEXT PRIMARY KEY,
-#            wallet TEXT NOT NULL,
-#            time TIMESTAMP NOT NULL DEFAULT {db.timestamp_now}
-#        );
-#    """
-#    )
+    await db.execute(
+        f"""
+        CREATE TABLE silnt.utxos (
+            txid TEXT NOT NULL PRIMARY KEY,
+            vout SMALLINT NOT NULL,            
+            amount {db.big_int} NOT NULL,
+            priv_key_tweak TEXT NOT NULL,
+            pub_key TEXT NOT NULL,
+            timestamp TIMESTAMP NOT NULL,
+            utxo_state TEXT NOT NULL,
+            label TEXT NOT NULL,
+            wallet_id TEXT NOT NULL
+        );
+    """
+    )
+
