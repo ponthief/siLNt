@@ -22,94 +22,83 @@
         ></q-btn>
       </div>
       <div v-if="selectable" class="col-5 q-pr-lg"></div>
-      <div v-if="!selectable" class="col-9 q-pr-lg"></div>
-      <div class="col-3 float-right">
-        <q-input
-          borderless
-          dense
-          debounce="300"
-          v-model="filter"
-          placeholder="Search"
-        >
-          <template v-slot:append>
-            <q-icon name="search"></q-icon>
-          </template>
-        </q-input>
-      </div>
+      <div v-if="!selectable" class="col-9 q-pr-lg"></div>      
+    </div>
+
+    <!-- Totals summary -->
+    <div class="row q-mb-md q-gutter-md">
+      <q-badge color="positive" class="q-pa-sm text-body2">
+        Unspent: <strong v-text="'&nbsp;' + satBtc(unspentTotal)"></strong>
+      </q-badge>
+      <q-badge color="negative" class="q-pa-sm text-body2">
+        Spent: <strong v-text="'&nbsp;' + satBtc(spentTotal)"></strong>
+      </q-badge>
     </div>
 
     <q-table
       flat
       dense
       :rows="utxos"
-      row-key="id"
+      row-key="txid"
       :columns="columns"
       :pagination.sync="utxosTable.pagination"
       :filter="filter"
     >
       <template v-slot:body="props">
         <q-tr :props="props">
+          <!-- Expand toggle -->
           <q-td auto-width>
             <q-btn
               size="sm"
               color="primary"
               round
               dense
-              @click="props.row.expanded= !props.row.expanded"
-              :icon="props.row.expanded? 'remove' : 'add'"
+              @click="props.row.expanded = !props.row.expanded"
+              :icon="props.row.expanded ? 'remove' : 'add'"
             />
           </q-td>
 
+          <!-- Optional selection checkbox -->
           <q-td v-if="selectable" key="selected" :props="props">
             <div>
               <q-checkbox v-model="props.row.selected"></q-checkbox>
             </div>
           </q-td>
+
+          <!-- UTXO state badge (replaces confirmed/pending) -->
           <q-td key="status" :props="props">
             <div>
               <q-badge
-                v-if="props.row.confirmed"
+                v-if="props.row.utxo_state === 'unspent'"
+                color="positive"
+                class="q-mr-sm cursor-pointer"
                 @click="props.row.expanded = !props.row.expanded"
-                color="primary"
-                class="q-mr-md cursor-pointer"
-              >
-                Confirmed
-              </q-badge>
+              >unspent</q-badge>
               <q-badge
-                v-if="!props.row.confirmed"
+                v-else-if="props.row.utxo_state === 'spent'"
+                color="negative"
+                class="q-mr-sm cursor-pointer"
                 @click="props.row.expanded = !props.row.expanded"
-                color="secondary"
-                class="q-mr-md cursor-pointer"
-              >
-                Pending
-              </q-badge>
-            </div>
-          </q-td>
-          <q-td key="address" :props="props">
-            <div>
-              <a
-                style="color: unset"
-                :href="'https://' + mempoolEndpoint + '/address/' + props.row.address"
-                target="_blank"
-                v-text="props.row.address"
-              ></a>
+              >spent</q-badge>
               <q-badge
-                v-if="props.row.isChange"
-                color="primary"
-                class="q-mr-md"
-              >
-                change
-              </q-badge>
+                v-else
+                color="grey"
+                class="q-mr-sm cursor-pointer"
+                @click="props.row.expanded = !props.row.expanded"
+                v-text="props.row.utxo_state || 'unknown'"
+              ></q-badge>
+
+              <!-- Label badge if this UTXO has a silent payment label -->
               <q-badge
-                v-if="props.row.accountType === 'p2tr'"
-                color="yellow"
-                text-color="black"
-              >
-                taproot
-              </q-badge>
+                v-if="props.row.label"
+                color="purple"
+                text-color="white"
+                class="q-mr-sm"
+              >labeled</q-badge>
             </div>
           </q-td>
 
+          <!-- Amount -->
           <q-td
             key="amount"
             :props="props"
@@ -117,26 +106,61 @@
           >
             <div v-text="satBtc(props.row.amount)"></div>
           </q-td>
-          <q-td key="date" :props="props" v-text="props.row.date"></q-td>
-          <q-td key="wallet" :props="props">
-            <div v-text="getWalletName(props.row.wallet)"></div>
+
+          <!-- Timestamp -->
+          <q-td key="date" :props="props">
+            <div v-text="props.row.timestamp
+              ? new Date(props.row.timestamp * 1000).toLocaleString()
+              : '-'">
+            </div>
           </q-td>
+
         </q-tr>
+
+        <!-- Expanded detail row -->
         <q-tr v-show="props.row.expanded" :props="props">
           <q-td colspan="100%">
-            <div class="row items-center q-mb-md">
-              <div class="col-2 q-pr-lg">Transaction Id</div>
-              <div class="col-10 q-pr-lg">
+            <!-- Transaction ID -->
+            <div class="row items-center q-mb-sm">
+              <div class="col-2 text-weight-bold">Transaction ID</div>
+              <div class="col-10" style="font-family: monospace; word-break: break-all">
                 <a
                   style="color: unset"
-                  :href="'https://' + mempoolEndpoint + '/tx/' + props.row.txId"
+                  :href="'https://' + mempoolEndpoint + '/tx/' + props.row.txid"
                   target="_blank"
-                  v-text="props.row.txId"
+                  v-text="props.row.txid"
                 ></a>
+              </div>
+            </div>
+
+            <!-- Label details (if present) -->
+            <div v-if="props.row.label" class="q-mt-sm">
+              <div class="row items-center q-mb-sm">
+                <div class="col-2 text-weight-bold">Label Address</div>
+                <div class="col-10" style="font-family: monospace; word-break: break-all"
+                  v-text="props.row.label.address">
+                </div>
+              </div>
+              <div class="row items-center q-mb-sm">
+                <div class="col-2 text-weight-bold">Label Pub Key</div>
+                <div class="col-10" style="font-family: monospace; word-break: break-all"
+                  v-text="props.row.label.pub_key">
+                </div>
+              </div>
+              <div class="row items-center q-mb-sm">
+                <div class="col-2 text-weight-bold">Label Tweak</div>
+                <div class="col-10" style="font-family: monospace; word-break: break-all"
+                  v-text="props.row.label.tweak">
+                </div>
+              </div>
+              <div class="row items-center q-mb-sm">
+                <div class="col-2 text-weight-bold">Label Index (m)</div>
+                <div class="col-10" v-text="props.row.label.m"></div>
               </div>
             </div>
           </q-td>
         </q-tr>
       </template>
-    </q-table> </q-card-section
-></q-card>
+    </q-table>
+  </q-card-section>
+</q-card>

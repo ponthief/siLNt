@@ -4,12 +4,7 @@
       <div class="col-lg-2 col-sm-3 q-ml-lg">
         <q-btn unelevated @click="show = true" color="primary" icon="settings">
         </q-btn>
-      </div>
-      <div class="col-lg-5 col-sm-3">
-        <div class="row justify-center q-gutter-x-md items-center">
-          <div :class="{'text-h4': $q.screen.gt.md}">${satBtc(total)}</div>
-        </div>
-      </div>
+      </div>      
     </div>
   </q-card>
 
@@ -19,23 +14,39 @@
         <q-input
           filled
           dense
-          v-model.trim="config.blindbit_endpoint"
+          v-model.trim="config.blindbit_url"
           type="text"
-          label="BlindBit Endpoint"
+          label="BlindBit URL"
         >
         </q-input>
-        <q-toggle
-          :label="config.sats_denominated ? 'sats denominated' : 'BTC denominated'"
-          color="primary"
-          v-model="config.sats_denominated"
-        ></q-toggle>
+
+        <!-- BlindBit auth fields: only visible when adminkey is present -->
+        <template v-if="adminkey">
+          <q-input
+            filled
+            dense
+            v-model.trim="config.blindbit_user"
+            type="text"
+            label="BlindBit Auth User"
+            autocomplete="off"
+          >
+          </q-input>
+          <q-input
+            filled
+            dense
+            v-model.trim="config.blindbit_pass"
+            type="password"
+            label="BlindBit Auth Password"
+            autocomplete="new-password"
+          >
+          </q-input>
+        </template>        
 
         <div class="row q-mt-lg">
           <q-btn
             unelevated
             color="primary"
-            :disable="
-            !config.mempool_endpoint "
+            :disable="!config.mempool_endpoint"
             type="submit"
             >Update</q-btn
           >

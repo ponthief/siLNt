@@ -32,13 +32,7 @@ window.app.component('utxo-list', {
             name: 'status',
             align: 'center',
             label: 'Status',
-            sortable: true
-          },
-          {
-            name: 'address',
-            align: 'left',
-            label: 'Address',
-            field: 'address',
+            field: 'utxo_state',
             sortable: true
           },
           {
@@ -52,15 +46,9 @@ window.app.component('utxo-list', {
             name: 'date',
             align: 'left',
             label: 'Date',
-            field: 'date',
-            sortable: true
-          },
-          {
-            name: 'wallet',
-            align: 'left',
-            label: 'Account',
-            field: 'wallet',
-            sortable: true
+            field: 'timestamp',
+            sortable: true,
+            sort: (a, b) => a - b
           }
         ],
         pagination: {
@@ -84,6 +72,16 @@ window.app.component('utxo-list', {
       return this.utxosTable.columns.filter(c =>
         c.selectable ? this.selectable : true
       )
+    },
+    unspentTotal: function () {
+      return (this.utxos || [])
+        .filter(u => u.utxo_state === 'unspent')
+        .reduce((t, u) => t + (u.amount || 0), 0)
+    },
+    spentTotal: function () {
+      return (this.utxos || [])
+        .filter(u => u.utxo_state === 'spent')
+        .reduce((t, u) => t + (u.amount || 0), 0)
     }
   },
 
@@ -91,6 +89,7 @@ window.app.component('utxo-list', {
     satBtc(val, showUnit = true) {
       return satOrBtc(val, showUnit, this.satsDenominated)
     },
+    // Kept for compatibility but not used for blindbit UTXOs (no wallet account)
     getWalletName: function (walletId) {
       const wallet = (this.accounts || []).find(wl => wl.id === walletId)
       return wallet ? wallet.title : 'unknown'

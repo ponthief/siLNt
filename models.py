@@ -4,6 +4,11 @@ from fastapi import Query
 from pydantic import BaseModel
 
 
+class ScanConfig(BaseModel):
+    blindbit_url: str
+    auth_user: str = ""
+    auth_pass: str = ""
+    
 class CreateWallet(BaseModel):
     mnemonic: str = Query("")
     title: str = Query("")

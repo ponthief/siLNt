@@ -1,6 +1,6 @@
 import json
 from http import HTTPStatus
-
+from base64 import b64encode
 import httpx
 from embit import finalizer, script
 from embit.ec import PublicKey
@@ -30,6 +30,7 @@ from .models import (
     # Address,
     Config,    
     CreateWallet,
+    ScanConfig,
     # ExtractPsbt,
     # ExtractTx,
     # SerializedTransaction,
@@ -79,7 +80,7 @@ async def api_wallet_create(
             spend_key='',
             scan_secret=''
         )        
-        (sp_address, scan_secret, spend_key) = generate_silent_wallet_address(data.mnemonic)
+        (sp_address, scan_secret, spend_key) = generate_silent_wallet_address(decrypt_mnemonic(data.mnemonic, str(data.last_height)))
         if not all([sp_address,scan_secret,spend_key]):
             raise ValueError(
                     f"Wallet '{data.title}' cannot be created with given mnemonic!"
@@ -93,8 +94,7 @@ async def api_wallet_create(
                 and ew.network == new_wallet.network                
             ),
             None,
-        )
-        logger.info(existing_wallet)            
+        )                    
         if existing_wallet:           
             if data.hr_address and data.hr_address != existing_wallet.hr_address:
                 await update_hr_address(existing_wallet.id, data.hr_address)
@@ -153,6 +153,48 @@ async def api_wallet_delete(wallet_id: str):
 
     return "", HTTPStatus.NO_CONTENT
 
+### SCANNING ########
+@silnt_api_router.post(
+    "/api/v1/scan",
+    description="Proxy scan request to blindbit-scan and return UTXOs + height",
+    dependencies=[Depends(require_invoice_key)]    
+)
+async def api_scan_blockchain(config: ScanConfig):
+    headers = {}
+    if config.auth_user and config.auth_pass:
+        credentials = b64encode(
+            f"{config.auth_user}:{config.auth_pass}".encode()
+        ).decode()
+        headers["Authorization"] = f"Basic {credentials}"
+
+    base_url = config.blindbit_url.rstrip("/")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            utxos_resp = await client.get(f"{base_url}/utxos", headers=headers)
+            height_resp = await client.get(f"{base_url}/height", headers=headers)
+
+            if utxos_resp.status_code != 200:
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_GATEWAY,
+                    detail=f"blindbit-scan /utxos returned {utxos_resp.status_code}",
+                )
+
+            return {
+                "utxos": utxos_resp.json(),
+                "height": height_resp.json() if height_resp.status_code == 200 else None,
+            }
+
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_GATEWAY,
+            detail=f"Could not connect to blindbit-scan at {base_url}",
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=HTTPStatus.GATEWAY_TIMEOUT,
+            detail="blindbit-scan timed out",
+        )
 
 #############################ADDRESSES##########################
 

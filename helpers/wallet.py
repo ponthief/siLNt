@@ -38,7 +38,7 @@ def encode_silent_payment_address(B_scan: Point, B_m: Point, hrp: str = 'tsp', v
         raise ValueError('ERROR: Invalid data.')
     return ret
 
-def generate_silent_wallet_address(mnemonic) -> tuple:
+def generate_silent_wallet_address(mnemonic) -> tuple:    
     seed = get_seed(mnemonic)
     key_material = generate_hardened_keys(seed)       
     # Receiver's scan and spend public key 

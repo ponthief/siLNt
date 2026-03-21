@@ -40,8 +40,7 @@ window.app = Vue.createApp({
       network: null,
 
       showEnterSignedPsbt: false,
-      signedBase64Psbt: null,
-
+      signedBase64Psbt: null,      
       connectedDeviceType: null
     }
   },
@@ -53,101 +52,10 @@ window.app = Vue.createApp({
         hostname += '/testnet'
       }
       return hostname
-    },
-    signerDevice: function () {
-      if (this.connectedDeviceType === 'trezor-device') {
-        return this.$refs.trezorSigner
-      }
-      return this.$refs.serialSigner
-    }
+    }    
   },
 
   methods: {
-    updateAmountForAddress: async function (addressData, amount = 0) {
-      try {
-        const wallet = this.g.user.wallets[0]
-        addressData.amount = amount
-        if (!addressData.isChange) {
-          const addressWallet = this.walletAccounts.find(
-            w => w.id === addressData.wallet
-          )
-          if (
-            addressWallet &&
-            addressWallet.address_no < addressData.addressIndex
-          ) {
-            addressWallet.address_no = addressData.addressIndex
-          }
-        }
-
-        // todo: account deleted
-        await LNbits.api.request(
-          'PUT',
-          `/watchonly/api/v1/address/${addressData.id}`,
-          wallet.adminkey,
-          {amount}
-        )
-      } catch (err) {
-        addressData.error = 'Failed to refresh amount for address'
-        this.$q.notify({
-          type: 'warning',
-          message: `Failed to refresh amount for address ${addressData.address}`,
-          timeout: 10000
-        })
-        LNbits.utils.notifyApiError(err)
-      }
-    },
-    updateNoteForAddress: async function ({addressId, note}) {
-      try {
-        const wallet = this.g.user.wallets[0]
-        await LNbits.api.request(
-          'PUT',
-          `/watchonly/api/v1/address/${addressId}`,
-          wallet.adminkey,
-          {note}
-        )
-        const updatedAddress =
-          this.addresses.find(a => a.id === addressId) || {}
-        updatedAddress.note = note
-      } catch (err) {
-        LNbits.utils.notifyApiError(err)
-      }
-    },
-
-    //################### ADDRESS HISTORY ###################
-    addressHistoryFromTxs: function (addressData, txs) {
-      const addressHistory = []
-      txs.forEach(tx => {
-        const sent = tx.vin
-          .filter(
-            vin => vin.prevout.scriptpubkey_address === addressData.address
-          )
-          .map(vin => mapInputToSentHistory(tx, addressData, vin))
-
-        const received = tx.vout
-          .filter(vout => vout.scriptpubkey_address === addressData.address)
-          .map(vout => mapOutputToReceiveHistory(tx, addressData, vout))
-        addressHistory.push(...sent, ...received)
-      })
-      return addressHistory
-    },
-
-    markSameTxAddressHistory: function () {
-      this.history
-        .filter(s => s.sent)
-        .forEach((el, i, arr) => {
-          if (el.isSubItem) return
-
-          const sameTxItems = arr.slice(i + 1).filter(e => e.txId === el.txId)
-          if (!sameTxItems.length) return
-          sameTxItems.forEach(e => {
-            e.isSubItem = true
-          })
-
-          el.totalAmount =
-            el.amount + sameTxItems.reduce((t, e) => (t += e.amount || 0), 0)
-          el.sameTxItems = sameTxItems
-        })
-    },
 
     //################### PAYMENT ###################
 
@@ -181,71 +89,59 @@ window.app = Vue.createApp({
     },
 
     //################### UTXOs ###################
-    scanAllAddresses: async function () {
-      await this.refreshAddresses()
-      this.history = []
-      let addresses = this.addresses
-      this.utxos.data = []
-      this.utxos.total = 0
-      // Loop while new funds are found on the gap adresses.
-      // Use 1000 limit as a safety check (scan 20 000 addresses max)
-      for (let i = 0; i < 1000 && addresses.length; i++) {
-        await this.updateUtxosForAddresses(addresses)
-        const oldAddresses = this.addresses.slice()
-        await this.refreshAddresses()
-        const newAddresses = this.addresses.slice()
-        // check if gap addresses have been extended
-        addresses = newAddresses.filter(
-          newAddr => !oldAddresses.find(oldAddr => oldAddr.id === newAddr.id)
-        )
-        if (addresses.length) {
-          this.$q.notify({
-            type: 'positive',
-            message: 'Funds found! Scanning for more...',
-            timeout: 10000
-          })
-        }
-      }
-    },
-    scanAddressWithAmount: async function () {
-      this.utxos.data = []
-      this.utxos.total = 0
-      this.history = []
-      const addresses = this.addresses.filter(a => a.hasActivity)
-      await this.updateUtxosForAddresses(addresses)
-    },
-    scanAddress: async function (addressData) {
-      this.updateUtxosForAddresses([addressData])
-      this.$q.notify({
-        type: 'positive',
-        message: 'Address Rescanned',
-        timeout: 10000
-      })
-    },
-    refreshAddresses: async function () {
-      if (!this.walletAccounts) return
-      this.addresses = []
-      for (const {id, type} of this.walletAccounts) {
-        const newAddresses = await this.getAddressesForWallet(id)
-        const uniqueAddresses = newAddresses.filter(
-          newAddr => !this.addresses.find(a => a.address === newAddr.address)
-        )
-
-        const lastActiveAddress =
-          uniqueAddresses.filter(a => !a.isChange && a.hasActivity).pop() || {}
-
-        uniqueAddresses.forEach(a => {
-          a.expanded = false
-          a.accountType = type
-          a.gapLimitExceeded =
-            !a.isChange &&
-            a.addressIndex >
-              lastActiveAddress.addressIndex + DEFAULT_RECEIVE_GAP_LIMIT
+    scanSilentPayAddress: async function () {
+      if (!this.config.blindbit_url) {
+        this.$q.notify({
+          type: 'warning',
+          message: 'BlindBit Scan URL not configured. Open Settings to set it.',
+          timeout: 10000
         })
-        this.addresses.push(...uniqueAddresses)
+        return
       }
-      this.$emit('update:addresses', this.addresses)
-    },
+      try {
+        const {data} = await LNbits.api.request(
+          'POST',
+          '/silnt/api/v1/scan',
+          this.g.user.wallets[0].inkey,
+          {
+            blindbit_url: this.blindbit_url,
+            auth_user: this.blindbit.user,
+            auth_pass: this.blindbit.pass
+          }
+        )
+
+        // Map blindbit UTXOs into the utxos list
+        this.utxos.data = (data.utxos || []).map(u => ({
+          txid: u.txid,          
+          amount: u.amount,          
+          utxo_state: u.utxo_state,
+          label: u.label,
+          timestamp: u.timestamp
+        }))
+        this.utxos.total = this.utxos.data.reduce(
+          (total, u) => total + (u.amount || 0), 0
+        )
+
+        const height = data.height?.height
+        this.$q.notify({
+          type: 'positive',
+          message: `Scan complete. ${this.utxos.data.length} UTXO(s) found.` +
+            (height ? ` Scanned to block ${height}.` : ''),
+          timeout: 10000
+        })
+        this.tab = 'utxos'
+      } catch (err) {
+        this.$q.notify({
+          type: 'warning',
+          message: 'Failed to connect to blindbit-scan',
+          timeout: 10000
+        })
+        LNbits.utils.notifyApiError(err)
+      } finally {
+        this.scan.scanning = false
+        this.scan.scanIndex = 1
+      }
+    },    
     getAddressesForWallet: async function (walletId) {
       try {
         const {data} = await LNbits.api.request(
@@ -263,67 +159,6 @@ window.app = Vue.createApp({
         LNbits.utils.notifyApiError(error)
       }
       return []
-    },
-    updateUtxosForAddresses: async function (addresses = []) {
-      this.scan = {scanning: true, scanCount: addresses.length, scanIndex: 0}
-
-      try {
-        for (addrData of addresses) {
-          const addressHistory = await this.getAddressTxsDelayed(addrData)
-          // remove old entries
-          this.history = this.history.filter(
-            h => h.address !== addrData.address
-          )
-
-          // add new entries
-          this.history.push(...addressHistory)
-          this.history.sort((a, b) => (!a.height ? -1 : b.height - a.height))
-          this.markSameTxAddressHistory()
-
-          if (addressHistory.length) {
-            // search only if it ever had any activity
-            const utxos = await this.getAddressTxsUtxoDelayed(addrData.address)
-            this.updateUtxosForAddress(addrData, utxos)
-          }
-
-          this.scan.scanIndex++
-        }
-      } catch (error) {
-        console.error(error)
-        this.$q.notify({
-          type: 'warning',
-          message: 'Failed to scan addresses',
-          timeout: 10000
-        })
-      } finally {
-        this.scan.scanning = false
-      }
-    },
-    updateUtxosForAddress: function (addressData, utxos = []) {
-      const wallet =
-        this.walletAccounts.find(w => w.id === addressData.wallet) || {}
-
-      const newUtxos = utxos.map(utxo =>
-        mapAddressDataToUtxo(wallet, addressData, utxo)
-      )
-      // remove old utxos
-      this.utxos.data = this.utxos.data.filter(
-        u => u.address !== addressData.address
-      )
-      // add new utxos
-      this.utxos.data.push(...newUtxos)
-      if (utxos.length) {
-        this.utxos.data.sort((a, b) => b.sort - a.sort)
-        this.utxos.total = this.utxos.data.reduce(
-          (total, y) => (total += y?.amount || 0),
-          0
-        )
-      }
-      const addressTotal = utxos.reduce(
-        (total, y) => (total += y?.value || 0),
-        0
-      )
-      this.updateAmountForAddress(addressData, addressTotal)
     },
 
     //################### MEMPOOL API ###################
@@ -370,12 +205,7 @@ window.app = Vue.createApp({
       this.tab = tab
       this[`${tab}Filter`] = value
     },
-
-    updateAccounts: async function (accounts) {
-      this.walletAccounts = accounts
-      await this.refreshAddresses()
-      await this.scanAddressWithAmount()
-    },
+    
     showAddressDetails: function (addressData) {
       this.openQrCodeDialog(addressData)
     },
@@ -403,32 +233,17 @@ window.app = Vue.createApp({
       if (!this.fetchedUtxos && addresses.length) {
         this.fetchedUtxos = true
         this.addresses = addresses
-        this.scanAddressWithAmount()
+        // this.scanAddressWithAmount()
       }
     },
     handleBroadcastSuccess: async function (txId) {
       this.tab = 'history'
       this.searchInTab({tab: 'history', value: txId})
       this.showPayment = false
-      await this.refreshAddresses()
-      await this.scanAddressWithAmount()
-    },
-    handleDeviceConnected: async function (deviceType) {
-      this.connectedDeviceType = deviceType
-    }
+      // await this.refreshAddresses()
+      // await this.scanAddressWithAmount()
+    },    
   },
-  created: async function () {
-    if (this.g.user.wallets.length) {
-      await this.refreshAddresses()
-      await this.scanAddressWithAmount()
-    }
-
-    await TrezorConnect.init({
-      lazyLoad: true, // this param will prevent iframe injection until TrezorConnect.method will be called
-      manifest: {
-        email: 'vlad@lnbits.com',
-        appUrl: 'http://lnbits.com'
-      }
-    })
+  created: async function () {       
   }
 })

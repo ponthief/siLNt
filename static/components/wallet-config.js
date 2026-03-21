@@ -20,6 +20,9 @@ window.app.component('wallet-config', {
       },
       set(value) {
         value.isLoaded = true
+        // Ensure blindbit auth fields are always present
+        value.blindbit_user = value.blindbit_user || ''
+        value.blindbit_pass = value.blindbit_pass || ''
         this.internalConfig = JSON.parse(JSON.stringify(value))
         this.$emit(
           'update:config-data',
@@ -29,15 +32,12 @@ window.app.component('wallet-config', {
     }
   },
 
-  methods: {
-    satBtc(val, showUnit = true) {
-      return satOrBtc(val, showUnit, this.config.sats_denominated)
-    },
+  methods: {    
     updateConfig: async function () {
       try {
         const {data} = await LNbits.api.request(
           'PUT',
-          '/watchonly/api/v1/config',
+          '/silnt/api/v1/config',
           this.adminkey,
           this.config
         )
@@ -51,7 +51,7 @@ window.app.component('wallet-config', {
       try {
         const {data} = await LNbits.api.request(
           'GET',
-          '/watchonly/api/v1/config',
+          '/silnt/api/v1/config',
           this.adminkey
         )
         this.config = data
