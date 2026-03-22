@@ -119,7 +119,7 @@ window.app.component('wallet-list', {
       if (data.hr_address) {
         const valid = await this.validateBip353(data.hr_address)
         if (!valid) {
-          this.showCreating = false
+          this.showUpdating = false
           return
         }
       }          
@@ -303,7 +303,7 @@ window.app.component('wallet-list', {
     // todo: bad. base.js not present in custom components
     copyText: function (text, message, position) {
       var notify = this.$q.notify
-      Quasar.utils.copyToClipboard(text).then(function () {
+      Quasar.copyToClipboard(text).then(function () {
         notify({
           message: message || 'Copied to clipboard!',
           position: position || 'bottom'
