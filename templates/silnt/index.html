@@ -21,24 +21,7 @@
     >
     </wallet-list>
 
-    <q-card>
-      <div class="row q-pt-sm q-px-md q-gutter-sm items-center">
-        <div class="col-md-5 col-sm-12">
-          <q-input
-            dense
-            outlined
-            v-model="blindbit.url"
-            label="BlindBit Scan URL"
-            placeholder="http://localhost:8888"
-          ></q-input>
-        </div>
-        <div class="col-md-3 col-sm-6">
-          <q-input dense outlined v-model="blindbit.user" label="Auth User (optional)"></q-input>
-        </div>
-        <div class="col-md-3 col-sm-6">
-          <q-input dense outlined v-model="blindbit.pass" label="Auth Pass (optional)" type="password"></q-input>
-        </div>
-      </div>
+    <q-card>      
       <div class="row q-pt-sm q-pb-sm items-center no-wrap q-mb-md">
         <div class="col-md-3 col-sm-5 q-pl-md">
           <q-btn
@@ -46,17 +29,10 @@
             class="btn-full"
             outline
             @click="scanSilentPayAddress"
-            :disabled="scan.scanning == true || showPayment"
+            :disabled="showPayment"
             >Scan Blockchain</q-btn
           >
-        </div>
-        <div class="col-md-6 col-sm-2 q-pl-md">
-          <q-spinner
-            v-if="scan.scanning == true"
-            color="primary"
-            size="2.55em"
-          ></q-spinner>
-        </div>
+        </div>        
         <div class="col-md-3 col-sm-5 q-pr-md">
           <q-btn-dropdown
             v-if="!showPayment"
@@ -99,16 +75,7 @@
             >Back</q-btn
           >
         </div>
-      </div>
-
-      <div v-if="scan.scanning == true">
-        <q-linear-progress
-          :value="scan.scanIndex / scan.scanCount"
-          size="10px"
-          color="primary"
-          class="q-mt-sm"
-        ></q-linear-progress>
-      </div>
+      </div>      
     </q-card>
 
     <q-card v-if="config.isLoaded">
@@ -194,9 +161,9 @@
 
 {% endblock %} {% block vue_templates %}
 
-<!-- <template id="wallet-config"
+<template id="wallet-config"
   >{% include("silnt/components/wallet-config.html") %}</template
-> -->
+>
 <template id="utxo-list"
   >{% include("silnt/components/utxo-list.html") %}</template
 >
@@ -235,7 +202,7 @@
 <script src="{{ static_url_for('silnt/static', 'js/tables.js') }}"></script>
 <script src="{{ static_url_for('silnt/static', 'js/map.js') }}"></script>
 <script src="{{ static_url_for('silnt/static', 'js/utils.js') }}"></script>
-<script src="{{ static_url_for('silnt/static', 'js/bip39-word-list.js') }}"></script> -->
+<script src="{{ static_url_for('silnt/static', 'js/bip39-word-list.js') }}"></script>
 
 <script src="{{ static_url_for('silnt/static', 'js/index.js') }}"></script>
 

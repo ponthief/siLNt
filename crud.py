@@ -110,7 +110,7 @@ async def get_blindbit_config() -> BlindbitConfig:
 
 
 async def update_blindbit_config(config: BlindbitConfig) -> BlindbitConfig:
-    json_data = config.model_dump_json()
+    json_data = config.json()
     existing = await db.fetchone(
         "SELECT id FROM silnt.blindbit_config WHERE id = :id",
         {"id": BLINDBIT_CONFIG_ID},

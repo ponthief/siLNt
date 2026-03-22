@@ -158,9 +158,8 @@ async def api_update_blindbit_config(
     dependencies=[Depends(require_invoice_key)],
 )
 async def api_scan_blockchain():
-    blindbit = await get_blindbit_config()
-
-    if not blindbit.blindbit_endpoint:
+    blindbit = await get_blindbit_config()    
+    if not blindbit.blindbit_url:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
             detail="BlindBit endpoint not configured. An admin must set it first.",
@@ -173,8 +172,7 @@ async def api_scan_blockchain():
         ).decode()
         headers["Authorization"] = f"Basic {credentials}"
 
-    base_url = blindbit.blindbit_endpoint.rstrip("/")
-
+    base_url = blindbit.blindbit_url.rstrip("/")    
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             utxos_resp = await client.get(f"{base_url}/utxos", headers=headers)

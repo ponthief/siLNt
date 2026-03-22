@@ -6,8 +6,8 @@ from pydantic import BaseModel
 
 class BlindbitConfig(BaseModel):
     blindbit_url: str = ""
-    auth_user: str = ""
-    auth_pass: str = ""
+    blindbit_user: str = ""
+    blindbit_pass: str = ""
     
 class CreateWallet(BaseModel):
     mnemonic: str = Query("")

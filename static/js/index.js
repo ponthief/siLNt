@@ -8,10 +8,11 @@ window.app = Vue.createApp({
   mixins: [window.windowMixin],
   data() {
     return {
-      
-      currentAddress: null,
-
-      tab: 'addresses',
+      blindbit: {
+        url: '',
+        user: '',
+        pass: ''
+      },      
 
       config: {sats_denominated: true},
 
@@ -22,10 +23,7 @@ window.app = Vue.createApp({
       ...tables,
       ...tableData,
 
-      walletAccounts: [],
-      addresses: [],
-      history: [],
-      historyFilter: '',
+      walletAccounts: [],      
 
       showAddress: false,
       addressNote: '',
@@ -39,15 +37,7 @@ window.app = Vue.createApp({
       connectedDeviceType: null
     }
   },
-  computed: {
-    mempoolHostname: function () {
-      if (!this.config.isLoaded) return
-      let hostname = new URL(this.config.mempool_endpoint).hostname
-      if (this.config.network === 'Testnet') {
-        hostname += '/testnet'
-      }
-      return hostname
-    }    
+  computed: {    
   },
 
   methods: {
@@ -152,42 +142,8 @@ window.app = Vue.createApp({
         LNbits.utils.notifyApiError(error)
       }
       return []
-    },
-
-    //################### MEMPOOL API ###################
-    getAddressTxsDelayed: async function (addrData) {
-      const accounts = this.walletAccounts
-      const {
-        bitcoin: {addresses: addressesAPI}
-      } = mempoolJS({
-        hostname: this.mempoolHostname
-      })
-      const fn = async () => {
-        if (!accounts.find(w => w.id === addrData.wallet)) return []
-        return addressesAPI.getAddressTxs({
-          address: addrData.address
-        })
-      }
-      const addressTxs = await retryWithDelay(fn)
-      return this.addressHistoryFromTxs(addrData, addressTxs)
-    },
-
-    getAddressTxsUtxoDelayed: async function (address) {
-      const endpoint = this.mempoolHostname
-      const {
-        bitcoin: {addresses: addressesAPI}
-      } = mempoolJS({
-        hostname: endpoint
-      })
-
-      const fn = async () => {
-        if (endpoint !== this.mempoolHostname) return []
-        return addressesAPI.getAddressTxsUtxo({
-          address
-        })
-      }
-      return retryWithDelay(fn)
-    },
+    },    
+    
 
     openQrCodeDialog: function (addressData) {
       this.currentAddress = addressData
