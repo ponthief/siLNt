@@ -87,14 +87,8 @@ async def api_wallet_create(
             (ew for ew in wallets if ew.sp_address == sp_address and ew.network == new_wallet.network),
             None,
         )
-        if existing_wallet:
-            # if data.hr_address and data.hr_address != existing_wallet.hr_address:
-            #     await update_hr_address(existing_wallet.id, data.hr_address)
-            # if data.last_height and data.last_height != existing_wallet.last_height:
-            #     await update_last_height(existing_wallet.id, int(data.last_height))
-            # else:
-            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=f"Wallet '{data.title}' already exists!")
-            # raise ValueError(f"Wallet '{data.title}' already exists!")            
+        if existing_wallet:           
+            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=f"Silent Payment Wallet already exists!")                       
         new_wallet.scan_secret = scan_secret
         new_wallet.spend_key = spend_key
         new_wallet.sp_address = sp_address
