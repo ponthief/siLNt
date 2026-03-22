@@ -15,7 +15,8 @@
       :inkey="g.user.wallets[0].inkey"
       :sats-denominated="config.sats_denominated"
       :network="config.network"
-      :addresses="addresses"      
+      :addresses="addresses"
+      :scanned-utxos="utxos.data"     
       @accounts-update="updateAccounts"
       @new-receive-address="showAddressDetailsWithConfirmation"
     >

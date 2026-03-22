@@ -8,7 +8,8 @@ window.app.component('wallet-list', {
     'inkey',
     'sats-denominated',
     'addresses',
-    'network'    
+    'network',
+    'scanndUtxos'   
   ],
   data: function () {
     return {
@@ -66,7 +67,31 @@ window.app.component('wallet-list', {
       }      
     }
   },  
+  watch: {
+  scannedUtxos: {
+    deep: true,
+    handler(utxos) {
+      if (!utxos || !utxos.length) return
+      
+      // Sum all utxo amounts as new balance
+      const newBalance = utxos.reduce((sum, u) => sum + (u.amount || 0), 0)
+      
+      // Only update each wallet if balance actually changed
+      this.walletAccounts = this.walletAccounts.map(wallet => {
+        if (wallet.balance === newBalance) return wallet
+        return { ...wallet, balance: newBalance }
+      })
 
+      // Persist the updated balances to the backend
+      this.walletAccounts.forEach(async wallet => {
+        const original = wallet.balance
+        if (original !== newBalance) {
+          await this.updateWalletBalance(wallet.id, newBalance)
+        }
+      })
+    }
+  }
+  },
   methods: {
     satBtc(val, showUnit = true) {
       return satOrBtc(val, showUnit, this.satsDenominated)
@@ -84,7 +109,7 @@ window.app.component('wallet-list', {
       const data = _.omit(this.updateDialog.data, 'wallet')
       data.network = this.network           
       if (data.id) {
-        await this.updateHRAddressHeight(data)
+        await this.updateWalletDetails(data)
       }      
       this.showUpdating = false
     },
@@ -94,47 +119,47 @@ window.app.component('wallet-list', {
         const response = await LNbits.api.request(
           'POST',
           '/silnt/api/v1/wallet',
-          this.adminkey,
+          this.inkey,
           data
         )        
         this.walletAccounts.push(mapWalletAccount(response.data))
         this.formDialog.show = false
 
         await this.refreshWalletAccounts()
-      } catch (error) {
-        LNbits.utils.notifyApiError(error)
-      }      
-          Quasar.Notify.create({
+        Quasar.Notify.create({
             type: 'positive',
             message: 'Silent Payment Wallet Added.'
       })
+      } catch (error) {
+        LNbits.utils.notifyApiError(error)
+      }                
     },
     updateWalletDialog(walletAccountId) {
       var wallet = _.findWhere(this.walletAccounts, {id: walletAccountId})
       this.updateDialog.data = _.clone(wallet)      
       this.updateDialog.hr_address = this.updateDialog.data.hr_address
       this.updateDialog.last_height = this.updateDialog.data.last_height
+      this.updateDialog.title = this.updateDialog.data.title
       this.updateDialog.show = true
     },
-    updateHRAddressHeight: async function (data) {      
+    updateWalletDetails: async function (data) {      
       try {        
         const response = await LNbits.api.request(
-          'POST',
-          '/silnt/api/v1/wallet' + data.id,
-          this.adminkey,
+          'PUT',
+          '/silnt/api/v1/wallet/' + data.id,
+          this.inkey,
           data
         )            
         this.walletAccounts.push(mapWalletAccount(response.data))
         this.updateDialog.show = false
-
         await this.refreshWalletAccounts()
-      } catch (error) {
-        LNbits.utils.notifyApiError(error)
-      }      
-          Quasar.Notify.create({
+        Quasar.Notify.create({
             type: 'positive',
             message: 'Wallet updated.'
       })
+      } catch (error) {
+        LNbits.utils.notifyApiError(error)
+      }                
     },
     deleteWalletDialog: function (walletAccountId) {
       LNbits.utils
@@ -146,7 +171,7 @@ window.app.component('wallet-list', {
             await LNbits.api.request(
               'DELETE',
               '/silnt/api/v1/wallet/' + walletAccountId,
-              this.adminkey
+              this.inkey
             )
             this.walletAccounts = _.reject(this.walletAccounts, function (obj) {
               return obj.id === walletAccountId
@@ -163,14 +188,17 @@ window.app.component('wallet-list', {
     },
 // ?network=${this.network}
     getSilntWallets: async function () {
+      console.log('inkey:',this.inkey)
       try {
         const {data} = await LNbits.api.request(
           'GET',
           `/silnt/api/v1/wallet`,
           this.inkey
         )        
+        console.log('data:', data)
         return data
       } catch (error) {
+        console.error(error)
         this.$q.notify({
           type: 'warning',
           message: 'Failed to fetch wallets.',
@@ -182,16 +210,30 @@ window.app.component('wallet-list', {
     },
     refreshWalletAccounts: async function () {
       this.walletAccounts = []
-      const wallets = await this.getSilntWallets()      
-      this.walletAccounts = wallets.map(w => mapWalletAccount(w))      
-      // this.$emit('accounts-update', this.walletAccounts)
+      const wallets = await this.getSilntWallets()  
+      console.log('wallets from API:', wallets)    
+      this.walletAccounts = wallets.map(w => mapWalletAccount(w)) 
+      console.log('wallets from API:', this.walletAccounts)     
+      this.$emit('accounts-update', this.walletAccounts)
     },
-    // getBalanceForWallet: function (walletId) {
-    //   const amount = this.addresses
-    //     .filter(a => a.wallet === walletId)
-    //     .reduce((t, a) => t + a.amount || 0, 0)
-    //   return this.satBtc(amount)
-    // },
+    updateWalletBalance: async function (walletId, balance) {
+      try {
+        await LNbits.api.request(
+          'PUT',
+          `/silnt/api/v1/wallet/${walletId}`,
+          this.adminkey,
+          { balance }
+        )
+      } catch (error) {
+        LNbits.utils.notifyApiError(error)
+      }
+    },
+    getBalanceForWallet: function (walletId) {
+      const amount = this.addresses
+        .filter(a => a.wallet === walletId)
+        .reduce((t, a) => t + a.amount || 0, 0)
+      return this.satBtc(amount)
+    },
     closeFormDialog: function () {
       this.formDialog.data = {
         is_unique: false

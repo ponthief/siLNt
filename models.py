@@ -14,7 +14,8 @@ class CreateWallet(BaseModel):
     title: str = Query("")
     network: str = "mainnet"
     hr_address: str = Query("")
-    last_height: str = Query("")     
+    last_height: str = Query("") 
+    balance: Optional[int] = None    
 
 
 class WalletAccount(BaseModel):

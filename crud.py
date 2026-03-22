@@ -56,9 +56,9 @@ async def delete_utxos_for_wallet(wallet_id: str) -> None:
 async def get_sp_address(wallet_id: str) -> str:
     return await db.fetchall(
         """
-        SELECT sp_address FROM silnt.wallets WHERE wallet = :wallet        
+        SELECT sp_address FROM silnt.wallets WHERE id = :wallet_id        
         """,
-        {"wallet": wallet_id},
+        {"wallet_id": wallet_id},
         str,
     )
 
@@ -66,9 +66,9 @@ async def get_sp_address(wallet_id: str) -> str:
 async def get_hr_address(wallet_id: str) -> str:
     return await db.fetchall(
         """
-        SELECT hr_address FROM silnt.wallets WHERE wallet = :wallet        
+        SELECT hr_address FROM silnt.wallets WHERE id = :wallet_id        
         """,
-        {"wallet": wallet_id},
+        {"wallet_id": wallet_id},
         str,
     )
 
@@ -96,6 +96,27 @@ async def update_last_height(wallet_id: str, last_height: int) -> Optional[Walle
         WalletAccount,
     )
 
+async def update_balance(wallet_id: str, balance: int) -> Optional[WalletAccount]:
+    await db.execute(
+        "UPDATE silnt.wallets SET balance = :bal WHERE id = :wid",
+        {"bal": balance, "wid": wallet_id},
+    )
+    return await db.fetchone(
+        "SELECT * FROM silnt.wallets WHERE id = :wid",
+        {"wid": wallet_id},
+        WalletAccount,
+    )
+
+async def update_title(wallet_id: str, title: str) -> Optional[WalletAccount]:
+    await db.execute(
+        "UPDATE silnt.wallets SET title = :ttl WHERE id = :wid",
+        {"ttl": title, "wid": wallet_id},
+    )
+    return await db.fetchone(
+        "SELECT * FROM silnt.wallets WHERE id = :wid",
+        {"wid": wallet_id},
+        WalletAccount,
+    )
 
 # ── Global admin-only blindbit config ───────────────────────────────────────
 

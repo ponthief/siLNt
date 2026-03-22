@@ -21,6 +21,8 @@ from .crud import (
     get_hr_address,
     update_hr_address,
     update_last_height,
+    update_title,
+    update_balance,
     get_silnt_wallet,
     get_blindbit_config,
     update_blindbit_config,
@@ -39,7 +41,7 @@ silnt_api_router = APIRouter()
 
 @silnt_api_router.get("/api/v1/wallet", status_code=HTTPStatus.OK)
 async def api_wallets_retrieve(
-    network: str = Query("Mainnet"),
+    network: str = Query("mainnet"),
     key_info: WalletTypeInfo = Depends(require_invoice_key),
 ) -> list[WalletAccount]:
     return await get_silnt_wallets(key_info.wallet.user, network)
@@ -59,7 +61,7 @@ async def api_wallet_retrieve(wallet_id: str) -> WalletAccount:
 
 @silnt_api_router.post("/api/v1/wallet", status_code=HTTPStatus.OK)
 async def api_wallet_create(
-    data: CreateWallet, key_info: WalletTypeInfo = Depends(require_admin_key)
+    data: CreateWallet, key_info: WalletTypeInfo = Depends(require_invoice_key)
 ) -> str:
     try:
         new_wallet = WalletAccount(
@@ -86,13 +88,13 @@ async def api_wallet_create(
             None,
         )
         if existing_wallet:
-            if data.hr_address and data.hr_address != existing_wallet.hr_address:
-                await update_hr_address(existing_wallet.id, data.hr_address)
-            if data.last_height and data.last_height != existing_wallet.last_height:
-                await update_last_height(existing_wallet.id, data.last_height)
-            else:
-                raise ValueError(f"Wallet '{data.title}' already exists!")
-            return ''
+            # if data.hr_address and data.hr_address != existing_wallet.hr_address:
+            #     await update_hr_address(existing_wallet.id, data.hr_address)
+            # if data.last_height and data.last_height != existing_wallet.last_height:
+            #     await update_last_height(existing_wallet.id, int(data.last_height))
+            # else:
+            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=f"Wallet '{data.title}' already exists!")
+            # raise ValueError(f"Wallet '{data.title}' already exists!")            
         new_wallet.scan_secret = scan_secret
         new_wallet.spend_key = spend_key
         new_wallet.sp_address = sp_address
@@ -102,9 +104,9 @@ async def api_wallet_create(
     return ''
 
 
-@silnt_api_router.post("/api/v1/wallet{wallet_id}", status_code=HTTPStatus.OK)
+@silnt_api_router.put("/api/v1/wallet/{wallet_id}", status_code=HTTPStatus.OK)
 async def api_wallet_update(
-    wallet_id: str, data: CreateWallet, key_info: WalletTypeInfo = Depends(require_admin_key)
+    wallet_id: str, data: CreateWallet, key_info: WalletTypeInfo = Depends(require_invoice_key)
 ) -> str:
     try:
         wallet = await get_silnt_wallet(wallet_id)
@@ -114,13 +116,15 @@ async def api_wallet_update(
             await update_hr_address(wallet.id, data.hr_address)
         if data.last_height and int(data.last_height) != wallet.last_height:
             await update_last_height(wallet.id, int(data.last_height))
+        if data.title and data.title != wallet.title:
+            await update_title(wallet.id, data.title)
     except Exception as exc:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(exc)) from exc
     return ''
 
 
 @silnt_api_router.delete(
-    "/api/v1/wallet/{wallet_id}", dependencies=[Depends(require_admin_key)]
+    "/api/v1/wallet/{wallet_id}", dependencies=[Depends(require_invoice_key)]
 )
 async def api_wallet_delete(wallet_id: str):
     wallet = await get_silnt_wallet(wallet_id)

@@ -7,7 +7,7 @@ window.app.component('wallet-config', {
   emits: ['update:config-data'],
   data: function () {
     return {
-      networkOptions: ['Mainnet', 'Testnet'],
+      networkOptions: ['mainnet', 'testnet'],
       internalConfig: {},
       show: false
     }
