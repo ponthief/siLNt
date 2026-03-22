@@ -118,6 +118,8 @@ async def api_wallet_update(
             await update_last_height(wallet.id, int(data.last_height))
         if data.title and data.title != wallet.title:
             await update_title(wallet.id, data.title)
+        if data.balance is not None and data.balance != wallet.balance:
+            await update_balance(wallet.id, data.balance)
     except Exception as exc:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(exc)) from exc
     return ''

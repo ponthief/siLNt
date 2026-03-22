@@ -9,7 +9,7 @@ window.app.component('wallet-list', {
     'sats-denominated',
     'addresses',
     'network',
-    'scanndUtxos'   
+    'scannedUtxos'   
   ],
   data: function () {
     return {
@@ -70,28 +70,25 @@ window.app.component('wallet-list', {
   watch: {
   scannedUtxos: {
     deep: true,
-    handler(utxos) {
-      if (!utxos || !utxos.length) return
-      
-      // Sum all utxo amounts as new balance
-      const newBalance = utxos.reduce((sum, u) => sum + (u.amount || 0), 0)
-      
-      // Only update each wallet if balance actually changed
-      this.walletAccounts = this.walletAccounts.map(wallet => {
-        if (wallet.balance === newBalance) return wallet
-        return { ...wallet, balance: newBalance }
-      })
+    handler(result) {      
+      if (!result || !result.utxos || !result.utxos.length) return
 
-      // Persist the updated balances to the backend
-      this.walletAccounts.forEach(async wallet => {
-        const original = wallet.balance
-        if (original !== newBalance) {
-          await this.updateWalletBalance(wallet.id, newBalance)
-        }
+      const newBalance = result.utxos
+          .filter(u => u.utxo_state === 'unspent')         
+          .reduce((sum, u) => sum + (u.amount || 0), 0)      
+      this.walletAccounts.forEach(async wallet => {        
+        // Only update if balance actually changed
+        if (newBalance === wallet.balance) return
+
+        // Update backend first
+        await this.updateWalletBalance(wallet.id, newBalance)
+
+        // Then update local state reactively
+        wallet.balance = newBalance
       })
     }
   }
-  },
+},
   methods: {
     satBtc(val, showUnit = true) {
       return satOrBtc(val, showUnit, this.satsDenominated)
@@ -114,8 +111,7 @@ window.app.component('wallet-list', {
       this.showUpdating = false
     },
     createWalletAccount: async function (data) {
-      try { 
-        console.log(data)     
+      try {             
         const response = await LNbits.api.request(
           'POST',
           '/silnt/api/v1/wallet',
@@ -187,18 +183,15 @@ window.app.component('wallet-list', {
         })
     },
 // ?network=${this.network}
-    getSilntWallets: async function () {
-      console.log('inkey:',this.inkey)
+    getSilntWallets: async function () {      
       try {
         const {data} = await LNbits.api.request(
           'GET',
           `/silnt/api/v1/wallet`,
           this.inkey
         )        
-        console.log('data:', data)
         return data
-      } catch (error) {
-        console.error(error)
+      } catch (error) {        
         this.$q.notify({
           type: 'warning',
           message: 'Failed to fetch wallets.',
@@ -210,18 +203,16 @@ window.app.component('wallet-list', {
     },
     refreshWalletAccounts: async function () {
       this.walletAccounts = []
-      const wallets = await this.getSilntWallets()  
-      console.log('wallets from API:', wallets)    
-      this.walletAccounts = wallets.map(w => mapWalletAccount(w)) 
-      console.log('wallets from API:', this.walletAccounts)     
+      const wallets = await this.getSilntWallets()           
+      this.walletAccounts = wallets.map(w => mapWalletAccount(w))      
       this.$emit('accounts-update', this.walletAccounts)
     },
     updateWalletBalance: async function (walletId, balance) {
-      try {
+      try {        
         await LNbits.api.request(
           'PUT',
           `/silnt/api/v1/wallet/${walletId}`,
-          this.adminkey,
+          this.inkey,
           { balance }
         )
       } catch (error) {

@@ -31,7 +31,7 @@ window.app = Vue.createApp({
       fetchedUtxos: false,
       utxosFilter: '',
       network: null,
-
+      lastScanResult: null,
       showEnterSignedPsbt: false,
       signedBase64Psbt: null,      
       connectedDeviceType: null
@@ -96,18 +96,23 @@ window.app = Vue.createApp({
         )
 
         // Map blindbit UTXOs into the utxos list
-        this.utxos.data = (data.utxos || []).map(u => ({
+        const mappedUtxos = (data.utxos || []).map(u => ({
           txid: u.txid,          
           amount: u.amount,          
           utxo_state: u.utxo_state,
           label: u.label,
           timestamp: u.timestamp
         }))
-        this.utxos.total = this.utxos.data.reduce(
+        this.utxos.data = mappedUtxos
+        this.utxos.total = mappedUtxos.filter(u => u.utxo_state === 'unspent').reduce(
           (total, u) => total + (u.amount || 0), 0
         )
 
         const height = data.height?.height
+        this.lastScanResult = {
+          utxos: mappedUtxos,
+          timestamp: Date.now()
+        }
         this.$q.notify({
           type: 'positive',
           message: `Scan complete. ${this.utxos.data.length} UTXO(s) found.` +

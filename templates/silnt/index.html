@@ -16,7 +16,7 @@
       :sats-denominated="config.sats_denominated"
       :network="config.network"
       :addresses="addresses"
-      :scanned-utxos="utxos.data"     
+      :scanned-utxos="lastScanResult"     
       @accounts-update="updateAccounts"
       @new-receive-address="showAddressDetailsWithConfirmation"
     >
