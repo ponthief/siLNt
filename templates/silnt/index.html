@@ -14,81 +14,29 @@
       :adminkey="g.user.wallets[0].adminkey"
       :inkey="g.user.wallets[0].inkey"
       :sats-denominated="config.sats_denominated"
-      :network="config.network"
-      :addresses="addresses"
+      :network="config.network"      
       :scanned-utxos="lastScanResult"     
-      @accounts-update="updateAccounts"
-      @new-receive-address="showAddressDetailsWithConfirmation"
+      @accounts-update="updateAccounts"      
+      @scan-wallet="scanSilentPayAddress"
+      @clear-utxos="clearUtxosForWallet"
+      @open-bip353="showBip353Dialog = true"
     >
     </wallet-list>
 
     <q-card>      
-      <div class="row q-pt-sm q-pb-sm items-center no-wrap q-mb-md">
-        <div class="col-md-3 col-sm-5 q-pl-md">
-          <q-btn
-            unelevated
-            class="btn-full"
-            outline
-            @click="scanSilentPayAddress"
-            :disabled="showPayment"
-            >Scan Blockchain</q-btn
-          >
-        </div>
-        <div class="col-md-3 col-sm-4 q-pl-md">
-          <q-btn
-            unelevated
-            class="btn-full"
-            outline
-            icon="travel_explore"
-            @click="showBip353Dialog = true"
-            >Resolve BIP353</q-btn
-          >
-        </div>        
-        <div class="col-md-3 col-sm-4 q-pl-md">
-          <q-btn-dropdown
-            v-if="!showPayment"
-            split
-            unelevated
-            outline
-            label="New Payment"
-            class="btn-full"
-            @click="goToPaymentView"
-          >
-            <q-list>
-              <q-item @click="goToPaymentView" clickable v-close-popup>
-                <q-item-section>
-                  <q-item-label>New Payment</q-item-label>
-                  <q-item-label caption
-                    >Create a new payment by selecting Inputs and
-                    Outputs</q-item-label
-                  >
-                </q-item-section>
-              </q-item>              
-            </q-list>
-          </q-btn-dropdown>
-
-          <q-btn
-            v-if="showPayment"
-            outline
-            color="gray"
-            class="btn-full"
-            @click="showPayment = false"
-            >Back</q-btn
-          >
-        </div>
+      <div class="row q-pt-sm q-pb-sm items-center no-wrap q-mb-md">                       
       </div>      
     </q-card>
 
     <q-card v-if="config.isLoaded">
-      <q-card-section v-show="!showPayment">
+      <q-card-section>
         <q-tabs v-model="tab" no-caps class="bg-dark text-white shadow-2">          
           <q-tab name="utxos" label="UTXOs"></q-tab>
         </q-tabs>
         <q-tab-panels v-model="tab">          
           <q-tab-panel name="utxos">
             <utxo-list
-              :utxos="utxos.data"
-              :mempool-endpoint="mempoolHostname"
+              :utxos="utxos.data"              
               :accounts="walletAccounts"
               :sats-denominated="config.sats_denominated"
               :filter="utxosFilter"
@@ -96,22 +44,7 @@
           </q-tab-panel>
         </q-tab-panels>
       </q-card-section>
-    </q-card>
-    <div v-if="config.isLoaded" class="q-pt-sm">
-      <payment
-        ref="paymentRef"
-        v-show="showPayment"
-        :accounts="walletAccounts"
-        :addresses="addresses"
-        :utxos="utxos.data"
-        :mempool-endpoint="mempoolHostname"
-        :adminkey="g.user.wallets[0].adminkey"        
-        :sats-denominated="config.sats_denominated"
-        :network="config.network"
-        @broadcast-done="handleBroadcastSuccess"
-      ></payment>
-      <!-- todo: no more utxos.data -->
-    </div>
+    </q-card>    
   </div>
 
   <div class="col-12 col-md-5 q-gutter-y-md">
@@ -201,27 +134,7 @@
 <template id="wallet-list"
   >{% include("silnt/components/wallet-list.html") %}</template
 >
-<!-- <template id="address-list"
-  >{% include("silnt/components/address-list.html") %}</template
-> -->
-<template id="my-checkbox"
-  >{% include("silnt/components/my-checkbox.html") %}</template
->
-<!-- <template id="history"
-  >{% include("silnt/components/history.html") %}</template
-> -->
-<!-- <template id="fee-rate"
-  >{% include("silnt/components/fee-rate.html") %}</template
-> -->
-<!-- <template id="seed-input"
-  >{% include("silnt/components/seed-input.html") %}</template
-> -->
-<template id="send-to"
-  >{% include("silnt/components/send-to.html") %}</template
->
-<template id="payment"
-  >{% include("silnt/components/payment.html") %}</template
->
+
 {% endblock %} {% block scripts %} {{ window_vars(user) }}
 <style>
   .btn-full {
@@ -240,14 +153,7 @@
 <script src="{{ static_url_for('silnt/static', 'components/my-checkbox.js') }}"></script>
 <script src="{{ static_url_for('silnt/static', 'components/wallet-config.js') }}"></script>
 <script src="{{ static_url_for('silnt/static', 'components/wallet-list.js') }}"></script>
-<!-- <script src="{{ static_url_for('silnt/static', 'components/address-list.js') }}"></script> -->
-<!-- <script src="{{ static_url_for('silnt/static', 'components/history.js') }}"></script> -->
 <script src="{{ static_url_for('silnt/static', 'components/utxo-list.js') }}"></script>
-<!-- <script src="{{ static_url_for('silnt/static', 'components/fee-rate.js') }}"></script> -->
-<!-- <script src="{{ static_url_for('silnt/static', 'components/seed-input.js') }}"></script> -->
-<script src="{{ static_url_for('silnt/static', 'components/send-to.js') }}"></script>
-<script src="{{ static_url_for('silnt/static', 'components/payment.js') }}"></script>
-<script src="{{ static_url_for('silnt/static', 'js/crypto/noble-secp256k1.js') }}"></script>
 <script src="{{ static_url_for('silnt/static', 'js/crypto/aes.js') }}"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/3.1.2/rollups/aes.js"></script>
 

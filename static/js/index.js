@@ -25,19 +25,10 @@ window.app = Vue.createApp({
       },
       ...tables,
       ...tableData,
-
-      walletAccounts: [],      
-
-      showAddress: false,
-      addressNote: '',
-      showPayment: false,
-      fetchedUtxos: false,
+      walletAccounts: [],            
       utxosFilter: '',
       network: null,
-      lastScanResult: null,
-      showEnterSignedPsbt: false,
-      signedBase64Psbt: null,      
-      connectedDeviceType: null
+      lastScanResult: null      
     }
   },
   computed: {    
@@ -45,39 +36,8 @@ window.app = Vue.createApp({
 
   methods: {
 
-    //################### PAYMENT ###################
-
-    initPaymentData: async function () {
-      if (!this.payment.show) return
-      await this.refreshAddresses()
-    },
-
-    goToPaymentView: async function () {
-      this.showPayment = true
-      await this.initPaymentData()
-    },
-
-    //################### PSBT ###################
-
-    updateSignedPsbt: async function (psbtBase64) {
-      this.$refs.paymentRef.updateSignedPsbt(psbtBase64)
-    },
-
-    updateSignedTx: async function (txHex) {
-      this.$refs.paymentRef.updateSignedTx(txHex)
-    },
-
-    showEnterSignedPsbtDialog: function () {
-      this.signedBase64Psbt = ''
-      this.showEnterSignedPsbt = true
-    },
-
-    checkPsbt: function () {
-      this.$refs.paymentRef.updateSignedPsbt(this.signedBase64Psbt)
-    },
-
     //################### UTXOs ###################
-    scanSilentPayAddress: async function () {
+    scanSilentPayAddress: async function (wallet) {
       if (!this.config.blindbit_url) {
         this.$q.notify({
           type: 'warning',
@@ -104,7 +64,8 @@ window.app = Vue.createApp({
           amount: u.amount,          
           utxo_state: u.utxo_state,
           label: u.label,
-          timestamp: u.timestamp
+          timestamp: u.timestamp,
+          wallet: wallet?.id
         }))
         this.utxos.data = mappedUtxos
         this.utxos.total = mappedUtxos.filter(u => u.utxo_state === 'unspent').reduce(
@@ -169,74 +130,23 @@ window.app = Vue.createApp({
           position: 'bottom'
         })
       })
-    },    
-    getAddressesForWallet: async function (walletId) {
-      try {
-        const {data} = await LNbits.api.request(
-          'GET',
-          '/watchonly/api/v1/addresses/' + walletId,
-          this.g.user.wallets[0].inkey
-        )
-        return data.map(mapAddressesData)
-      } catch (error) {
-        this.$q.notify({
-          type: 'warning',
-          message: `Failed to fetch addresses for wallet with id ${walletId}.`,
-          timeout: 10000
-        })
-        LNbits.utils.notifyApiError(error)
-      }
-      return []
-    },    
-    
+    },        
+    clearUtxosForWallet: function (walletId) {
+      // Check if any displayed UTXOs belong to the deleted wallet
+      const hasUtxos = this.utxos.data.some(u => u.wallet === walletId)
+      if (!hasUtxos) return
 
-    openQrCodeDialog: function (addressData) {
-      this.currentAddress = addressData
-      this.addressNote = addressData.note || ''
-      this.showAddress = true
-    },
-    searchInTab: function ({tab, value}) {
-      this.tab = tab
-      this[`${tab}Filter`] = value
-    },
-    
-    showAddressDetails: function (addressData) {
-      this.openQrCodeDialog(addressData)
-    },
-    showAddressDetailsWithConfirmation: function ({addressData, wallet}) {
-      this.showAddressDetails(addressData)
-      if (this.$refs.serialSigner.isConnected()) {
-        if (this.$refs.serialSigner.isAuthenticated()) {
-          if (wallet.meta?.accountPath) {
-            const branchIndex = addressData.isChange ? 1 : 0
-            const path =
-              wallet.meta.accountPath +
-              `/${branchIndex}/${addressData.addressIndex}`
-            this.$refs.serialSigner.hwwShowAddress(path, addressData.address)
-          }
-        } else {
-          this.$q.notify({
-            type: 'warning',
-            message: 'Please login in order to confirm address on device',
-            timeout: 10000
-          })
-        }
-      }
-    },
-    initUtxos: function (addresses) {
-      if (!this.fetchedUtxos && addresses.length) {
-        this.fetchedUtxos = true
-        this.addresses = addresses
-        // this.scanAddressWithAmount()
-      }
-    },
-    handleBroadcastSuccess: async function (txId) {
-      this.tab = 'history'
-      this.searchInTab({tab: 'history', value: txId})
-      this.showPayment = false
-      // await this.refreshAddresses()
-      // await this.scanAddressWithAmount()
-    },    
+      // Clear UTXOs and reset totals
+      this.utxos.data = []
+      this.utxos.total = 0
+      this.lastScanResult = null
+
+      this.$q.notify({
+        type: 'info',
+        message: 'UTXOs cleared for deleted wallet.',
+        timeout: 5000
+      })
+    },                
   },
   created: async function () {       
   }

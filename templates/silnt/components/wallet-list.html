@@ -1,7 +1,7 @@
 <q-card>
   <q-card-section>
-    <div class="row items-center no-wrap q-mb-md">
-      <div class="col-4">
+    <div class="row items-center no-wrap q-mb-md justify-between">
+      <div class="col-auto">
         <q-btn-dropdown
           split
           unelevated
@@ -20,6 +20,15 @@
             </q-item>           
           </q-list>
         </q-btn-dropdown>
+      </div>
+      <div class="col-auto q-pl-sm">
+        <q-btn
+          unelevated
+          color="primary"
+          icon="travel_explore"
+          label="Resolve BIP353"
+          @click="$emit('open-bip353')"
+        ></q-btn>
       </div>
       <div class="col-4 q-pl-lg"></div>      
     </div>
@@ -63,6 +72,16 @@
             <div v-text="props.row.balance"></div>
           </q-td>          
           <q-td auto-width>
+                 <q-btn
+                  flat
+                  dense
+                  size="xs"
+                  @click="$emit('scan-wallet', props.row)"
+                  icon="radar"
+                  color="teal"
+                >
+                  <q-tooltip>Scan</q-tooltip>
+                </q-btn>
                 <q-btn
                   flat
                   dense
@@ -140,6 +159,7 @@
         v-model.trim="formDialog.data.hr_address"
         type="text"
         label="Human Readable Address"
+        :hint="formDialog.data.hr_address ? 'Will be validated against BIP353 DNS on submit' : ''"
       ><q-tooltip
             anchor="center middle"
             self="center middle"
@@ -154,8 +174,7 @@
           color="primary"
           label="Add Wallet Account"
           :disable="
-                (formDialog.data.hr_address == null && formDialog.data.mnemonic == null) ||
-                formDialog.data.last_height == null || formDialog.data.title == null || showCreating"
+                (formDialog.data.mnemonic == null) || formDialog.data.last_height == null || formDialog.data.title == null || showCreating"
           type="submit"
         >
         </q-btn>
@@ -196,13 +215,14 @@
         v-model.trim="updateDialog.data.hr_address"
         type="text"
         label="Human Readable Address"
+        @update:model-value="val => { if (!val) bip353Valid = true }"
       ></q-input>
       <div class="row q-mt-lg">
         <q-btn
           unelevated
           color="primary"
           label="Update Wallet Account"
-          :disable="showUpdating" 
+          :disable="showUpdating || !bip353Valid" 
           type="submit"
         >
         </q-btn>

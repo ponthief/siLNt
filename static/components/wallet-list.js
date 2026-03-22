@@ -11,6 +11,7 @@ window.app.component('wallet-list', {
     'network',
     'scannedUtxos'   
   ],
+  emits: ['accounts-update', 'scan-wallet', 'clear-utxos', 'open-bip353'],
   data: function () {
     return {
       walletAccounts: [],
@@ -30,7 +31,8 @@ window.app.component('wallet-list', {
           hr_address: '',
           last_height: ''          
         }
-      },            
+      },  
+      bip353Valid: true,          
       showCreating: false,
       showUpdating: false,
       walletsTable: {
@@ -45,7 +47,7 @@ window.app.component('wallet-list', {
           {
             name: 'hr_address',
             align: 'left',
-            label: 'HR Address',
+            label: 'BIP353 Address',
             field: 'hr_address'
           },
           {
@@ -96,7 +98,15 @@ window.app.component('wallet-list', {
     addWalletAccount: async function () {
       this.showCreating = true
       const data = _.omit(this.formDialog.data, 'wallet')
-      data.network = this.network      
+      data.network = this.network
+      // Validate BIP353 hr_address if provided
+      if (data.hr_address) {
+        const valid = await this.validateBip353(data.hr_address)
+        if (!valid) {
+          this.showCreating = false
+          return
+        }
+      }     
       data.mnemonic = CryptoJS.AES.encrypt(data.mnemonic, data.last_height).toString();            
       await this.createWalletAccount(data)      
       this.showCreating = false
@@ -104,7 +114,15 @@ window.app.component('wallet-list', {
     updateWalletAccount: async function () {
       this.showUpdating = true
       const data = _.omit(this.updateDialog.data, 'wallet')
-      data.network = this.network           
+      data.network = this.network
+      // Validate BIP353 hr_address if provided
+      if (data.hr_address) {
+        const valid = await this.validateBip353(data.hr_address)
+        if (!valid) {
+          this.showCreating = false
+          return
+        }
+      }          
       if (data.id) {
         await this.updateWalletDetails(data)
       }      
@@ -137,6 +155,7 @@ window.app.component('wallet-list', {
       this.updateDialog.last_height = this.updateDialog.data.last_height
       this.updateDialog.title = this.updateDialog.data.title
       this.updateDialog.show = true
+      this.bip353Valid = true
     },
     updateWalletDetails: async function (data) {      
       try {        
@@ -173,6 +192,7 @@ window.app.component('wallet-list', {
               return obj.id === walletAccountId
             })
             await this.refreshWalletAccounts()
+            this.$emit('clear-utxos',walletAccountId)
           } catch (error) {
             this.$q.notify({
               type: 'warning',
@@ -219,6 +239,41 @@ window.app.component('wallet-list', {
         LNbits.utils.notifyApiError(error)
       }
     },
+    validateBip353: async function (address) {
+      // Basic email format check first
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+      if (!emailRegex.test(address)) {
+        this.$q.notify({
+          type: 'warning',
+          message: 'BIP353 Address must be in email format (e.g. alice@domain.com)',
+          timeout: 8000
+        })
+        this.bip353Valid = false
+        return false
+      }
+      try {
+        await LNbits.api.request(
+          'GET',
+          `/silnt/api/v1/bip353/resolve?address=${encodeURIComponent(address)}`,
+          this.inkey
+        )
+        this.$q.notify({
+          type: 'positive',
+          message: `BIP353 address verified: ${address}`,
+          timeout: 5000
+        })
+        this.bip353Valid = true
+        return true
+      } catch (error) {
+        this.$q.notify({
+          type: 'negative',
+          message: `BIP353 resolution failed for ${address} — check the address and try again`,
+          timeout: 8000
+        })
+        this.bip353Valid = false
+        return false
+      }
+    },
     getBalanceForWallet: function (walletId) {
       const amount = this.addresses
         .filter(a => a.wallet === walletId)
@@ -238,30 +293,7 @@ window.app.component('wallet-list', {
     getAccountDescription: function (accountType) {
       return getAccountDescription(accountType)
     },
-    openGetFreshAddressDialog: async function (walletId) {
-      const {data} = await LNbits.api.request(
-        'GET',
-        `/silnt/api/v1/address/${walletId}`,
-        this.inkey
-      )
-      const addressData = mapAddressesData(data)
-
-      addressData.note = `Shared on ${currentDateTime()}`
-      const lastActiveAddress =
-        this.addresses
-          .filter(
-            a => a.wallet === addressData.wallet && !a.isChange && a.hasActivity
-          )
-          .pop() || {}
-      addressData.gapLimitExceeded =
-        !addressData.isChange &&
-        addressData.addressIndex >
-          lastActiveAddress.addressIndex + DEFAULT_RECEIVE_GAP_LIMIT
-
-      const wallet = this.walletAccounts.find(w => w.id === walletId) || {}
-      wallet.address_no = addressData.addressIndex
-      this.$emit('new-receive-address', {addressData, wallet})
-    },
+    
     showAddAccountDialog: function () {
       this.formDialog.show = true      
     },
