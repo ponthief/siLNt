@@ -201,6 +201,49 @@ async def api_scan_blockchain():
         )
 
 
+# BIP353
+@silnt_api_router.get("/api/v1/bip353/resolve")
+async def api_resolve_bip353(
+    address: str = Query(..., description="BIP353 address in email format, e.g. alice@domain.com"),
+    key_info: WalletTypeInfo = Depends(require_invoice_key),
+) -> dict:
+    try:
+        user, domain = address.strip().split("@")
+    except ValueError:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Invalid BIP353 address format. Expected user@domain.com"
+        )
+    try:
+        import dns.resolver
+        dns_domain = f"{user}.user._bitcoin-payment.{domain}"
+        answers = dns.resolver.resolve(dns_domain, "TXT")
+        result = ""
+        for rdata in answers:
+            result = "".join([a.decode() for a in rdata.strings])
+            break
+        if not result:
+            raise HTTPException(
+                status_code=HTTPStatus.NOT_FOUND,
+                detail=f"No TXT record found for {dns_domain}"
+            )
+        return {"address": address, "dns_domain": dns_domain, "result": result}
+    except dns.resolver.NXDOMAIN:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail=f"Domain not found for {address}"
+        )
+    except dns.resolver.NoAnswer:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail=f"No TXT record found for {address}"
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_GATEWAY,
+            detail=f"DNS resolution failed: {str(exc)}"
+        )
+        
 # ── Addresses ────────────────────────────────────────────────────────────────
 
 @silnt_api_router.get("/api/v1/address/{wallet_id}")

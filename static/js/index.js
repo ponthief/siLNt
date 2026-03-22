@@ -15,7 +15,10 @@ window.app = Vue.createApp({
       },      
 
       config: {sats_denominated: true},
-
+      showBip353Dialog: false,
+      bip353Address: '',
+      bip353Result: '',
+      bip353Loading: false,
       qrCodeDialog: {
         show: false,
         data: null
@@ -129,6 +132,43 @@ window.app = Vue.createApp({
         LNbits.utils.notifyApiError(err)
       } finally {        
       }
+    },
+    resolveBip353: async function () {
+      if (!this.bip353Address) return
+      this.bip353Loading = true
+      this.bip353Result = ''
+      try {
+        const {data} = await LNbits.api.request(
+          'GET',
+          `/silnt/api/v1/bip353/resolve?address=${encodeURIComponent(this.bip353Address)}`,
+          this.g.user.wallets[0].inkey
+        )
+
+        // Strip bitcoin:?sp= / bitcoin:?lno= / lno= prefixes
+        let result = data.result || ''        
+        result = result.replace(/^bitcoin:\?sp=/i, '')
+        result = result.replace(/^bitcoin:\?lno=/i, '')
+        result = result.replace(/^lno=/i, '')
+        result = result.replace(/^sp=/i, '')
+        this.bip353Result = result.trim()        
+        this.$q.notify({
+          type: 'positive',
+          message: `BIP353 resolved for ${this.bip353Address}`,
+          timeout: 5000
+        })
+      } catch (err) {
+        LNbits.utils.notifyApiError(err)
+      } finally {
+        this.bip353Loading = false
+      }
+    },
+    copyText: function (text) {
+      Quasar.copyToClipboard(text).then(() => {
+        this.$q.notify({
+          message: 'Copied to clipboard!',
+          position: 'bottom'
+        })
+      })
     },    
     getAddressesForWallet: async function (walletId) {
       try {

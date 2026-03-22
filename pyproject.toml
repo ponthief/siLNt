@@ -8,6 +8,7 @@ urls = { Homepage = "https://bitaurus.net", Repository = "https://github.com/pon
 
 dependencies = [
  "bitcoinlib>=0.6.12.1",
+ "dnspython>=2.7.0",
  "embit>=0.8.0",
  "lnbits>1",
 ]

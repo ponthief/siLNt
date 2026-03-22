@@ -33,8 +33,18 @@
             :disabled="showPayment"
             >Scan Blockchain</q-btn
           >
+        </div>
+        <div class="col-md-3 col-sm-4 q-pl-md">
+          <q-btn
+            unelevated
+            class="btn-full"
+            outline
+            icon="travel_explore"
+            @click="showBip353Dialog = true"
+            >Resolve BIP353</q-btn
+          >
         </div>        
-        <div class="col-md-3 col-sm-5 q-pr-md">
+        <div class="col-md-3 col-sm-4 q-pl-md">
           <q-btn-dropdown
             v-if="!showPayment"
             split
@@ -53,17 +63,7 @@
                     Outputs</q-item-label
                   >
                 </q-item-section>
-              </q-item>
-              <q-item
-                @click="showEnterSignedTnxDialog"
-                clickable
-                v-close-popup
-              >
-                <q-item-section>
-                  <q-item-label>From Signed Tnx</q-item-label>
-                  <q-item-label caption> Paste a signed Transaction</q-item-label>
-                </q-item-section>
-              </q-item>
+              </q-item>              
             </q-list>
           </q-btn-dropdown>
 
@@ -128,34 +128,64 @@
       </q-card-section>
     </q-card>
   </div>  
-
-  <q-dialog v-model="showEnterSignedPsbt" position="top">
+  <q-dialog v-model="showBip353Dialog" position="top">
     <q-card class="q-pa-lg lnbits__dialog-card">
-      <h5 class="text-subtitle1 q-my-none">Enter the Signed PSBT</h5>
+      <h5 class="text-subtitle1 q-my-none">Resolve BIP353 Address</h5>
       <q-separator></q-separator><br />
 
-      <p>
-        <q-input
-          filled
-          dense
-          v-model.trim="signedBase64Psbt"
-          type="textarea"
-          label="Signed PSBT"
-        ></q-input>
-      </p>
+      <q-input
+        filled
+        dense
+        v-model.trim="bip353Address"
+        type="text"
+        label="BIP353 Address (e.g. alice@domain.com)"
+        :disable="bip353Loading"
+      ></q-input>
 
+      <div v-if="bip353Result" class="q-mt-md">
+        <h5 class="text-caption q-mb-xs">Resolved Address</h5>
+        <div
+          style="
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px 12px;
+            font-family: monospace;
+            font-size: 13px;
+            word-break: break-all;
+            line-height: 1.6;
+            color: #f97316;
+          "
+        >
+          <span v-text="bip353Result"></span>
+          <q-btn
+            flat
+            dense
+            size="xs"
+            icon="content_copy"
+            color="orange"
+            class="q-ml-sm"
+            @click="copyText(bip353Result)"
+          ></q-btn>
+        </div>
+      </div>
       <div class="row q-mt-lg q-gutter-sm">
         <q-btn
-          outline
+          unelevated
+          color="primary"
+          label="Submit"
+          :loading="bip353Loading"
+          :disable="!bip353Address || bip353Loading"
+          @click="resolveBip353"
+        ></q-btn>
+        <q-btn
           v-close-popup
+          flat
           color="grey"
-          @click="checkPsbt"
-          class="q-ml-sm"
-          >Check PSBT</q-btn
+          class="q-ml-auto"
+          @click="bip353Result = ''"
+          >Close</q-btn
         >
-        <q-btn v-close-popup flat color="grey" class="q-ml-auto">Close</q-btn>
       </div>
-      <div class="row q-mt-lg q-gutter-sm"></div>
     </q-card>
   </q-dialog>
 </div>
