@@ -4,8 +4,8 @@ from fastapi import Query
 from pydantic import BaseModel
 
 
-class ScanConfig(BaseModel):
-    blindbit_url: str
+class BlindbitConfig(BaseModel):
+    blindbit_url: str = ""
     auth_user: str = ""
     auth_pass: str = ""
     

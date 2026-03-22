@@ -36,4 +36,11 @@ async def m001_initial(db):
         );
     """
     )
-
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS silnt.blindbit_config (
+            id TEXT PRIMARY KEY,
+            json_data TEXT NOT NULL DEFAULT '{}'
+        );
+        """
+    )

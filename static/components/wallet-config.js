@@ -21,6 +21,7 @@ window.app.component('wallet-config', {
       set(value) {
         value.isLoaded = true
         // Ensure blindbit auth fields are always present
+        value.blindbit_url = value.blindbit_url || ''
         value.blindbit_user = value.blindbit_user || ''
         value.blindbit_pass = value.blindbit_pass || ''
         this.internalConfig = JSON.parse(JSON.stringify(value))
@@ -37,7 +38,7 @@ window.app.component('wallet-config', {
       try {
         const {data} = await LNbits.api.request(
           'PUT',
-          '/silnt/api/v1/config',
+          '/silnt/api/v1/blindbit/config',
           this.adminkey,
           this.config
         )
@@ -51,7 +52,7 @@ window.app.component('wallet-config', {
       try {
         const {data} = await LNbits.api.request(
           'GET',
-          '/silnt/api/v1/config',
+          '/silnt/api/v1/blindbit/config',
           this.adminkey
         )
         this.config = data

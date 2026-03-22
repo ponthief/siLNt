@@ -8,12 +8,7 @@ window.app = Vue.createApp({
   mixins: [window.windowMixin],
   data() {
     return {
-      scan: {
-        scanning: false,
-        scanCount: 0,
-        scanIndex: 0
-      },
-
+      
       currentAddress: null,
 
       tab: 'addresses',
@@ -104,7 +99,7 @@ window.app = Vue.createApp({
           '/silnt/api/v1/scan',
           this.g.user.wallets[0].inkey,
           {
-            blindbit_url: this.blindbit_url,
+            blindbit_url: this.blindbit.url,
             auth_user: this.blindbit.user,
             auth_pass: this.blindbit.pass
           }
@@ -137,9 +132,7 @@ window.app = Vue.createApp({
           timeout: 10000
         })
         LNbits.utils.notifyApiError(err)
-      } finally {
-        this.scan.scanning = false
-        this.scan.scanIndex = 1
+      } finally {        
       }
     },    
     getAddressesForWallet: async function (walletId) {
