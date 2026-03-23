@@ -10,11 +10,11 @@ class BlindbitConfig(BaseModel):
     blindbit_pass: str = ""
     
 class CreateWallet(BaseModel):
-    mnemonic: str = Query("")
-    title: str = Query("")
+    mnemonic: str = None
+    title: str = None
     network: str = "mainnet"
-    hr_address: str = Query("")
-    last_height: str = Query("") 
+    hr_address: str = None
+    last_height: str = None 
     balance: Optional[int] = None    
 
 

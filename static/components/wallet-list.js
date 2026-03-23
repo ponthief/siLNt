@@ -248,7 +248,7 @@ window.app.component('wallet-list', {
           message: 'BIP353 Address must be in email format (e.g. alice@domain.com)',
           timeout: 8000
         })
-        this.bip353Valid = false
+        // this.bip353Valid = false
         return false
       }
       try {
@@ -270,7 +270,7 @@ window.app.component('wallet-list', {
           message: `BIP353 resolution failed for ${address} — check the address and try again`,
           timeout: 8000
         })
-        this.bip353Valid = false
+        // this.bip353Valid = false
         return false
       }
     },

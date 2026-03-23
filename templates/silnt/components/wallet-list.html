@@ -222,8 +222,8 @@
           unelevated
           color="primary"
           label="Update Wallet Account"
-          :disable="showUpdating || !bip353Valid" 
-          type="submit"
+          :disable="showUpdating" 
+          type="submit"         
         >
         </q-btn>
         <q-spinner v-if="showUpdating" color="primary" size="2em"></q-spinner>

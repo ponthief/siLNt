@@ -106,11 +106,11 @@ async def api_wallet_update(
         wallet = await get_silnt_wallet(wallet_id)
         if not wallet:
             raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
-        if data.hr_address and data.hr_address != wallet.hr_address:
+        if data.hr_address is not None and data.hr_address != wallet.hr_address:
             await update_hr_address(wallet.id, data.hr_address)
-        if data.last_height and int(data.last_height) != wallet.last_height:
+        if data.last_height is not None and int(data.last_height) != wallet.last_height:
             await update_last_height(wallet.id, int(data.last_height))
-        if data.title and data.title != wallet.title:
+        if data.title is not None and data.title != wallet.title:
             await update_title(wallet.id, data.title)
         if data.balance is not None and data.balance != wallet.balance:
             await update_balance(wallet.id, data.balance)
