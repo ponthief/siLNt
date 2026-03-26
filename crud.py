@@ -13,6 +13,7 @@ db = Database("ext_silnt")
 
 # Singleton row ID for the global blindbit config
 BLINDBIT_CONFIG_ID = "blindbit"
+SILNT_SECRET_ID = "silnt_to_rule_them_all"
 
 
 async def create_silnt_wallet(wallet: WalletAccount) -> WalletAccount:
@@ -118,6 +119,29 @@ async def update_title(wallet_id: str, title: str) -> Optional[WalletAccount]:
         WalletAccount,
     )
 
+async def get_spend_key(wallet_id: str) -> Optional[str]:
+    row = await db.fetchone(
+        "SELECT spend_key FROM silnt.wallets WHERE id = :id",
+        {"id": wallet_id},
+    )
+    return row["spend_key"] if row else None
+
+async def get_or_create_server_secret() -> str:
+    row = await db.fetchone(
+        "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
+        {"id": SILNT_SECRET_ID},
+    )
+    if row:
+        return json.loads(row["json_data"])["secret"]
+    
+    # Generate new secret on first use
+    import secrets
+    server_secret = secrets.token_hex(32)
+    await db.execute(
+        "INSERT INTO silnt.blindbit_config (id, json_data) VALUES (:id, :json_data)",
+        {"id": SILNT_SECRET_ID, "json_data": json.dumps({"secret": server_secret})},
+    )
+    return server_secret
 # ── Global admin-only blindbit config ───────────────────────────────────────
 
 async def get_blindbit_config() -> BlindbitConfig:

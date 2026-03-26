@@ -3,7 +3,6 @@ from typing import Optional
 from fastapi import Query
 from pydantic import BaseModel
 
-
 class BlindbitConfig(BaseModel):
     blindbit_url: str = ""
     blindbit_user: str = ""
@@ -41,6 +40,16 @@ class UTXORecord(BaseModel):
     label: str
     wallet_id: str
 
+class BuildTxRequest(BaseModel):
+    wallet_id: str
+    recipient: str
+    amount: int
+    fee_rate: int = 1
+    memo: str = ''
+    utxos: list[dict] = []  # each: {txid, amount, vout}
+
+class BroadcastTxRequest(BaseModel):
+    tx_hex: str
 
 # class Address(BaseModel):
 #     id: str

@@ -56,9 +56,22 @@
       </template>
       <template v-slot:body="props">
         <q-tr :props="props">
-          <q-td key="id" :props="props">
-            <div v-text="props.row.id"></div>
-          </q-td>                   
+            <q-td key="sp_address" :props="props" style="max-width:160px">
+            <div style="display:flex;align-items:center">
+              <span
+                v-text="props.row.sp_address ? props.row.sp_address.slice(0, 14) + '...' : ''"
+                style="
+                  overflow: hidden;
+                  text-overflow: ellipsis;
+                  white-space: nowrap;
+                  cursor: pointer;
+                "
+              ></span>
+              <q-tooltip>
+                <span v-text="props.row.sp_address"></span>
+              </q-tooltip>
+            </div>
+          </q-td>                
           <q-td key="title" :props="props">
             <div v-text="props.row.title"></div>
           </q-td>          
@@ -72,6 +85,16 @@
             <div v-text="props.row.balance"></div>
           </q-td>          
           <q-td auto-width>
+                  <q-btn
+                  flat
+                  dense
+                  size="xs"
+                  @click="$emit('send-wallet', props.row)"
+                  icon="send"
+                  color="green"
+                >
+                  <q-tooltip>Send</q-tooltip>
+                </q-btn>
                  <q-btn
                   flat
                   dense

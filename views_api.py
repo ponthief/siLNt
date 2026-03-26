@@ -2,14 +2,24 @@ import json
 from http import HTTPStatus
 from base64 import b64encode
 import httpx
-from embit import finalizer, script
-from embit.ec import PublicKey
-from embit.networks import NETWORKS
-from .helpers.wallet import generate_silent_wallet_address, decrypt_mnemonic
+import hashlib
+import dns.resolver
+from .helpers.curve import (
+    decode, convertbits, pubkey_point_gen_from_int,
+    int_from_bytes, point_add, point_mul, serP, ser256,
+    has_even_y, G
+)
+from .helpers.wallet import (
+    generate_silent_wallet_address,
+    decrypt_mnemonic,
+    decrypt_spend_key,
+    decrypt_secret,
+    build_transaction,
+)
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from lnbits.core.models import WalletTypeInfo
 from lnbits.decorators import require_admin_key, require_invoice_key
-from lnbits.helpers import urlsafe_short_hash, decrypt_internal_message
+from lnbits.helpers import urlsafe_short_hash
 from loguru import logger
 
 from .crud import (
@@ -26,13 +36,18 @@ from .crud import (
     get_silnt_wallet,
     get_blindbit_config,
     update_blindbit_config,
+    get_spend_key
 )
 
 from .models import (
     BlindbitConfig,
     CreateWallet,
     WalletAccount,
+    BuildTxRequest,
+    BroadcastTxRequest
 )
+
+
 
 silnt_api_router = APIRouter()
 
@@ -76,7 +91,7 @@ async def api_wallet_create(
             spend_key='',
             scan_secret=''
         )
-        (sp_address, scan_secret, spend_key) = generate_silent_wallet_address(
+        (sp_address, scan_secret, spend_key) = await generate_silent_wallet_address(
             decrypt_mnemonic(data.mnemonic, str(data.last_height))
         )
         if not all([sp_address, scan_secret, spend_key]):
@@ -214,8 +229,7 @@ async def api_resolve_bip353(
             status_code=HTTPStatus.BAD_REQUEST,
             detail="Invalid BIP353 address format. Expected user@domain.com"
         )
-    try:
-        import dns.resolver
+    try:        
         dns_domain = f"{user}.user._bitcoin-payment.{domain}"
         answers = dns.resolver.resolve(dns_domain, "TXT")
         result = ""
@@ -244,6 +258,90 @@ async def api_resolve_bip353(
             detail=f"DNS resolution failed: {str(exc)}"
         )
         
+# Transactions
+@silnt_api_router.post("/api/v1/tx/build", dependencies=[Depends(require_admin_key)])
+async def api_build_transaction(data: BuildTxRequest):
+    try:
+        # ── Load wallet ───────────────────────────────────────────────
+        wallet = await get_silnt_wallet(data.wallet_id)
+        if not wallet:
+            raise HTTPException(
+                status_code=HTTPStatus.NOT_FOUND,
+                detail="Wallet does not exist."
+            )
+
+        # ── Decrypt keys ──────────────────────────────────────────────
+        spend_key_encrypted = await get_spend_key(data.wallet_id)
+        if not spend_key_encrypted:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail="No spend key found for this wallet."
+            )
+
+        scan_secret = await decrypt_secret(wallet.scan_secret)
+        if not scan_secret:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail="Failed to decrypt scan secret."
+            )
+
+        spend_key_hex = decrypt_spend_key(spend_key_encrypted, scan_secret)
+        if not spend_key_hex:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail="Failed to decrypt spend key."
+            )
+
+        # ── Build transaction ─────────────────────────────────────────
+        result = build_transaction(
+            spend_key_hex=spend_key_hex,
+            recipient=data.recipient,
+            amount=data.amount,
+            fee_rate=data.fee_rate,
+            utxos=data.utxos,
+            network=wallet.network,
+        )
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Transaction build failed: {exc}")
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"Failed to build transaction: {str(exc)}"
+        ) from exc
+
+
+@silnt_api_router.post("/api/v1/tx/broadcast", dependencies=[Depends(require_admin_key)])
+async def api_broadcast_transaction(data: BroadcastTxRequest):
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            blindbit = await get_blindbit_config()
+            base_url = blindbit.blindbit_url.rstrip('/')
+            headers = {}
+            if blindbit.blindbit_user and blindbit.blindbit_pass:
+                credentials = b64encode(
+                    f"{blindbit.blindbit_user}:{blindbit.blindbit_pass}".encode()
+                ).decode()
+                headers["Authorization"] = f"Basic {credentials}"
+            resp = await client.post(
+                f"{base_url}/tx/broadcast",
+                json={"tx_hex": data.tx_hex},
+                headers=headers
+            )
+            if resp.status_code != 200:
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_GATEWAY,
+                    detail=f"Broadcast failed: {resp.text}"
+                )
+            return resp.json()
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_GATEWAY,
+            detail="Could not connect to blindbit for broadcast"
+        )
+
 # ── Addresses ────────────────────────────────────────────────────────────────
 
 @silnt_api_router.get("/api/v1/address/{wallet_id}")

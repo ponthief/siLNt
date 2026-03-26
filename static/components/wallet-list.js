@@ -11,7 +11,7 @@ window.app.component('wallet-list', {
     'network',
     'scannedUtxos'   
   ],
-  emits: ['accounts-update', 'scan-wallet', 'clear-utxos', 'open-bip353'],
+  emits: ['accounts-update', 'scan-wallet', 'clear-utxos', 'open-bip353', 'send-wallet'],
   data: function () {
     return {
       walletAccounts: [],
@@ -37,7 +37,7 @@ window.app.component('wallet-list', {
       showUpdating: false,
       walletsTable: {
         columns: [          
-          {name: 'id', align: 'left', label: 'ID', field: 'id'},                  
+          {name: 'sp_address', align: 'left', label: 'SP Address', field: 'sp_address'},                  
           {
             name: 'title',
             align: 'left',

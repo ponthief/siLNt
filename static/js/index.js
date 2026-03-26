@@ -28,10 +28,35 @@ window.app = Vue.createApp({
       walletAccounts: [],            
       utxosFilter: '',
       network: null,
-      lastScanResult: null      
+      lastScanResult: null,
+      showSendDialog: false,
+      sendWallet: null,
+      sendUtxos: [],
+      sendForm: {
+        recipient: '',
+        amount: 0,
+        feeRate: 1,
+        memo: '',
+        useAllUtxos: false
+      },
+      sendLoading: false,
+      broadcastLoading: false,
+      sendTxResult: null,     
     }
   },
-  computed: {    
+  computed: {
+    sendSelectedTotal: function () {
+        return this.sendUtxos
+    .filter(u => u.selected)
+    .reduce((sum, u) => sum + (u.amount || 0), 0)
+  },
+    canBuildTx: function () {
+      const hasRecipient = !!this.sendForm.recipient
+      const hasUtxos = this.sendUtxos.some(u => u.selected) || this.sendForm.useAllUtxos
+      const hasAmount = this.sendForm.useAllUtxos || this.sendForm.amount > 0
+      const hasFee = this.sendForm.feeRate > 0
+      return hasRecipient && hasUtxos && hasAmount && hasFee && !this.sendLoading
+    },    
   },
 
   methods: {
@@ -61,13 +86,16 @@ window.app = Vue.createApp({
         // Map blindbit UTXOs into the utxos list
         const mappedUtxos = (data.utxos || []).map(u => ({
           txid: u.txid,          
-          amount: u.amount,          
+          amount: u.amount,
+          vout: u.vout || 0,          
           utxo_state: u.utxo_state,
           label: u.label,
           timestamp: u.timestamp,
-          wallet: wallet?.id
+          wallet: wallet?.id,
+          tweak: u.label?.tweak || '',
+          pub_key: u.label?.pub_key || ''
         }))
-        this.utxos.data = mappedUtxos
+        this.utxos.data = mappedUtxos       
         this.utxos.total = mappedUtxos.filter(u => u.utxo_state === 'unspent').reduce(
           (total, u) => total + (u.amount || 0), 0
         )
@@ -146,7 +174,100 @@ window.app = Vue.createApp({
         message: 'UTXOs cleared for deleted wallet.',
         timeout: 5000
       })
-    },                
+    }, 
+    openSendDialog: function (wallet) {
+      this.sendWallet = wallet
+      this.sendTxResult = null
+      this.sendForm = {
+        recipient: '',
+        amount: 0,
+        feeRate: 1,
+        memo: '',
+        useAllUtxos: false
+      }
+      // Load unspent UTXOs for this wallet
+      this.sendUtxos = (this.utxos.data || [])
+        .filter(u => u.utxo_state === 'unspent' && u.wallet === wallet.id)
+        .map(u => ({ ...u, selected: false }))
+      this.showSendDialog = true
+    },
+
+    onUseAllUtxos: function (val) {
+      if (val) {
+        this.sendUtxos.forEach(u => { u.selected = true })
+        this.sendForm.amount = this.sendSelectedTotal
+      } else {
+        this.sendUtxos.forEach(u => { u.selected = false })
+        this.sendForm.amount = 0
+      }
+    },
+    buildTransaction: async function () {
+      this.sendLoading = true
+      this.sendTxResult = null
+      try {
+        const selectedUtxos = this.sendUtxos.filter(u => u.selected)
+        const {data} = await LNbits.api.request(
+          'POST',
+          '/silnt/api/v1/tx/build',
+          this.g.user.wallets[0].adminkey,
+          {
+            wallet_id: this.sendWallet.id,
+            recipient: this.sendForm.recipient,
+            amount: this.sendForm.useAllUtxos ? this.sendSelectedTotal : this.sendForm.amount,
+            fee_rate: this.sendForm.feeRate,
+            memo: this.sendForm.memo,
+            utxos: selectedUtxos.map(u => ({
+              txid: u.txid,
+              amount: u.amount,
+              vout: u.vout || 0,
+              tweak: u.tweak,
+              pub_key: u.pub_key
+            }))
+          }
+        )
+        this.sendTxResult = data.psbt || data.tx_hex || JSON.stringify(data)
+        this.$q.notify({
+          type: 'positive',
+          message: 'Transaction built successfully.',
+          timeout: 5000
+        })
+      } catch (err) {
+        LNbits.utils.notifyApiError(err)
+      } finally {
+        this.sendLoading = false
+      }
+    },
+    broadcastTransaction: async function () {
+      this.broadcastLoading = true
+      try {
+        await LNbits.api.request(
+          'POST',
+          '/silnt/api/v1/tx/broadcast',
+          this.g.user.wallets[0].adminkey,
+          { tx_hex: this.sendTxResult }
+        )
+        this.$q.notify({
+          type: 'positive',
+          message: 'Transaction broadcast successfully!',
+          timeout: 8000
+        })
+        this.showSendDialog = false
+        this.sendTxResult = null
+      } catch (err) {
+        LNbits.utils.notifyApiError(err)
+      } finally {
+        this.broadcastLoading = false
+      }
+    },
+
+    copyText: function (text) {
+      Quasar.copyToClipboard(text).then(() => {
+        this.$q.notify({
+          message: 'Copied to clipboard!',
+          position: 'bottom'
+        })
+      })
+    },               
   },
   created: async function () {       
   }
