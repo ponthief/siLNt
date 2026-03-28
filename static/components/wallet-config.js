@@ -49,13 +49,15 @@ window.app.component('wallet-config', {
       }
     },
     getConfig: async function () {
-      try {
-        const {data} = await LNbits.api.request(
-          'GET',
-          '/silnt/api/v1/blindbit/config',
-          this.adminkey
-        )
-        this.config = data
+      try {        
+          const [{data: blindbit}, {data: appConfig}] = await Promise.all([
+          LNbits.api.request('GET', '/silnt/api/v1/blindbit/config', this.adminkey),
+          LNbits.api.request('GET', '/silnt/api/v1/config', this.adminkey)
+      ])      
+        this.config =  {
+      ...blindbit,
+      ...appConfig
+    }     
       } catch (error) {
         LNbits.utils.notifyApiError(error)
       }

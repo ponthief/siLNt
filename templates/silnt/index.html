@@ -22,12 +22,7 @@
       @open-bip353="showBip353Dialog = true"
       @send-wallet="openSendDialog"
     >
-    </wallet-list>
-
-    <q-card>      
-      <div class="row q-pt-sm q-pb-sm items-center no-wrap q-mb-md">                       
-      </div>      
-    </q-card>
+    </wallet-list>    
 
     <q-card v-if="config.isLoaded">
       <q-card-section>
@@ -40,6 +35,7 @@
               :utxos="utxos.data"              
               :accounts="walletAccounts"
               :sats-denominated="config.sats_denominated"
+              :mempool-endpoint="mempoolHostname"
               :filter="utxosFilter"
             ></utxo-list>
           </q-tab-panel>

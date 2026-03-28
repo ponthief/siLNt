@@ -39,7 +39,8 @@ from .models import (
     CreateWallet,
     WalletAccount,
     BuildTxRequest,
-    BroadcastTxRequest
+    BroadcastTxRequest,
+    Config
 )
 
 
@@ -287,7 +288,8 @@ async def api_build_transaction(data: BuildTxRequest):
 @silnt_api_router.post("/api/v1/tx/broadcast", dependencies=[Depends(require_admin_key)])
 async def api_broadcast_transaction(data: BroadcastTxRequest):
     try:
-        base = Config.mempool_endpoint.rstrip("/")        
+        config = Config()      
+        base = config.mempool_endpoint.rstrip("/")        
         mempool_url = f"{base}/api/tx"        
 
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -315,6 +317,17 @@ async def api_broadcast_transaction(data: BroadcastTxRequest):
             status_code=HTTPStatus.GATEWAY_TIMEOUT,
             detail="mempool.space timed out"
         )
+
+@silnt_api_router.get("/api/v1/config")
+async def api_get_config(
+    key_info: WalletTypeInfo = Depends(require_invoice_key),
+) -> dict:
+    config = Config()
+    return {
+        "mempool_endpoint": config.mempool_endpoint,
+        "sats_denominated": config.sats_denominated,
+        "network": config.network,
+    }
 
 # ── Addresses ────────────────────────────────────────────────────────────────
 

@@ -56,6 +56,19 @@ window.app = Vue.createApp({
       const hasAmount = this.sendForm.useAllUtxos || this.sendForm.amount > 0
       const hasFee = this.sendForm.feeRate > 0
       return hasRecipient && hasUtxos && hasAmount && hasFee && !this.sendLoading
+    },
+    mempoolHostname: function () {      
+      if (!this.config || !this.config.isLoaded) return 'mempool.space'
+      try {
+        const endpoint = this.config.mempool_endpoint || 'https://mempool.space'
+        let hostname = new URL(endpoint).hostname
+        if ((this.config.network || '').toLowerCase() === 'testnet') {
+          hostname += '/testnet'
+        }
+        return hostname
+      } catch (e) {
+        return 'mempool.space'
+      }
     },    
   },
 
