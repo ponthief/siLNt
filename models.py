@@ -51,52 +51,10 @@ class BuildTxRequest(BaseModel):
 class BroadcastTxRequest(BaseModel):
     tx_hex: str
 
-# class Address(BaseModel):
-#     id: str
-#     address: str
-#     wallet: str
-#     amount: int = 0
-#     branch_index: int = 0
-#     address_index: int
-#     note: Optional[str] = None
-#     has_activity: bool = False
-
-
-# class TransactionInput(BaseModel):
-#     tx_id: str
-#     vout: int
-#     amount: int
-#     address: str
-#     branch_index: int
-#     address_index: int
-#     wallet: str
-#     tx_hex: str
-
-
-# class TransactionOutput(BaseModel):
-#     amount: int
-#     address: str
-#     branch_index: Optional[int] = None
-#     address_index: Optional[int] = None
-#     wallet: Optional[str] = None
-
-
-
-
-# class ExtractTx(BaseModel):
-#     tx_hex = ""
-#     network = "Mainnet"
-
-
-# class SignedTransaction(BaseModel):
-#     tx_hex: Optional[str]
-    # tx_json: Optional[str]
-
-
 class Config(BaseModel):
-    mempool_endpoint = "https://mempool.space"    
-    sats_denominated = True
-    network = "mainnet"
+    mempool_endpoint: str = "https://mempool.space"    
+    sats_denominated: bool = True
+    network: str = "mainnet"
 
 
 class ConfigDb(BaseModel):

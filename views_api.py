@@ -3,12 +3,6 @@ from http import HTTPStatus
 from base64 import b64encode
 import httpx
 import hashlib
-import dns.resolver
-from .helpers.curve import (
-    decode, convertbits, pubkey_point_gen_from_int,
-    int_from_bytes, point_add, point_mul, serP, ser256,
-    has_even_y, G
-)
 from .helpers.wallet import (
     generate_silent_wallet_address,
     decrypt_mnemonic,
@@ -16,6 +10,7 @@ from .helpers.wallet import (
     decrypt_secret,
     build_transaction,
 )
+from .helpers.address_resolver import bip353_resolve
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from lnbits.core.models import WalletTypeInfo
 from lnbits.decorators import require_admin_key, require_invoice_key
@@ -222,41 +217,7 @@ async def api_resolve_bip353(
     address: str = Query(..., description="BIP353 address in email format, e.g. alice@domain.com"),
     key_info: WalletTypeInfo = Depends(require_invoice_key),
 ) -> dict:
-    try:
-        user, domain = address.strip().split("@")
-    except ValueError:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST,
-            detail="Invalid BIP353 address format. Expected user@domain.com"
-        )
-    try:        
-        dns_domain = f"{user}.user._bitcoin-payment.{domain}"
-        answers = dns.resolver.resolve(dns_domain, "TXT")
-        result = ""
-        for rdata in answers:
-            result = "".join([a.decode() for a in rdata.strings])
-            break
-        if not result:
-            raise HTTPException(
-                status_code=HTTPStatus.NOT_FOUND,
-                detail=f"No TXT record found for {dns_domain}"
-            )
-        return {"address": address, "dns_domain": dns_domain, "result": result}
-    except dns.resolver.NXDOMAIN:
-        raise HTTPException(
-            status_code=HTTPStatus.NOT_FOUND,
-            detail=f"Domain not found for {address}"
-        )
-    except dns.resolver.NoAnswer:
-        raise HTTPException(
-            status_code=HTTPStatus.NOT_FOUND,
-            detail=f"No TXT record found for {address}"
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_GATEWAY,
-            detail=f"DNS resolution failed: {str(exc)}"
-        )
+    return bip353_resolve(address=address)    
         
 # Transactions
 @silnt_api_router.post("/api/v1/tx/build", dependencies=[Depends(require_admin_key)])
@@ -291,7 +252,17 @@ async def api_build_transaction(data: BuildTxRequest):
                 status_code=HTTPStatus.BAD_REQUEST,
                 detail="Failed to decrypt spend key."
             )
-
+        if '@' in data.recipient:
+            user, domain = data.recipient.strip().split("@")
+            if user is not None and domain is not None:
+                resolved = bip353_resolve(data.recipient)
+                result = resolved["result"].replace("bitcoin:?sp=", '')                
+                if not result.startswith('sp1'):
+                    raise HTTPException(
+                        status_code=HTTPStatus.BAD_REQUEST,
+                        detail="Address must resolve to SilenPayment address (sp1)."
+                    )
+                data.recipient = result   
         # ── Build transaction ─────────────────────────────────────────
         result = build_transaction(
             spend_key_hex=spend_key_hex,
@@ -316,30 +287,33 @@ async def api_build_transaction(data: BuildTxRequest):
 @silnt_api_router.post("/api/v1/tx/broadcast", dependencies=[Depends(require_admin_key)])
 async def api_broadcast_transaction(data: BroadcastTxRequest):
     try:
+        base = Config.mempool_endpoint.rstrip("/")        
+        mempool_url = f"{base}/api/tx"        
+
         async with httpx.AsyncClient(timeout=30.0) as client:
-            blindbit = await get_blindbit_config()
-            base_url = blindbit.blindbit_url.rstrip('/')
-            headers = {}
-            if blindbit.blindbit_user and blindbit.blindbit_pass:
-                credentials = b64encode(
-                    f"{blindbit.blindbit_user}:{blindbit.blindbit_pass}".encode()
-                ).decode()
-                headers["Authorization"] = f"Basic {credentials}"
             resp = await client.post(
-                f"{base_url}/tx/broadcast",
-                json={"tx_hex": data.tx_hex},
-                headers=headers
+                mempool_url,
+                content=data.tx_hex,
+                headers={"Content-Type": "text/plain"}
             )
             if resp.status_code != 200:
                 raise HTTPException(
                     status_code=HTTPStatus.BAD_GATEWAY,
                     detail=f"Broadcast failed: {resp.text}"
                 )
-            return resp.json()
+            return {"txid": resp.text.strip()}
+
+    except HTTPException:
+        raise
     except httpx.ConnectError:
         raise HTTPException(
             status_code=HTTPStatus.BAD_GATEWAY,
-            detail="Could not connect to blindbit for broadcast"
+            detail=f"Could not connect to {Config.mempool_endpoint}"
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=HTTPStatus.GATEWAY_TIMEOUT,
+            detail="mempool.space timed out"
         )
 
 # ── Addresses ────────────────────────────────────────────────────────────────

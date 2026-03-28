@@ -92,8 +92,8 @@ window.app = Vue.createApp({
           label: u.label,
           timestamp: u.timestamp,
           wallet: wallet?.id,
-          tweak: u.label?.tweak || '',
-          pub_key: u.label?.pub_key || ''
+          priv_key_tweak: u.priv_key_tweak || '',
+          pub_key: u.pub_key || ''
         }))
         this.utxos.data = mappedUtxos       
         this.utxos.total = mappedUtxos.filter(u => u.utxo_state === 'unspent').reduce(
@@ -205,7 +205,7 @@ window.app = Vue.createApp({
       this.sendLoading = true
       this.sendTxResult = null
       try {
-        const selectedUtxos = this.sendUtxos.filter(u => u.selected)
+        const selectedUtxos = this.sendUtxos.filter(u => u.selected)       
         const {data} = await LNbits.api.request(
           'POST',
           '/silnt/api/v1/tx/build',
@@ -219,12 +219,13 @@ window.app = Vue.createApp({
             utxos: selectedUtxos.map(u => ({
               txid: u.txid,
               amount: u.amount,
+              label: u.label,
               vout: u.vout || 0,
-              tweak: u.tweak,
+              priv_key_tweak: u.priv_key_tweak,
               pub_key: u.pub_key
             }))
           }
-        )
+        )        
         this.sendTxResult = data.psbt || data.tx_hex || JSON.stringify(data)
         this.$q.notify({
           type: 'positive',

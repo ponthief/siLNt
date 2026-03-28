@@ -18,6 +18,8 @@ from .curve import (
     int_from_bytes, point_add, point_mul, serP, ser256,
     has_even_y, G, p as CURVE_P
 )
+from embit.ec import SchnorrSig
+import coincurve
 
 
 def encrypt_spend_key(spend_priv_hex: str, scan_key_hex: str) -> str:
@@ -164,50 +166,50 @@ def build_transaction(
     Build and sign a Bitcoin transaction.
     Supports Silent Payment addresses (sp1/tsp1) and standard on-chain addresses.
     Returns dict with tx_hex, fee, amount, change.
-    """
-
+    """    
     # # ── 1. Parse spend key ────────────────────────────────────────────
-    spend_key = ec.PrivateKey(bytes.fromhex(spend_key_hex))
-    # own_pubkey = spend_key.get_public_key()
+    spend_key = ec.PrivateKey(bytes.fromhex(spend_key_hex))    
 
     n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 
     # ── 2. Build per-input tweaked keys and scripts ───────────────────
     input_keys = []
-    input_scripts = []
-    for utxo in utxos:
-        tweak_hex = utxo.get("tweak") or ""
-        if not tweak_hex:
-            raise ValueError(f"Missing tweak for utxo {utxo['txid']}")
+    input_scripts = []    
+    for utxo in utxos:        
+        # BlindBit: full_signing_key = priv_key_tweak + spend_key
+        priv_key_tweak_hex = utxo.get("priv_key_tweak") or ""
+        if not priv_key_tweak_hex:
+            raise ValueError(f"Missing priv_key_tweak for utxo {utxo['txid']}")
 
-        tweak_int = int_from_bytes(bytes.fromhex(tweak_hex))
-
-        # tweak IS the output private key
-        tweaked_pub_point = pubkey_point_gen_from_int(tweak_int)
-
-        # Taproot requires even y — negate if odd
-        if not has_even_y(tweaked_pub_point):
-            tweak_int = n - tweak_int
-            tweaked_pub_point = pubkey_point_gen_from_int(tweak_int)
-
-        tweaked_key = ec.PrivateKey(tweak_int.to_bytes(32, 'big'))
-        tweaked_x_only = ser256(tweaked_pub_point[0])
-
-        # Verify against pub_key from blindbit
         pub_key_hex = utxo.get("pub_key") or ""
-        if pub_key_hex:
-            expected_x = pub_key_hex[2:] if len(pub_key_hex) == 66 else pub_key_hex
-            if expected_x.lower() != tweaked_x_only.hex().lower():
-                logger.warning(f"Pubkey mismatch for utxo {utxo['txid']}")
-            else:
-                logger.debug(f"Pubkey match confirmed for utxo {utxo['txid']}")
+        if not pub_key_hex:
+            raise ValueError(f"Missing pub_key for utxo {utxo['txid']}")
 
-        input_script = Script(bytes([0x51, 0x20]) + tweaked_x_only)
-        input_keys.append(tweaked_key)
-        input_scripts.append((input_script, tweaked_x_only))
+        # full_secret = priv_key_tweak + spend_key mod n
+        priv_tweak_int = int_from_bytes(bytes.fromhex(priv_key_tweak_hex))
+        spend_key_int = int_from_bytes(spend_key.secret)
+        full_secret_int = (priv_tweak_int + spend_key_int) % n
+
+        # derive pubkey and negate if odd y
+        full_pub_point = pubkey_point_gen_from_int(full_secret_int)
+        if not has_even_y(full_pub_point):
+            full_secret_int = n - full_secret_int
+            full_pub_point = pubkey_point_gen_from_int(full_secret_int)
+
+        signing_key = ec.PrivateKey(full_secret_int.to_bytes(32, 'big'))
+
+        # ScriptPubKey uses pub_key from BlindBit directly (top level)
+        actual_x_only = bytes.fromhex(pub_key_hex)  # already x-only 32 bytes
+        actual_script = Script(bytes([0x51, 0x20]) + actual_x_only)
+
+        # Verify
+        derived_x = ser256(full_pub_point[0]).hex()        
+
+        input_keys.append(signing_key)
+        input_scripts.append((actual_script, actual_x_only))
 
     # ── 3. Recipient scriptpubkey ─────────────────────────────────────
-    if recipient.startswith('sp1') or recipient.startswith('tsp1'):
+    if recipient.startswith('sp1'):
         recipient_script = Script(
             derive_sp_scriptpubkey(recipient, spend_key.secret, utxos)
         )
@@ -229,63 +231,71 @@ def build_transaction(
             f"Insufficient funds. Need {amount + fee} sats "
             f"(including {fee} sats fee), have {total_input} sats."
         )
+    
 
-    # ── 5. Build inputs ─────────────────────────────────────────────── [::-1]
-    tx_inputs = [
+    # ── 5. Build inputs ───────────────────────────────────────────────────
+    tx_inputs_with_keys = [
+    (
         TransactionInput(
             bytes.fromhex(u["txid"]),
             int(u.get("vout", 0))
-        )
-        for u in utxos
-    ]
+        ),
+        input_keys[i],
+        input_scripts[i],
+        u["amount"]
+    )
+    for i, u in enumerate(utxos)
+]
 
-    # ── 6. Build outputs ──────────────────────────────────────────────
+    # BIP69 sort
+    tx_inputs_with_keys.sort(key=lambda x: (       
+        x[0].txid.hex(),        
+        x[0].vout
+    ))
+
+    tx_inputs          = [t[0] for t in tx_inputs_with_keys]
+    input_keys_sorted  = [t[1] for t in tx_inputs_with_keys]
+    input_scripts_sorted = [t[2] for t in tx_inputs_with_keys]
+    input_amounts_sorted = [t[3] for t in tx_inputs_with_keys]    
+
+    # ── 6. Build outputs ──────────────────────────────────────────────────
     tx_outputs = [TransactionOutput(amount, recipient_script)]
 
-    # Add change output if above dust (546 sats)
     if change_amount > 546:
-        tx_outputs.append(TransactionOutput(change_amount, input_scripts[0][0]))
+        change_script = input_scripts_sorted[0][0]
+        tx_outputs.append(TransactionOutput(change_amount, change_script))
 
-    # ── 7. Construct PSBT ────────────────────────────────────────────────
-    tx = Transaction(vin=tx_inputs, vout=tx_outputs)
+    # BIP69: sort outputs by value then scriptpubkey
+    tx_outputs.sort(key=lambda x: (
+        x.value,
+        x.script_pubkey.data.hex() if hasattr(x.script_pubkey, 'data') else bytes(x.script_pubkey).hex()
+    ))
+
+    # ── 7. Construct PSBT ─────────────────────────────────────────────────
+    tx = Transaction(vin=tx_inputs, vout=tx_outputs)    
     psbt = PSBT(tx)
 
-    for i, utxo in enumerate(utxos):
+    for i in range(len(tx_inputs)):
         inp = psbt.inputs[i]
-        inp.witness_utxo = TransactionOutput(utxo["amount"], input_scripts[i][0])
-        # inp.taproot_internal_key = input_scripts[i][1]
+        inp.witness_utxo = TransactionOutput(
+            input_amounts_sorted[i],
+            input_scripts_sorted[i][0]
+        )
 
-    # ── 8. Sign each input manually ───────────────────────────────────────
-    from embit.transaction import TaprootSignatureHash
+    # ── 8. Collect sighash inputs ─────────────────────────────────────────
+    utxo_amounts = [inp.witness_utxo.value for inp in psbt.inputs]
+    utxo_scripts = [inp.witness_utxo.script_pubkey for inp in psbt.inputs]    
 
+    # ── 9. Sign each input with sorted keys ──────────────────────────────
     for i in range(len(psbt.inputs)):
-        # Compute sighash directly from transaction
-        h = TaprootSignatureHash(
-            tx,
-            [inp.witness_utxo for inp in psbt.inputs],
-            sighash_type=0,
-            input_index=i,
-            script_path=False,
-        )
-        logger.debug(f"TaprootSignatureHash input {i}: {h.hex()}")
-        logger.debug(f"psbt.sighash_taproot input {i}: {psbt.sighash_taproot(i, script_pubkeys=all_scripts, values=all_values, sighash=0).hex()}")
-    for i, inp in enumerate(psbt.inputs):
-        # Compute taproot sighash for this input
-        h = psbt.sighash_taproot(
-            i,
-            script_pubkeys=[inp.witness_utxo.script_pubkey for inp in psbt.inputs],
-            values=[inp.witness_utxo.value for inp in psbt.inputs],
-            sighash=0,  # SIGHASH_DEFAULT
-        )
-        # Sign and store as taproot key-path signature
-        sig = spend_key.schnorr_sign(h)
-        inp.taproot_key_sig = sig
-        logger.debug(f"input {i} sighash: {h.hex()}")
-        logger.debug(f"input {i} signing key pubkey: {input_keys[i].get_public_key().serialize().hex()}")
-        logger.debug(f"input {i} witness_utxo script: {psbt.inputs[i].witness_utxo.script_pubkey.data.hex()}")        
-        logger.debug(f"input {i} sig: {sig.serialize().hex()}")
-
-    # ── 9. Finalize manually ──────────────────────────────────────────────
+        h = taproot_sighash(tx, i, utxo_scripts, utxo_amounts, sighash_type=0)
+        priv_bytes = input_keys_sorted[i].secret  # ← use sorted keys
+        cc_key = coincurve.PrivateKey(priv_bytes)
+        sig_bytes = cc_key.sign_schnorr(h)
+        sig_bytes = sig_bytes.rjust(64, b'\x00')
+        psbt.inputs[i].taproot_key_sig = SchnorrSig.parse(sig_bytes)                
+        
+    # ── 10. Finalize manually ──────────────────────────────────────────────
     for inp in psbt.inputs:
         if inp.taproot_key_sig is not None:            
             inp.final_scriptwitness = Witness([inp.taproot_key_sig.serialize()])
@@ -298,11 +308,6 @@ def build_transaction(
             tx.vin[i].witness = inp.final_scriptwitness
 
     tx_hex = tx.serialize().hex()    
-    # logger.debug(f"tweak_hex: {tweak_hex}")
-    # logger.debug(f"tweak_int: {hex(tweak_int)}")
-    # logger.debug(f"tweaked_key_int: {hex(tweaked_key_int)}")
-    # logger.debug(f"derived x_only: {tweaked_x_only.hex()}")
-    # logger.debug(f"expected pub_key: {pub_key_hex}")
     return {
         "tx_hex": tx_hex,
         "fee": fee,
@@ -338,3 +343,79 @@ async def decrypt_secret(encrypted: str) -> str:
     fernet_key = base64.urlsafe_b64encode(key_bytes)
     f = Fernet(fernet_key)
     return f.decrypt(encrypted.encode()).decode()
+
+def taproot_sighash(
+    tx: Transaction,
+    input_index: int,
+    utxo_scripts: list,
+    utxo_amounts: list,
+    sighash_type: int = 0
+) -> bytes:
+    """
+    Compute BIP341 taproot key-path sighash manually.
+    """
+    def sha256(data: bytes) -> bytes:
+        return hashlib.sha256(data).digest()
+
+    def tagged_hash(tag: str, data: bytes) -> bytes:
+        tag_bytes = tag.encode()
+        tag_hash = sha256(tag_bytes)
+        return sha256(tag_hash + tag_hash + data)
+
+    # sha_prevouts
+    prevouts = b""
+    for vin in tx.vin:
+        prevouts += vin.txid[::-1] + vin.vout.to_bytes(4, 'little')
+    sha_prevouts = sha256(prevouts)    
+    # sha_amounts
+    amounts = b""
+    for amt in utxo_amounts:
+        amounts += amt.to_bytes(8, 'little')
+    sha_amounts = sha256(amounts)    
+    # sha_scriptpubkeys
+    scripts = b""
+    for s in utxo_scripts:
+        script_bytes = s.data if hasattr(s, 'data') else bytes(s)
+        scripts += len(script_bytes).to_bytes(1, 'little') + script_bytes
+    sha_scriptpubkeys = sha256(scripts)    
+    # sha_sequences
+    sequences = b""
+    for vin in tx.vin:
+        sequences += vin.sequence.to_bytes(4, 'little')         
+    sha_sequences = sha256(sequences)           
+    # sha_outputs
+    outputs = b""
+    for vout in tx.vout:
+        script_bytes = vout.script_pubkey.data if hasattr(vout.script_pubkey, 'data') else bytes(vout.script_pubkey)
+        outputs += vout.value.to_bytes(8, 'little')
+        outputs += len(script_bytes).to_bytes(1, 'little') + script_bytes
+    sha_outputs = sha256(outputs)    
+    # spend_type = 0 (key path, no annex)
+    spend_type = (0).to_bytes(1, 'little')
+
+    # input data
+    vin = tx.vin[input_index]
+    input_data = (
+        vin.txid +
+        vin.vout.to_bytes(4, 'little') +
+        utxo_amounts[input_index].to_bytes(8, 'little') +
+        len(utxo_scripts[input_index].data).to_bytes(1, 'little') +
+        utxo_scripts[input_index].data +
+        vin.sequence.to_bytes(4, 'little')
+    )
+
+    # Full sighash preimage
+    preimage = (
+        bytes([0x00]) +                          # epoch
+        sighash_type.to_bytes(1, 'little') +     # hash_type
+        tx.version.to_bytes(4, 'little') +       # nVersion
+        tx.locktime.to_bytes(4, 'little') +      # nLockTime
+        sha_prevouts +
+        sha_amounts +
+        sha_scriptpubkeys +
+        sha_sequences +
+        sha_outputs +
+        spend_type +
+        input_index.to_bytes(4, 'little')        # input_index
+    )    
+    return tagged_hash("TapSighash", preimage)

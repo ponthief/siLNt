@@ -1945,6 +1945,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "bitcoinlib" },
+    { name = "coincurve" },
     { name = "dnspython" },
     { name = "embit" },
     { name = "lnbits" },
@@ -1963,6 +1964,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "bitcoinlib", specifier = ">=0.6.12.1" },
+    { name = "coincurve", specifier = ">=20.0.0" },
     { name = "dnspython", specifier = ">=2.7.0" },
     { name = "embit", specifier = ">=0.8.0" },
     { name = "lnbits", specifier = ">1" },
