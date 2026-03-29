@@ -1,9 +1,9 @@
 import json
 from typing import Optional, Tuple
-
+import secrets
 from lnbits.db import Database
 from lnbits.helpers import urlsafe_short_hash
-from .models import Config, ConfigDb, BlindbitConfig, WalletAccount
+from .models import Config, ConfigDb, BlindbitConfig, WalletAccount, UTXORecord
 
 from embit.descriptor import Descriptor, Key
 from embit.descriptor.arguments import AllowedDerivation
@@ -134,14 +134,35 @@ async def get_or_create_server_secret() -> str:
     if row:
         return json.loads(row["json_data"])["secret"]
     
-    # Generate new secret on first use
-    import secrets
+    # Generate new secret on first use    
     server_secret = secrets.token_hex(32)
     await db.execute(
         "INSERT INTO silnt.blindbit_config (id, json_data) VALUES (:id, :json_data)",
         {"id": SILNT_SECRET_ID, "json_data": json.dumps({"secret": server_secret})},
     )
     return server_secret
+
+async def insert_utxos_for_wallet(wallet_id: str, utxos: [UTXORecord]) -> None:
+    for utxo in utxos:        
+        existing = await db.fetchone(
+            "SELECT txid FROM silnt.utxos WHERE txid = :txid",
+            {"txid": utxo.get('txid')},
+        )
+        if existing:
+            await db.execute(
+                "UPDATE silnt.utxos SET txid = :txid WHERE wallet_id = :wallet_id",
+                {"txid": utxo.get('txid'), "wallet_id": wallet_id},
+            )
+        else:
+            await db.execute(
+                "INSERT INTO silnt.utxos (txid, vout, amount, priv_key_tweak, pub_key, timestamp, utxo_state, wallet_id) \
+                VALUES (:txid, :vout, :amount, :priv_key_tweak,  :pub_key, :timestamp, :utxo_state, :wallet_id",
+                {"txid": utxo.get('txid'), "vout": int(utxo.get('vout')), "amount": int(utxo.get('amount')),
+                "priv_key_tweak": utxo.get('priv_key_tweak'), "pub_key": utxo.get('pub_key'),
+                "timestamp": int(utxo.get('timestamp')), "utxo_state": utxo.get('utxo_state'), "wallet_id": wallet_id},
+            )
+
+
 # ── Global admin-only blindbit config ───────────────────────────────────────
 
 async def get_blindbit_config() -> BlindbitConfig:

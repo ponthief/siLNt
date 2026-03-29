@@ -31,13 +31,12 @@ class WalletAccount(BaseModel):
 
 class UTXORecord(BaseModel):
     txid: str
-    vout: str            
+    vout: int            
     amount: int    
     priv_key_tweak: str    
     pub_key: str
     timestamp: int
-    utxo_state: str
-    label: str
+    utxo_state: str    
     wallet_id: str
 
 class BuildTxRequest(BaseModel):
@@ -61,3 +60,5 @@ class ConfigDb(BaseModel):
     user: str
     json_data: Config
 
+class RescanRequest(BaseModel):
+    height: int

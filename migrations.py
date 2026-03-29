@@ -30,8 +30,7 @@ async def m001_initial(db):
             priv_key_tweak TEXT NOT NULL,
             pub_key TEXT NOT NULL,
             timestamp TIMESTAMP NOT NULL,
-            utxo_state TEXT NOT NULL,
-            label TEXT NOT NULL,
+            utxo_state TEXT NOT NULL,            
             wallet_id TEXT NOT NULL
         );
     """

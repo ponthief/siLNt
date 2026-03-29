@@ -1,5 +1,7 @@
 import base64
 import hashlib
+import httpx
+from base64 import b64encode
 from embit import bip32, bip39, ec, finalizer, script
 from embit.networks import NETWORKS
 from binascii import hexlify
@@ -419,3 +421,49 @@ def taproot_sighash(
         input_index.to_bytes(4, 'little')        # input_index
     )    
     return tagged_hash("TapSighash", preimage)
+
+async def register_blindbit_wallet(
+    scan_secret_hex: str,
+    spend_key_hex: str,
+    birth_height: int,
+    blindbit_url: str,
+    blindbit_user: str = "",
+    blindbit_pass: str = "",
+) -> dict:
+    """
+    Register wallet with BlindBit by sending scan secret and spend public key.
+    Calls PUT /wallet on the BlindBit instance.
+    """    
+
+    # Derive spend public key from spend private key
+    spend_priv_int = int_from_bytes(bytes.fromhex(spend_key_hex))
+    spend_pub_point = pubkey_point_gen_from_int(spend_priv_int)
+    # Compressed public key (33 bytes)
+    spend_pub_hex = serP(spend_pub_point).hex()
+
+    payload = {
+        "secret_sec": scan_secret_hex,
+        "spend_pub": spend_pub_hex,
+        "birth_height": birth_height,
+    }
+
+    headers = {"Content-Type": "application/json"}
+    if blindbit_user and blindbit_pass:
+        credentials = b64encode(
+            f"{blindbit_user}:{blindbit_pass}".encode()
+        ).decode()
+        headers["Authorization"] = f"Basic {credentials}"
+
+    base_url = blindbit_url.rstrip("/")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.put(
+            f"{base_url}/new-keys",
+            json=payload,
+            headers=headers
+        )
+        if resp.status_code != 200:
+            raise ValueError(
+                f"BlindBit wallet registration failed: {resp.status_code} {resp.text}"
+            )
+        return resp.json()

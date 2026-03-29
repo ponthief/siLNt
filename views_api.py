@@ -9,6 +9,7 @@ from .helpers.wallet import (
     decrypt_spend_key,
     decrypt_secret,
     build_transaction,
+    register_blindbit_wallet
 )
 from .helpers.address_resolver import bip353_resolve
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -31,7 +32,8 @@ from .crud import (
     get_silnt_wallet,
     get_blindbit_config,
     update_blindbit_config,
-    get_spend_key
+    get_spend_key,
+    insert_utxos_for_wallet
 )
 
 from .models import (
@@ -40,9 +42,9 @@ from .models import (
     WalletAccount,
     BuildTxRequest,
     BroadcastTxRequest,
-    Config
+    Config,
+    RescanRequest
 )
-
 
 
 silnt_api_router = APIRouter()
@@ -104,6 +106,26 @@ async def api_wallet_create(
         new_wallet.spend_key = spend_key
         new_wallet.sp_address = sp_address
         await create_silnt_wallet(new_wallet)
+
+        # ── Register wallet with BlindBit ─────────────────────────────
+        # blindbit = await get_blindbit_config()
+        # if blindbit.blindbit_url:
+        #     try:
+        #         # Decrypt keys for BlindBit registration
+        #         decrypted_scan = await decrypt_secret(scan_secret)
+        #         decrypted_spend = decrypt_spend_key(spend_key, decrypted_scan)
+        #         await register_blindbit_wallet(
+        #             scan_secret_hex=decrypted_scan,
+        #             spend_key_hex=decrypted_spend,
+        #             birth_height=int(data.last_height),
+        #             blindbit_url=blindbit.blindbit_url,
+        #             blindbit_user=blindbit.blindbit_user,
+        #             blindbit_pass=blindbit.blindbit_pass,
+        #         )
+        #         logger.info(f"Wallet registered with BlindBit: {sp_address}")
+        #     except Exception as e:
+        #         # Don't fail wallet creation if BlindBit registration fails
+        #         logger.warning(f"BlindBit registration failed (wallet still created): {e}")    
     except Exception as exc:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(exc)) from exc
     return ''
@@ -211,6 +233,108 @@ async def api_scan_blockchain():
             detail="blindbit-scan timed out",
         )
 
+@silnt_api_router.get(
+    "/api/v1/utxos/{wallet_id}",
+    description="Fetch UTXOs from blindbit",
+    dependencies=[Depends(require_invoice_key)],
+)
+async def api_get_utxos(wallet_id: str):
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
+    blindbit = await get_blindbit_config()
+
+    if not blindbit.blindbit_url:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="BlindBit URL not configured. An admin must set it first.",
+        )
+
+    headers = {}
+    if blindbit.blindbit_user and blindbit.blindbit_pass:
+        credentials = b64encode(
+            f"{blindbit.blindbit_user}:{blindbit.blindbit_pass}".encode()
+        ).decode()
+        headers["Authorization"] = f"Basic {credentials}"
+
+    base_url = blindbit.blindbit_url.rstrip("/")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            utxos_resp = await client.get(f"{base_url}/utxos", headers=headers)
+            height_resp = await client.get(f"{base_url}/height", headers=headers)
+
+            if utxos_resp.status_code != 200:
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_GATEWAY,
+                    detail=f"blindbit /utxos returned {utxos_resp.status_code}",
+                )
+
+            logger.info(utxos_resp.json())
+            await insert_utxos_for_wallet(wallet_id, utxos_resp.json())
+            return {
+                "utxos": utxos_resp.json(),
+                "height": height_resp.json() if height_resp.status_code == 200 else None,
+            }
+
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_GATEWAY,
+            detail=f"Could not connect to blindbit at {base_url}",
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=HTTPStatus.GATEWAY_TIMEOUT,
+            detail="blindbit timed out",
+        )
+
+@silnt_api_router.post(
+    "/api/v1/rescan",
+    description="Trigger rescan from a given block height",
+    dependencies=[Depends(require_admin_key)],
+)
+async def api_rescan(data: RescanRequest):
+    blindbit = await get_blindbit_config()
+
+    if not blindbit.blindbit_url:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="BlindBit URL not configured. An admin must set it first.",
+        )
+
+    headers = {"Content-Type": "application/json"}
+    if blindbit.blindbit_user and blindbit.blindbit_pass:
+        credentials = b64encode(
+            f"{blindbit.blindbit_user}:{blindbit.blindbit_pass}".encode()
+        ).decode()
+        headers["Authorization"] = f"Basic {credentials}"
+
+    base_url = blindbit.blindbit_url.rstrip("/")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{base_url}/rescan",
+                json={"height": data.height},
+                headers=headers
+            )
+            if resp.status_code != 200:
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_GATEWAY,
+                    detail=f"blindbit /rescan returned {resp.status_code}: {resp.text}",
+                )
+            return resp.json()
+
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_GATEWAY,
+            detail=f"Could not connect to blindbit at {base_url}",
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=HTTPStatus.GATEWAY_TIMEOUT,
+            detail="blindbit rescan timed out",
+        )
 
 # BIP353
 @silnt_api_router.get("/api/v1/bip353/resolve")
@@ -310,7 +434,7 @@ async def api_broadcast_transaction(data: BroadcastTxRequest):
     except httpx.ConnectError:
         raise HTTPException(
             status_code=HTTPStatus.BAD_GATEWAY,
-            detail=f"Could not connect to {Config.mempool_endpoint}"
+            detail=f"Could not connect to {config.mempool_endpoint}"
         )
     except httpx.TimeoutException:
         raise HTTPException(

@@ -99,11 +99,21 @@
                   flat
                   dense
                   size="xs"
-                  @click="$emit('scan-wallet', props.row)"
-                  icon="radar"
+                  @click="$emit('fetch-utxos', props.row)"
+                  icon="download"
                   color="teal"
                 >
-                  <q-tooltip>Scan</q-tooltip>
+                  <q-tooltip>Fetch UTXOs</q-tooltip>
+                </q-btn>
+                <q-btn
+                  flat
+                  dense
+                  size="xs"
+                  @click="$emit('rescan-wallet', props.row)"
+                  icon="radar"
+                  color="orange"
+                >
+                  <q-tooltip>Rescan Blockchain</q-tooltip>
                 </q-btn>
                 <q-btn
                   flat
