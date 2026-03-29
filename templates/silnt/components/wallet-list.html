@@ -115,8 +115,16 @@
                 >
                   <q-tooltip>Edit Wallet's HR Address/Height</q-tooltip>
                 </q-btn>
-            </q-td>
-            <q-td auto-width>
+                <q-btn
+                flat
+                dense
+                size="xs"
+                @click="showQrCode(props.row)"
+                icon="qr_code"
+                color="purple"
+              >
+                <q-tooltip>Show SP Address QR</q-tooltip>
+              </q-btn>                        
                 <q-btn
                   flat
                   dense
@@ -135,7 +143,51 @@
     </q-table>
   </q-card-section>
 </q-card>
+<q-dialog v-model="qrDialog.show" position="top">
+  <q-card class="q-pa-lg lnbits__dialog-card">
+    <div class="row items-center q-mb-md">
+      <h5 class="text-subtitle1 q-my-none">Receive to Silent Payment Address</h5>
+      <q-space></q-space>
+      <q-btn v-close-popup flat round icon="close" color="grey"></q-btn>
+    </div>
+    <q-separator class="q-mb-md"></q-separator>
 
+    <div class="text-center q-mb-md">
+      <lnbits-qrcode
+        :value="qrDialog.address"
+        :show-buttons="false"
+      ></lnbits-qrcode>
+    </div>
+
+    <div
+      class="q-pa-sm q-mb-md"
+      style="
+        border: 1px solid #e0e0e0;
+        border-radius: 4px;
+        font-family: monospace;
+        font-size: 11px;
+        word-break: break-all;
+        line-height: 1.6;
+        color: #f97316;
+        text-align: center;
+      "
+    >
+      <span v-text="qrDialog.address"></span>
+    </div>
+
+    <div class="row justify-center q-gutter-sm">
+      <q-btn
+        flat
+        dense
+        icon="content_copy"
+        color="orange"
+        label="Copy"
+        @click="copyText(qrDialog.address)"
+      ></q-btn>
+      <q-btn v-close-popup flat color="grey">Close</q-btn>
+    </div>
+  </q-card>
+</q-dialog>
 <q-dialog v-model="formDialog.show" position="top" @hide="closeFormDialog">
   <q-card class="q-pa-lg q-pt-xl lnbits__dialog-card">
     <q-form @submit="addWalletAccount" class="q-gutter-md">

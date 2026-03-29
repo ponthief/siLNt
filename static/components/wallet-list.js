@@ -31,7 +31,11 @@ window.app.component('wallet-list', {
           hr_address: '',
           last_height: ''          
         }
-      },  
+      },
+      qrDialog: {
+        show: false,
+        address: ''
+      },
       bip353Valid: true,          
       showCreating: false,
       showUpdating: false,
@@ -179,7 +183,7 @@ window.app.component('wallet-list', {
     deleteWalletDialog: function (walletAccountId) {
       LNbits.utils
         .confirmDialog(
-          'Are you sure you want to delete this Silnt wallet?'
+          'Are you sure you want to delete this wallet?'
         )
         .onOk(async () => {
           try {
@@ -309,6 +313,10 @@ window.app.component('wallet-list', {
           position: position || 'bottom'
         })
       })
+    },
+    showQrCode: function (wallet) {
+      this.qrDialog.address = wallet.sp_address || ''
+      this.qrDialog.show = true
     },    
   },
   created: async function () {   

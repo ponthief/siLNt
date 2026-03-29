@@ -23,6 +23,8 @@ window.app = Vue.createApp({
         show: false,
         data: null
       },
+      showBroadcastConfirm: false,
+      sendTxFee: 0,
       ...tables,
       ...tableData,
       walletAccounts: [],            
@@ -240,6 +242,7 @@ window.app = Vue.createApp({
           }
         )        
         this.sendTxResult = data.psbt || data.tx_hex || JSON.stringify(data)
+        this.sendTxFee = data.fee 
         this.$q.notify({
           type: 'positive',
           message: 'Transaction built successfully.',
@@ -265,15 +268,19 @@ window.app = Vue.createApp({
           message: 'Transaction broadcast successfully!',
           timeout: 8000
         })
+        this.showBroadcastConfirm = false  
         this.showSendDialog = false
         this.sendTxResult = null
+        this.sendTxFee = 0
       } catch (err) {
         LNbits.utils.notifyApiError(err)
       } finally {
         this.broadcastLoading = false
       }
     },
-
+    confirmBroadcast: function () {
+      this.showBroadcastConfirm = true
+    },
     copyText: function (text) {
       Quasar.copyToClipboard(text).then(() => {
         this.$q.notify({
