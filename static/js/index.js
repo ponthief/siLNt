@@ -229,13 +229,21 @@ window.app = Vue.createApp({
       })
     },        
     clearUtxosForWallet: function (walletId) {
-      // Check if any displayed UTXOs belong to the deleted wallet
-      const hasUtxos = this.utxos.data.some(u => u.wallet === walletId)
-      if (!hasUtxos) return
+      // Remove UTXOs belonging to deleted wallet
+      const before = this.utxos.data.length
+      this.utxos.data = this.utxos.data.filter(u => u.wallet !== walletId)
+      
+      // Recalculate total from remaining unspent UTXOs
+      this.utxos.total = this.utxos.data
+        .filter(u => u.utxo_state === 'unspent')
+        .reduce((sum, u) => sum + (u.amount || 0), 0)
 
-      // Clear UTXOs and reset totals
-      this.utxos.data = []
-      this.utxos.total = 0
+      // If nothing was filtered (wallet field missing), clear everything
+      if (this.utxos.data.length === before) {
+        this.utxos.data = []
+        this.utxos.total = 0
+      }
+
       this.lastScanResult = null
 
       this.$q.notify({
@@ -243,7 +251,7 @@ window.app = Vue.createApp({
         message: 'UTXOs cleared for deleted wallet.',
         timeout: 5000
       })
-    }, 
+    },
     openSendDialog: function (wallet) {
       this.sendWallet = wallet
       this.sendTxResult = null

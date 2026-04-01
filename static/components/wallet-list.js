@@ -104,7 +104,7 @@ window.app.component('wallet-list', {
       const data = _.omit(this.formDialog.data, 'wallet')
       data.network = this.network
       // Validate BIP353 hr_address if provided
-      if (data.hr_address) {
+      if (data.hr_address && data.hr_address.trim() !== '') {
         const valid = await this.validateBip353(data.hr_address)
         if (!valid) {
           this.showCreating = false
@@ -285,7 +285,10 @@ window.app.component('wallet-list', {
       return this.satBtc(amount)
     },
     closeFormDialog: function () {
-      this.formDialog.data = {
+      this.formDialog.data = {               
+        hr_address: '',     // ← empty string not null
+        last_height: '',
+        mnemonic: '',     
         is_unique: false
       }
     },
@@ -299,6 +302,11 @@ window.app.component('wallet-list', {
     },
     
     showAddAccountDialog: function () {
+      this.formDialog.data = {      
+      hr_address: '',
+      last_height: '',
+      mnemonic: ''
+    }
       this.formDialog.show = true      
     },
     showUpdateWalletDialog: function () {
