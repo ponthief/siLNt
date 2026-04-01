@@ -9,12 +9,16 @@ window.app = Vue.createApp({
   data() {
     return {
       blindbit: {
-        url: '',
-        user: '',
-        pass: ''
-      },      
-      rescanHeight: '',
-      showRescanDialog: false,
+        url: ''        
+      },  
+      showScanDialog: false,
+      scanDialog: {
+        wallet: null,
+        lastHeight: 0,
+        chainTip: null,
+        oracleTip: null,
+        loading: false
+      },    
       config: {sats_denominated: true},
       showBip353Dialog: false,
       bip353Address: '',
@@ -78,79 +82,12 @@ window.app = Vue.createApp({
   methods: {
 
     //################### UTXOs ###################
-    // scanSilentPayAddress: async function (wallet) {
-    //   if (!this.config.blindbit_url) {
-    //     this.$q.notify({
-    //       type: 'warning',
-    //       message: 'BlindBit Scan URL not configured. Open Settings to set it.',
-    //       timeout: 10000
-    //     })
-    //     return
-    //   }
-    //   try {
-    //     const {data} = await LNbits.api.request(
-    //       'POST',
-    //       '/silnt/api/v1/scan',
-    //       this.g.user.wallets[0].inkey,
-    //       {
-    //         blindbit_url: this.blindbit.url,
-    //         auth_user: this.blindbit.user,
-    //         auth_pass: this.blindbit.pass
-    //       }
-    //     )
-
-    //     // Map blindbit UTXOs into the utxos list
-    //     const mappedUtxos = (data.utxos || []).map(u => ({
-    //       txid: u.txid,          
-    //       amount: u.amount,
-    //       vout: u.vout || 0,          
-    //       utxo_state: u.utxo_state,
-    //       label: u.label,
-    //       timestamp: u.timestamp,
-    //       wallet: wallet?.id,
-    //       priv_key_tweak: u.priv_key_tweak || '',
-    //       pub_key: u.pub_key || ''
-    //     }))
-    //     this.utxos.data = mappedUtxos       
-    //     this.utxos.total = mappedUtxos.filter(u => u.utxo_state === 'unspent').reduce(
-    //       (total, u) => total + (u.amount || 0), 0
-    //     )
-
-    //     const height = data.height?.height
-    //     this.lastScanResult = {
-    //       utxos: mappedUtxos,
-    //       timestamp: Date.now()
-    //     }
-    //     this.$q.notify({
-    //       type: 'positive',
-    //       message: `Scan complete. ${this.utxos.data.length} UTXO(s) found.` +
-    //         (height ? ` Scanned to block ${height}.` : ''),
-    //       timeout: 10000
-    //     })
-    //     this.tab = 'utxos'
-    //   } catch (err) {
-    //     this.$q.notify({
-    //       type: 'warning',
-    //       message: 'Failed to connect to blindbit-scan',
-    //       timeout: 10000
-    //     })
-    //     LNbits.utils.notifyApiError(err)
-    //   } finally {        
-    //   }
-    // },
-    fetchUtxos: async function (wallet) {
-      if (!this.config.blindbit_url) {
-        this.$q.notify({
-          type: 'warning',
-          message: 'BlindBit URL not configured. Open Settings to set it.',
-          timeout: 10000
-        })
-        return
-      }
-      try {        
+    fetchUtxos: async function (wallet) {      
+      if (!wallet || !wallet.id) return
+      try {
         const {data} = await LNbits.api.request(
           'GET',
-          '/silnt/api/v1/utxos/PMMgt3S3CSkc636iwSDdoJ',
+          `/silnt/api/v1/utxos?wallet_id=${wallet.id}`,
           this.g.user.wallets[0].inkey
         )
 
@@ -160,10 +97,10 @@ window.app = Vue.createApp({
           vout: u.vout ?? 0,
           utxo_state: u.utxo_state,
           timestamp: u.timestamp,
-          // label: u.label,
+          label: u.label,
           priv_key_tweak: u.priv_key_tweak,
           pub_key: u.pub_key,
-          wallet: wallet?.id
+          wallet: wallet.id
         }))
 
         this.utxos.data = mappedUtxos
@@ -176,11 +113,9 @@ window.app = Vue.createApp({
           timestamp: Date.now()
         }
 
-        const height = data.height?.height
         this.$q.notify({
           type: 'positive',
-          message: `Fetched ${mappedUtxos.length} UTXO(s).` +
-            (height ? ` Current height: ${height}.` : ''),
+          message: `Loaded ${mappedUtxos.length} UTXO(s) from DB.`,
           timeout: 5000
         })
         this.tab = 'utxos'
@@ -188,37 +123,73 @@ window.app = Vue.createApp({
         LNbits.utils.notifyApiError(err)
       }
     },
-    rescanBlockchain: async function () {
-      if (!this.rescanHeight || isNaN(this.rescanHeight)) {
+    scanWallet: async function (wallet) {
+      if (!wallet || !wallet.id) return
+      if (!this.config.blindbit_url) {
         this.$q.notify({
           type: 'warning',
-          message: 'Please enter a valid block height.',
-          timeout: 5000
+          message: 'BlindBit Oracle URL not configured. Open Settings to set it.',
+          timeout: 10000
         })
         return
       }
+        // Open dialog immediately with known data
+  this.scanDialog.wallet = wallet
+  this.scanDialog.lastHeight = wallet.last_height
+  this.scanDialog.chainTip = null
+  this.scanDialog.oracleTip = null  
+  this.scanDialog.loading = true
+  this.showScanDialog = true
+
+  // Fetch chain tip in background
+  try {
+    const response = await LNbits.api.request(
+      'GET',
+      '/silnt/api/v1/oracle/tip',
+      this.g.user.wallets[0].inkey
+    )
+    console.log(response)
+    const tip = response.data?.height ?? response.data?.block_height
+    this.scanDialog.chainTip = tip
+    this.scanDialog.chainTip = tip
+    } catch (err) {
+      this.scanDialog.chainTip = null
+      this.$q.notify({
+        type: 'warning',
+        message: 'Could not fetch chain tip from BlindBit Oracle.',
+        timeout: 5000
+      })
+    } finally {
+      this.scanDialog.loading = false
+    }
+    },
+    startScan: async function () {
+      const wallet = this.scanDialog.wallet
+      this.showScanDialog = false
       try {
-        await LNbits.api.request(
+        this.$q.notify({
+          type: 'info',
+          message: `Scanning from block ${this.scanDialog.lastHeight} to ${this.scanDialog.chainTip}...`,
+          timeout: 5000
+        })
+        const {data} = await LNbits.api.request(
           'POST',
-          '/silnt/api/v1/rescan',
+          `/silnt/api/v1/wallet/${wallet.id}/scan`,
           this.g.user.wallets[0].adminkey,
-          { height: parseInt(this.rescanHeight) }
+          {
+            from_height: this.scanDialog.lastHeight,
+            to_height: this.scanDialog.chainTip
+          }
         )
         this.$q.notify({
           type: 'positive',
-          message: `Rescan triggered from block ${this.rescanHeight}. Fetch UTXOs after scan completes.`,
+          message: `Scan complete. ${data.utxos_found} UTXO(s) found across ${data.blocks_scanned} blocks.`,
           timeout: 8000
         })
-        this.showRescanDialog = false
-        this.rescanHeight = ''
+        await this.fetchUtxos(wallet)
       } catch (err) {
         LNbits.utils.notifyApiError(err)
       }
-    },
-    openRescanDialog: function (wallet) {
-      // Pre-fill with wallet's born-at height as a sensible default
-      this.rescanHeight = wallet ? wallet.last_height : ''
-      this.showRescanDialog = true
     },
     resolveBip353: async function () {
       if (!this.bip353Address) return
@@ -363,15 +334,7 @@ window.app = Vue.createApp({
     },
     confirmBroadcast: function () {
       this.showBroadcastConfirm = true
-    },
-    copyText: function (text) {
-      Quasar.copyToClipboard(text).then(() => {
-        this.$q.notify({
-          message: 'Copied to clipboard!',
-          position: 'bottom'
-        })
-      })
-    },               
+    },                   
   },
   created: async function () {       
   }

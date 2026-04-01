@@ -103,17 +103,17 @@
                   icon="download"
                   color="teal"
                 >
-                  <q-tooltip>Fetch UTXOs</q-tooltip>
+                  <q-tooltip>Load UTXOs from DB</q-tooltip>
                 </q-btn>
                 <q-btn
                   flat
                   dense
                   size="xs"
-                  @click="$emit('rescan-wallet', props.row)"
+                  @click="$emit('scan-wallet', props.row)"
                   icon="radar"
-                  color="orange"
-                >
-                  <q-tooltip>Rescan Blockchain</q-tooltip>
+                  color="green"
+                >                  
+                  <q-tooltip>Scan Blockchain</q-tooltip>
                 </q-btn>
                 <q-btn
                   flat

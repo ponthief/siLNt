@@ -4,9 +4,7 @@ from fastapi import Query
 from pydantic import BaseModel
 
 class BlindbitConfig(BaseModel):
-    blindbit_url: str = ""
-    blindbit_user: str = ""
-    blindbit_pass: str = ""
+    blindbit_url: str = ""   
     
 class CreateWallet(BaseModel):
     mnemonic: str = None
@@ -34,10 +32,14 @@ class UTXORecord(BaseModel):
     vout: int            
     amount: int    
     priv_key_tweak: str    
-    pub_key: str
-    timestamp: int
-    utxo_state: str    
+    pub_key: str    
+    utxo_state: str
+    timestamp: int    
     wallet_id: str
+
+class ScanWalletRequest(BaseModel):
+    from_height: Optional[int] = None
+    to_height: Optional[int] = None
 
 class BuildTxRequest(BaseModel):
     wallet_id: str

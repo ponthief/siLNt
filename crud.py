@@ -142,25 +142,64 @@ async def get_or_create_server_secret() -> str:
     )
     return server_secret
 
-async def insert_utxos_for_wallet(wallet_id: str, utxos: [UTXORecord]) -> None:
-    for utxo in utxos:        
-        existing = await db.fetchone(
-            "SELECT txid FROM silnt.utxos WHERE txid = :txid",
-            {"txid": utxo.get('txid')},
-        )
-        if existing:
+async def get_utxos_for_wallet(wallet_id: str) -> list[UTXORecord]:
+    return await db.fetchall(
+        "SELECT * FROM silnt.utxos WHERE wallet_id = :wallet_id",
+        {"wallet_id": wallet_id},
+        UTXORecord,
+    )
+
+async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> None: 
+        await delete_utxos_for_wallet(wallet_id)   
+        for utxo in utxos:
             await db.execute(
-                "UPDATE silnt.utxos SET txid = :txid WHERE wallet_id = :wallet_id",
-                {"txid": utxo.get('txid'), "wallet_id": wallet_id},
-            )
-        else:
-            await db.execute(
-                "INSERT INTO silnt.utxos (txid, vout, amount, priv_key_tweak, pub_key, timestamp, utxo_state, wallet_id) \
-                VALUES (:txid, :vout, :amount, :priv_key_tweak,  :pub_key, :timestamp, :utxo_state, :wallet_id",
-                {"txid": utxo.get('txid'), "vout": int(utxo.get('vout')), "amount": int(utxo.get('amount')),
-                "priv_key_tweak": utxo.get('priv_key_tweak'), "pub_key": utxo.get('pub_key'),
-                "timestamp": int(utxo.get('timestamp')), "utxo_state": utxo.get('utxo_state'), "wallet_id": wallet_id},
-            )
+            """INSERT INTO silnt.utxos (txid, vout, amount, priv_key_tweak, pub_key, utxo_state, timestamp, wallet_id)
+            VALUES (:txid, :vout, :amount, :priv_key_tweak, :pub_key, :utxo_state, :timestamp, :wallet_id)
+            ON CONFLICT (txid) DO UPDATE SET
+                utxo_state = EXCLUDED.utxo_state,
+                amount = EXCLUDED.amount,
+                priv_key_tweak = EXCLUDED.priv_key_tweak,
+                pub_key = EXCLUDED.pub_key""",
+            utxo.to_db_row(wallet_id)
+)            
+            # txid = utxo.txid.hex()
+            # vout = utxo.vout
+            # amount = utxo.amount
+            # priv_key_tweak = utxo.get('priv_key_tweak') or ''
+            # pub_key = utxo.pub_key or ''            
+            # utxo_state = utxoutxo_state') or 'unknown'           
+
+            # existing = await db.fetchone(
+            #     "SELECT txid FROM silnt.utxos WHERE txid = :txid AND vout = :vout",
+            #     {"txid": txid, "vout": vout},
+            # )            
+            # if existing:
+            #     await db.execute(
+            #         """UPDATE silnt.utxos SET
+            #             amount = :amount,
+            #             priv_key_tweak = :priv_key_tweak,
+            #             pub_key = :pub_key,                        
+            #             utxo_state = :utxo_state,                       
+            #             wallet_id = :wallet_id
+            #         WHERE txid = :txid AND vout = :vout""",
+            #         {
+            #             "txid": txid, "vout": vout, "amount": amount,
+            #             "priv_key_tweak": priv_key_tweak, "pub_key": pub_key,
+            #             "utxo_state": utxo_state, "wallet_id": wallet_id
+            #         },
+            #     )
+            # else:
+            #     await db.execute(
+            #         """INSERT INTO silnt.utxos
+            #             (txid, vout, amount, priv_key_tweak, pub_key, utxo_state, wallet_id)
+            #         VALUES
+            #             (:txid, :vout, :amount, :priv_key_tweak, :pub_key, :utxo_state, :wallet_id)""",
+            #         {
+            #             "txid": txid, "vout": vout, "amount": amount,
+            #             "priv_key_tweak": priv_key_tweak, "pub_key": pub_key,
+            #             "utxo_state": utxo_state, "wallet_id": wallet_id
+            #         },
+            #     )
 
 
 # ── Global admin-only blindbit config ───────────────────────────────────────

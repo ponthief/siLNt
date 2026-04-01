@@ -11,7 +11,7 @@ window.app.component('wallet-list', {
     'network',
     'scannedUtxos'   
   ],
-  emits: ['accounts-update',  'fetch-utxos', 'rescan-wallet', 'clear-utxos', 'open-bip353', 'send-wallet'],
+  emits: ['accounts-update',  'fetch-utxos', 'scan-wallet', 'clear-utxos', 'open-bip353', 'send-wallet'],
   data: function () {
     return {
       walletAccounts: [],

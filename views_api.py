@@ -8,15 +8,16 @@ from .helpers.wallet import (
     decrypt_mnemonic,
     decrypt_spend_key,
     decrypt_secret,
-    build_transaction,
-    register_blindbit_wallet
+    build_transaction   
 )
+from .helpers.scan import scan_wallet
 from .helpers.address_resolver import bip353_resolve
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from lnbits.core.models import WalletTypeInfo
 from lnbits.decorators import require_admin_key, require_invoice_key
 from lnbits.helpers import urlsafe_short_hash
 from loguru import logger
+
 
 from .crud import (
     get_silnt_wallets,
@@ -33,6 +34,7 @@ from .crud import (
     get_blindbit_config,
     update_blindbit_config,
     get_spend_key,
+    get_utxos_for_wallet,
     insert_utxos_for_wallet
 )
 
@@ -43,7 +45,8 @@ from .models import (
     BuildTxRequest,
     BroadcastTxRequest,
     Config,
-    RescanRequest
+    RescanRequest,
+    ScanWalletRequest
 )
 
 
@@ -105,27 +108,7 @@ async def api_wallet_create(
         new_wallet.scan_secret = scan_secret
         new_wallet.spend_key = spend_key
         new_wallet.sp_address = sp_address
-        await create_silnt_wallet(new_wallet)
-
-        # ── Register wallet with BlindBit ─────────────────────────────
-        # blindbit = await get_blindbit_config()
-        # if blindbit.blindbit_url:
-        #     try:
-        #         # Decrypt keys for BlindBit registration
-        #         decrypted_scan = await decrypt_secret(scan_secret)
-        #         decrypted_spend = decrypt_spend_key(spend_key, decrypted_scan)
-        #         await register_blindbit_wallet(
-        #             scan_secret_hex=decrypted_scan,
-        #             spend_key_hex=decrypted_spend,
-        #             birth_height=int(data.last_height),
-        #             blindbit_url=blindbit.blindbit_url,
-        #             blindbit_user=blindbit.blindbit_user,
-        #             blindbit_pass=blindbit.blindbit_pass,
-        #         )
-        #         logger.info(f"Wallet registered with BlindBit: {sp_address}")
-        #     except Exception as e:
-        #         # Don't fail wallet creation if BlindBit registration fails
-        #         logger.warning(f"BlindBit registration failed (wallet still created): {e}")    
+        await create_silnt_wallet(new_wallet)          
     except Exception as exc:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(exc)) from exc
     return ''
@@ -163,6 +146,31 @@ async def api_wallet_delete(wallet_id: str):
     await delete_utxos_for_wallet(wallet_id)
     return "", HTTPStatus.NO_CONTENT
 
+@silnt_api_router.get(
+    "/api/v1/oracle/tip",
+    dependencies=[Depends(require_invoice_key)],
+)
+async def api_get_chain_tip():
+    blindbit = await get_blindbit_config()
+    if not blindbit.blindbit_url:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="BlindBit Oracle URL not configured."
+        )
+    headers = {}
+    try:
+        async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+            resp = await client.get(
+                f"{blindbit.blindbit_url.rstrip('/')}/block-height",
+                headers=headers
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_GATEWAY,
+            detail=f"Could not reach BlindBit Oracle: {str(e)}"
+        )
 
 # ── BlindBit config ───────────────────────────────────────────────────────────
 
@@ -198,12 +206,7 @@ async def api_scan_blockchain():
             detail="BlindBit endpoint not configured. An admin must set it first.",
         )
 
-    headers = {}
-    if blindbit.blindbit_user and blindbit.blindbit_pass:
-        credentials = b64encode(
-            f"{blindbit.blindbit_user}:{blindbit.blindbit_pass}".encode()
-        ).decode()
-        headers["Authorization"] = f"Basic {credentials}"
+    headers = {}    
 
     base_url = blindbit.blindbit_url.rstrip("/")    
     try:
@@ -232,61 +235,20 @@ async def api_scan_blockchain():
             status_code=HTTPStatus.GATEWAY_TIMEOUT,
             detail="blindbit-scan timed out",
         )
-
+# ?wallet_id={wallet_id}
 @silnt_api_router.get(
-    "/api/v1/utxos/{wallet_id}",
+    "/api/v1/utxos",
     description="Fetch UTXOs from blindbit",
     dependencies=[Depends(require_invoice_key)],
 )
-async def api_get_utxos(wallet_id: str):
+async def api_get_utxos(wallet_id: str = Query(...), key_info: WalletTypeInfo = Depends(require_invoice_key)):
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
         raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
-    blindbit = await get_blindbit_config()
-
-    if not blindbit.blindbit_url:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST,
-            detail="BlindBit URL not configured. An admin must set it first.",
-        )
-
-    headers = {}
-    if blindbit.blindbit_user and blindbit.blindbit_pass:
-        credentials = b64encode(
-            f"{blindbit.blindbit_user}:{blindbit.blindbit_pass}".encode()
-        ).decode()
-        headers["Authorization"] = f"Basic {credentials}"
-
-    base_url = blindbit.blindbit_url.rstrip("/")
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            utxos_resp = await client.get(f"{base_url}/utxos", headers=headers)
-            height_resp = await client.get(f"{base_url}/height", headers=headers)
-
-            if utxos_resp.status_code != 200:
-                raise HTTPException(
-                    status_code=HTTPStatus.BAD_GATEWAY,
-                    detail=f"blindbit /utxos returned {utxos_resp.status_code}",
-                )
-
-            logger.info(utxos_resp.json())
-            await insert_utxos_for_wallet(wallet_id, utxos_resp.json())
-            return {
-                "utxos": utxos_resp.json(),
-                "height": height_resp.json() if height_resp.status_code == 200 else None,
-            }
-
-    except httpx.ConnectError:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_GATEWAY,
-            detail=f"Could not connect to blindbit at {base_url}",
-        )
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=HTTPStatus.GATEWAY_TIMEOUT,
-            detail="blindbit timed out",
-        )
+    utxos = await get_utxos_for_wallet(wallet_id)
+    return {
+        "utxos": [u.dict() for u in utxos],
+    }
 
 @silnt_api_router.post(
     "/api/v1/rescan",
@@ -303,11 +265,7 @@ async def api_rescan(data: RescanRequest):
         )
 
     headers = {"Content-Type": "application/json"}
-    if blindbit.blindbit_user and blindbit.blindbit_pass:
-        credentials = b64encode(
-            f"{blindbit.blindbit_user}:{blindbit.blindbit_pass}".encode()
-        ).decode()
-        headers["Authorization"] = f"Basic {credentials}"
+    
 
     base_url = blindbit.blindbit_url.rstrip("/")
 
@@ -315,7 +273,7 @@ async def api_rescan(data: RescanRequest):
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{base_url}/rescan",
-                json={"height": data.height},
+                json={"height": data.block_height},
                 headers=headers
             )
             if resp.status_code != 200:
@@ -335,6 +293,23 @@ async def api_rescan(data: RescanRequest):
             status_code=HTTPStatus.GATEWAY_TIMEOUT,
             detail="blindbit rescan timed out",
         )
+@silnt_api_router.post(
+    "/api/v1/wallet/{wallet_id}/scan",
+    dependencies=[Depends(require_admin_key)],
+)
+async def api_scan_wallet(wallet_id: str, data: ScanWalletRequest):    
+    try:
+        result = await scan_wallet(
+            wallet_id=wallet_id,
+            from_height=data.from_height,
+            to_height=data.to_height,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error(f"Scan failed: {e}")
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail=str(e))
 
 # BIP353
 @silnt_api_router.get("/api/v1/bip353/resolve")

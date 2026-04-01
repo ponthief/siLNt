@@ -21,9 +21,7 @@ window.app.component('wallet-config', {
       set(value) {
         value.isLoaded = true
         // Ensure blindbit auth fields are always present
-        value.blindbit_url = value.blindbit_url || ''
-        value.blindbit_user = value.blindbit_user || ''
-        value.blindbit_pass = value.blindbit_pass || ''
+        value.blindbit_url = value.blindbit_url || ''       
         this.internalConfig = JSON.parse(JSON.stringify(value))
         this.$emit(
           'update:config-data',

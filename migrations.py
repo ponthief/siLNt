@@ -16,6 +16,7 @@ async def m001_initial(db):
             sp_address TEXT NOT NULL,
             hr_address TEXT NOT NULL,
             last_height INTEGER,
+            last_scan_height INTEGER NOT NULL DEFAULT 0
             balance {db.big_int}
         );
     """
@@ -28,9 +29,9 @@ async def m001_initial(db):
             vout SMALLINT NOT NULL,            
             amount {db.big_int} NOT NULL,
             priv_key_tweak TEXT NOT NULL,
-            pub_key TEXT NOT NULL,
-            timestamp TIMESTAMP NOT NULL,
-            utxo_state TEXT NOT NULL,            
+            pub_key TEXT NOT NULL,            
+            utxo_state TEXT NOT NULL,
+            timestamp INTEGER NOT NULL DEFAULT 0,           
             wallet_id TEXT NOT NULL
         );
     """

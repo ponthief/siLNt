@@ -11,35 +11,16 @@
   <q-dialog v-model="show" position="top">
     <q-card class="q-pa-lg q-pt-xl lnbits__dialog-card">
       <q-form @submit="updateConfig" class="q-gutter-md">
+        <!-- BlindBit auth fields: only visible when adminkey is present -->
+        <template v-if="adminkey">
         <q-input
           filled
           dense
           v-model.trim="config.blindbit_url"
           type="text"
-          label="BlindBit URL"
+          label="BlindBit Oracle URL"
         >
-        </q-input>
-
-        <!-- BlindBit auth fields: only visible when adminkey is present -->
-        <template v-if="adminkey">
-          <q-input
-            filled
-            dense
-            v-model.trim="config.blindbit_user"
-            type="text"
-            label="BlindBit Auth User"
-            autocomplete="off"
-          >
-          </q-input>
-          <q-input
-            filled
-            dense
-            v-model.trim="config.blindbit_pass"
-            type="password"
-            label="BlindBit Auth Password"
-            autocomplete="new-password"
-          >
-          </q-input>
+        </q-input>          
         </template>        
 
         <div class="row q-mt-lg">
