@@ -100,7 +100,7 @@
                   dense
                   size="xs"
                   @click="$emit('fetch-utxos', props.row)"
-                  icon="download"
+                  icon="storage"
                   color="teal"
                 >
                   <q-tooltip>Load UTXOs from DB</q-tooltip>
@@ -215,13 +215,13 @@
         v-model="formDialog.data.mnemonic"
         height="30px"
         autogrow
-        label="12 words mnemonic"
+        label="12 words mnemonic - STORE SAFELY!!"
         ><q-tooltip
             anchor="center middle"
             self="center middle"
             :offset="[0, 10]"
           >
-            Encrypted and not stored anywhere
+            Encrypted and used only for SP Address derivation.
       </q-tooltip>
       </q-input>
       <q-input

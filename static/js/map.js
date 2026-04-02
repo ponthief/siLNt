@@ -1,72 +1,3 @@
-const mapAddressesData = a => ({
-  id: a.id,
-  address: a.address,
-  amount: a.amount,
-  wallet: a.wallet,
-  note: a.note,
-
-  isChange: a.branch_index === 1,
-  addressIndex: a.address_index,
-  hasActivity: a.has_activity
-})
-
-const mapInputToSentHistory = (tx, addressData, vin) => ({
-  sent: true,
-  txId: tx.txid,
-  address: addressData.address,
-  isChange: addressData.isChange,
-  amount: vin.prevout.value,
-  date: blockTimeToDate(tx.status.block_time),
-  height: tx.status.block_height,
-  confirmed: tx.status.confirmed,
-  fee: tx.fee,
-  expanded: false
-})
-
-const mapOutputToReceiveHistory = (tx, addressData, vout) => ({
-  received: true,
-  txId: tx.txid,
-  address: addressData.address,
-  isChange: addressData.isChange,
-  amount: vout.value,
-  date: blockTimeToDate(tx.status.block_time),
-  height: tx.status.block_height,
-  confirmed: tx.status.confirmed,
-  fee: tx.fee,
-  expanded: false
-})
-
-const mapUtxoToPsbtInput = utxo => ({
-  tx_id: utxo.txId,
-  vout: utxo.vout,
-  amount: utxo.amount,
-  address: utxo.address,
-  branch_index: utxo.isChange ? 1 : 0,
-  address_index: utxo.addressIndex,
-  wallet: utxo.wallet,
-  accountType: utxo.accountType,
-  accountPath: utxo.accountPath,
-  txHex: ''
-})
-
-const mapAddressDataToUtxo = (wallet, addressData, utxo) => ({
-  id: addressData.id,
-  address: addressData.address,
-  isChange: addressData.isChange,
-  addressIndex: addressData.addressIndex,
-  wallet: addressData.wallet,
-  accountType: addressData.accountType,
-  accountPath: wallet.meta.accountPath,
-  masterpubFingerprint: wallet.fingerprint,
-  txId: utxo.txid,
-  vout: utxo.vout,
-  confirmed: utxo.status.confirmed,
-  amount: utxo.value,
-  date: blockTimeToDate(utxo.status?.block_time),
-  sort: utxo.status?.block_time,
-  expanded: false,
-  selected: false
-})
 
 const mapWalletAccount = function (o) {
   return Object.assign({}, o, {
@@ -74,7 +5,9 @@ const mapWalletAccount = function (o) {
     title: o.title,       
     hr_address: o.hr_address,   
     last_height: o.last_height,
+    last_scan_height: o.last_scan_height,
     balance: o.balance,
+    sp_address: o.sp_address,
     expanded: false  
   })
 }

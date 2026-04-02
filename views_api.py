@@ -10,14 +10,13 @@ from .helpers.wallet import (
     decrypt_secret,
     build_transaction   
 )
-from .helpers.scan import scan_wallet
+from .helpers.scan import scan_wallet, get_scan_progress
 from .helpers.address_resolver import bip353_resolve
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from lnbits.core.models import WalletTypeInfo
 from lnbits.decorators import require_admin_key, require_invoice_key
 from lnbits.helpers import urlsafe_short_hash
 from loguru import logger
-
 
 from .crud import (
     get_silnt_wallets,
@@ -441,3 +440,11 @@ async def api_get_address(
     assert sp_address, f"Silent Payment address doesn't exist for wallet: {wallet_id}"
     hr_address = await get_hr_address(wallet_id)
     return sp_address, hr_address
+
+
+@silnt_api_router.get(
+    "/api/v1/wallet/{wallet_id}/scan/progress",
+    dependencies=[Depends(require_invoice_key)],
+)
+async def api_scan_progress(wallet_id: str):
+    return get_scan_progress(wallet_id)

@@ -26,6 +26,7 @@ class WalletAccount(BaseModel):
     sp_address: str
     hr_address: str
     last_height: int
+    last_scan_height: int = 1
 
 class UTXORecord(BaseModel):
     txid: str

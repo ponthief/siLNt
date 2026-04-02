@@ -14,11 +14,17 @@ window.app = Vue.createApp({
       showScanDialog: false,
       scanDialog: {
         wallet: null,
-        lastHeight: 0,
+        lastHeight: 1,
         chainTip: null,
         oracleTip: null,
         loading: false
-      },    
+      },
+      scanProgress: {
+        active: false,
+        current: 0,
+        total: 0,
+        found: 0,
+      },   
       config: {sats_denominated: true},
       showBip353Dialog: false,
       bip353Address: '',
@@ -133,45 +139,79 @@ window.app = Vue.createApp({
         })
         return
       }
-        // Open dialog immediately with known data
-  this.scanDialog.wallet = wallet
-  this.scanDialog.lastHeight = wallet.last_height
-  this.scanDialog.chainTip = null
-  this.scanDialog.oracleTip = null  
-  this.scanDialog.loading = true
-  this.showScanDialog = true
-
-  // Fetch chain tip in background
-  try {
-    const response = await LNbits.api.request(
-      'GET',
-      '/silnt/api/v1/oracle/tip',
-      this.g.user.wallets[0].inkey
-    )
-    console.log(response)
-    const tip = response.data?.height ?? response.data?.block_height
-    this.scanDialog.chainTip = tip
-    this.scanDialog.chainTip = tip
+      try {
+      const {data: freshWallet} = await LNbits.api.request(
+        'GET',
+        `/silnt/api/v1/wallet/${wallet.id}`,
+        this.g.user.wallets[0].inkey
+      )
+      wallet = mapWalletAccount(freshWallet)
     } catch (err) {
-      this.scanDialog.chainTip = null
-      this.$q.notify({
-        type: 'warning',
-        message: 'Could not fetch chain tip from BlindBit Oracle.',
-        timeout: 5000
-      })
-    } finally {
-      this.scanDialog.loading = false
+      // fall back to cached wallet if fetch fails
+      logger.warning('Could not refresh wallet from DB, using cached data')
     }
-    },
+        // Open dialog immediately with known data
+    this.scanDialog.wallet = wallet
+    this.scanDialog.lastHeight = wallet.last_scan_height || wallet.last_height
+    this.scanDialog.chainTip = null
+    this.scanDialog.oracleTip = null  
+    this.scanDialog.loading = true
+    this.showScanDialog = true
+
+    // Fetch chain tip in background
+    try {
+      const response = await LNbits.api.request(
+        'GET',
+        '/silnt/api/v1/oracle/tip',
+        this.g.user.wallets[0].inkey
+      )
+      console.log(response)
+      const tip = response.data?.height ?? response.data?.block_height
+      this.scanDialog.chainTip = tip
+      this.scanDialog.chainTip = tip
+      } catch (err) {
+        this.scanDialog.chainTip = null
+        this.$q.notify({
+          type: 'warning',
+          message: 'Could not fetch chain tip from BlindBit Oracle.',
+          timeout: 5000
+        })
+      } finally {
+        this.scanDialog.loading = false
+      }
+      },
     startScan: async function () {
       const wallet = this.scanDialog.wallet
       this.showScanDialog = false
+       // Start progress polling
+      this.scanProgress.active = true
+      this.scanProgress.current = 0
+      this.scanProgress.total = this.scanDialog.chainTip - this.scanDialog.lastHeight
+      this.scanProgress.found = 0
+      const pollInterval = setInterval(async () => {
+        try {
+          const {data} = await LNbits.api.request(
+            'GET',
+            `/silnt/api/v1/wallet/${wallet.id}/scan/progress`,
+            this.g.user.wallets[0].inkey
+          )
+          this.scanProgress.current = data.current || 0
+          this.scanProgress.total = data.total || this.scanProgress.total
+          this.scanProgress.found = data.found || 0
+          if (!data.active) {
+            clearInterval(pollInterval)
+            this.scanProgress.active = false
+          }
+        } catch (e) {
+          // ignore poll errors
+        }
+      }, 1000)  // poll every second
       try {
-        this.$q.notify({
-          type: 'info',
-          message: `Scanning from block ${this.scanDialog.lastHeight} to ${this.scanDialog.chainTip}...`,
-          timeout: 5000
-        })
+        // this.$q.notify({
+        //   type: 'info',
+        //   message: `Scanning from block ${this.scanDialog.lastHeight} to ${this.scanDialog.chainTip}...`,
+        //   timeout: 5000
+        // })
         const {data} = await LNbits.api.request(
           'POST',
           `/silnt/api/v1/wallet/${wallet.id}/scan`,
@@ -181,6 +221,8 @@ window.app = Vue.createApp({
             to_height: this.scanDialog.chainTip
           }
         )
+        clearInterval(pollInterval)
+        this.scanProgress.active = false
         this.$q.notify({
           type: 'positive',
           message: `Scan complete. ${data.utxos_found} UTXO(s) found across ${data.blocks_scanned} blocks.`,
@@ -188,6 +230,8 @@ window.app = Vue.createApp({
         })
         await this.fetchUtxos(wallet)
       } catch (err) {
+         clearInterval(pollInterval)
+        this.scanProgress.active = false
         LNbits.utils.notifyApiError(err)
       }
     },

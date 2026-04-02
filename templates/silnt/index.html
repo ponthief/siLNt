@@ -25,7 +25,31 @@
       @send-wallet="openSendDialog"
     >
     </wallet-list>    
-
+     <q-card v-if="scanProgress.active" class="q-pa-md">
+    <div class="row items-center q-mb-sm">
+      <div class="col text-caption text-grey">
+        Scanning blockchain...
+        <span class="text-orange text-weight-bold" v-text="scanProgress.current.toLocaleString()"></span>
+        /
+        <span v-text="scanProgress.total.toLocaleString()"></span>
+        blocks
+      </div>
+      <div class="col-auto text-caption text-grey">
+        <span class="text-green text-weight-bold" v-text="scanProgress.found"></span>
+        UTXOs found
+      </div>
+    </div>
+    <q-linear-progress
+      :value="scanProgress.total > 0 ? scanProgress.current / scanProgress.total : 0"
+      size="8px"
+      color="orange"
+      track-color="grey-3"
+      rounded
+    ></q-linear-progress>
+    <div class="text-right text-caption text-grey q-mt-xs">
+      <span v-text="scanProgress.total > 0 ? Math.round(scanProgress.current / scanProgress.total * 100) + '%' : '0%'"></span>
+    </div>
+  </q-card>
     <q-card v-if="config.isLoaded">
       <q-card-section>
         <q-tabs v-model="tab" no-caps class="bg-dark text-white shadow-2">          
@@ -243,7 +267,7 @@
       </div>
       <div class="row q-gutter-md q-mb-lg">
         <div class="col">
-          <div class="text-caption text-grey q-mb-xs">Scan From</div>
+          <div class="text-caption text-grey q-mb-xs">Last Scan</div>
           <q-input
             filled
             dense
@@ -286,13 +310,13 @@
         <q-btn
           unelevated
           color="orange"
-          label="Sync to Tip"
+          label="Scan For Utxos"
           :disable="!scanDialog.chainTip || scanDialog.loading"
           @click="startScan"
         ></q-btn>
         <q-btn v-close-popup flat color="grey" class="q-ml-auto">Cancel</q-btn>
       </div>
-    </q-card>
+    </q-card>    
   </q-dialog>
     <q-dialog v-model="showRescanDialog" position="top">
       <q-card class="q-pa-lg lnbits__dialog-card">

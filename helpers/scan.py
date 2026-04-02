@@ -42,6 +42,8 @@ from typing import Optional
 
 from coincurve import PublicKey, PrivateKey  
 
+# In-memory progress store — keyed by wallet_id
+_scan_progress: dict[str, dict] = {}
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
@@ -171,6 +173,7 @@ def add_private_keys(sk1: bytes, sk2: bytes) -> bytes:
     n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
     result = (int.from_bytes(sk1, "big") + int.from_bytes(sk2, "big")) % n
     return result.to_bytes(32, "big")
+    
 
 def create_label(scan_key: bytes, m: int) -> Label:
     """
@@ -181,6 +184,13 @@ def create_label(scan_key: bytes, m: int) -> Label:
     tweak = _tagged_hash("BIP0352/Label", scan_key + _ser_u32(m))
     pub_key = PublicKey.from_secret(tweak).format(compressed=True)
     return Label(pub_key=pub_key, tweak=tweak, m=m)
+
+def create_labels(scan_key: bytes, count: int = 21) -> list[Label]:
+    """
+    Create `count` labels starting from m=0 (change label).
+    Mirrors BlindBit's labelCount config.
+    """
+    return [create_label(scan_key, m) for m in range(count)]
 
 # ---------------------------------------------------------------------------
 # Label matching
@@ -450,7 +460,7 @@ async def scan_block(
     # tweaks: list[bytes] = []  # from BlindBit GetTweaks(blockHeight, dustLimit)
     # utxos: list[UTXOServed] = []  # from BlindBit GetUTXOs(blockHeight) 
     
-    labels = [create_label(scan_secret_bytes,0)]
+    labels = create_labels(scan_secret_bytes,count=21)
     owned = sync_block(tweaks, utxos, scan_secret_bytes, spend_pub_bytes, labels)
 
     return owned
@@ -501,14 +511,6 @@ async def mark_spent_utxos(
 
 
 # ── Last scan height ───────────────────────────────────────────────────────────
-
-async def get_last_scan_height(wallet_id: str) -> int:
-    row = await db.fetchone(
-        "SELECT last_scan_height FROM silnt.wallets WHERE id = :id",
-        {"id": wallet_id},
-    )
-    return row["last_scan_height"] if row and "last_scan_height" in row else 0
-
 
 async def set_last_scan_height(wallet_id: str, height: int) -> None:
     await db.execute(
@@ -579,7 +581,8 @@ async def scan_wallet(
     # ── Scan blocks ───────────────────────────────────────────────────────────
     total_found = 0
     blocks_scanned = 0
-
+    total_blocks = end - start + 1
+    set_scan_progress(wallet_id, 0, total_blocks, 0)
     for height in range(start, end + 1):
         try:
             # Check spent UTXOs first
@@ -600,6 +603,7 @@ async def scan_wallet(
                 logger.info(f"Block {height}: stored {len(owned_utxos)} UTXOs")
 
             blocks_scanned += 1
+            set_scan_progress(wallet_id, blocks_scanned, total_blocks, total_found)
 
             # Save progress every 100 blocks
             if blocks_scanned % 100 == 0:
@@ -621,7 +625,7 @@ async def scan_wallet(
     await update_balance(wallet_id, balance)
 
     logger.info(f"Scan complete: {blocks_scanned} blocks, {total_found} UTXOs found, balance={balance} sats")
-
+    set_scan_progress(wallet_id, total_blocks, total_blocks, total_found, active=False)
     return {
         "utxos_found": total_found,
         "blocks_scanned": blocks_scanned,
@@ -643,3 +647,16 @@ async def scan_all_wallets(user: str, network: str = "mainnet") -> list[dict]:
             logger.error(f"Failed to scan wallet {wallet.id}: {e}")
             results.append({"wallet_id": wallet.id, "error": str(e)})
     return results
+
+def get_scan_progress(wallet_id: str) -> dict:
+    return _scan_progress.get(wallet_id, {
+        "active": False, "current": 0, "total": 0, "found": 0
+    })
+
+def set_scan_progress(wallet_id: str, current: int, total: int, found: int, active: bool = True):
+    _scan_progress[wallet_id] = {
+        "active": active,
+        "current": current,
+        "total": total,
+        "found": found,
+    }
