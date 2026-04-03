@@ -10,7 +10,7 @@ from .helpers.wallet import (
     decrypt_secret,
     build_transaction   
 )
-from .helpers.scan import scan_wallet, get_scan_progress
+from .helpers.scan import scan_wallet, get_scan_progress, request_scan_stop
 from .helpers.address_resolver import bip353_resolve
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from lnbits.core.models import WalletTypeInfo
@@ -310,6 +310,14 @@ async def api_scan_wallet(wallet_id: str, data: ScanWalletRequest):
         logger.error(f"Scan failed: {e}")
         raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail=str(e))
 
+@silnt_api_router.post(
+    "/api/v1/wallet/{wallet_id}/scan/stop",
+    dependencies=[Depends(require_admin_key)],
+)
+async def api_stop_scan(wallet_id: str):
+    request_scan_stop(wallet_id)
+    return {"status": "stop requested"}
+    
 # BIP353
 @silnt_api_router.get("/api/v1/bip353/resolve")
 async def api_resolve_bip353(

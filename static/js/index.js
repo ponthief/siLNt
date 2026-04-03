@@ -24,6 +24,7 @@ window.app = Vue.createApp({
         current: 0,
         total: 0,
         found: 0,
+        walletId: null
       },   
       config: {sats_denominated: true},
       showBip353Dialog: false,
@@ -188,6 +189,7 @@ window.app = Vue.createApp({
       this.scanProgress.current = 0
       this.scanProgress.total = this.scanDialog.chainTip - this.scanDialog.lastHeight
       this.scanProgress.found = 0
+      this.scanProgress.walletId = wallet.id
       const pollInterval = setInterval(async () => {
         try {
           const {data} = await LNbits.api.request(
@@ -233,6 +235,26 @@ window.app = Vue.createApp({
          clearInterval(pollInterval)
         this.scanProgress.active = false
         LNbits.utils.notifyApiError(err)
+      }
+    },
+    stopScan: async function () {
+      if (!this.scanProgress.walletId) return
+      this.scanProgress.stopping = true
+      try {
+        await LNbits.api.request(
+          'POST',
+          `/silnt/api/v1/wallet/${this.scanProgress.walletId}/scan/stop`,
+          this.g.user.wallets[0].adminkey
+        )
+        this.$q.notify({
+          type: 'info',
+          message: 'Stop requested — scan will halt at the next block.',
+          timeout: 5000
+        })
+      } catch (err) {
+        LNbits.utils.notifyApiError(err)
+      } finally {
+        this.scanProgress.stopping = false
       }
     },
     resolveBip353: async function () {

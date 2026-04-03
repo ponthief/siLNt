@@ -45,6 +45,8 @@ from coincurve import PublicKey, PrivateKey
 # In-memory progress store — keyed by wallet_id
 _scan_progress: dict[str, dict] = {}
 
+_scan_stop: dict[str, bool] = {}
+
 # ── Constants ──────────────────────────────────────────────────────────────────
 SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 DUST_LIMIT = 100
@@ -102,6 +104,14 @@ class OwnedUTXO:
             "wallet_id": wallet_id,
         }
 
+def request_scan_stop(wallet_id: str):
+    _scan_stop[wallet_id] = True
+
+def should_stop(wallet_id: str) -> bool:
+    return _scan_stop.get(wallet_id, False)
+
+def clear_scan_stop(wallet_id: str):
+    _scan_stop.pop(wallet_id, None)
 
 # ---------------------------------------------------------------------------
 # Elliptic curve helpers (secp256k1 via coincurve)
@@ -581,9 +591,18 @@ async def scan_wallet(
     # ── Scan blocks ───────────────────────────────────────────────────────────
     total_found = 0
     blocks_scanned = 0
+    last_scanned_height = start
     total_blocks = end - start + 1
+    clear_scan_stop(wallet_id)  # ← clear any previous stop request
     set_scan_progress(wallet_id, 0, total_blocks, 0)
     for height in range(start, end + 1):
+        # ── Check stop request ────────────────────────────────────────
+        if should_stop(wallet_id):
+            logger.info(f"Scan stopped by user at block {height}")
+            await set_last_scan_height(wallet_id, last_scanned_height)
+            set_scan_progress(wallet_id, blocks_scanned, total_blocks, total_found, active=False)
+            clear_scan_stop(wallet_id)
+            break
         try:
             # Check spent UTXOs first
             await mark_spent_utxos(height, oracle, wallet_id)
@@ -603,18 +622,20 @@ async def scan_wallet(
                 logger.info(f"Block {height}: stored {len(owned_utxos)} UTXOs")
 
             blocks_scanned += 1
+            last_scanned_height = height
             set_scan_progress(wallet_id, blocks_scanned, total_blocks, total_found)
 
             # Save progress every 100 blocks
             if blocks_scanned % 100 == 0:
-                await set_last_scan_height(wallet_id, height)
+                await set_last_scan_height(wallet_id, last_scanned_height)
                 logger.debug(f"Progress saved at block {height}")            
         except Exception as e:
             logger.error(f"Error scanning block {height}: {e}")
             continue
 
     # ── Final update ──────────────────────────────────────────────────────────
-    await set_last_scan_height(wallet_id, end)
+    await set_last_scan_height(wallet_id, last_scanned_height)
+    set_scan_progress(wallet_id, blocks_scanned, total_blocks, total_found, active=False)
 
     # Recalculate balance from unspent UTXOs
     unspent_rows = await db.fetchall(
@@ -629,7 +650,7 @@ async def scan_wallet(
     return {
         "utxos_found": total_found,
         "blocks_scanned": blocks_scanned,
-        "final_height": end,
+        "final_height": last_scanned_height,
         "balance": balance,
     }
 

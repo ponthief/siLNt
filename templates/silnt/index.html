@@ -38,9 +38,22 @@
         <span class="text-green text-weight-bold" v-text="scanProgress.found"></span>
         UTXOs found
       </div>
+       <div class="col-auto">
+        <q-btn
+          flat
+          dense
+          size="sm"
+          icon="stop"
+          color="negative"
+          :loading="scanProgress.stopping"
+          @click="stopScan"
+        >
+          <q-tooltip>Stop Scan</q-tooltip>
+        </q-btn>
+      </div>  
     </div>
     <q-linear-progress
-      :value="scanProgress.total > 0 ? scanProgress.current / scanProgress.total : 0"
+      :value="scanProgress.total > 0 ? Math.round(scanProgress.current / scanProgress.total * 100) + '%' : '0%'"
       size="8px"
       color="orange"
       track-color="grey-3"
