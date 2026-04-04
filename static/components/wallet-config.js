@@ -3,7 +3,7 @@ window.app.component('wallet-config', {
   template: '#wallet-config',
   delimiters: ['${', '}'],
 
-  props: ['total', 'config-data', 'adminkey'],
+  props: ['total', 'config-data', 'adminkey', 'inkey', 'canEditConfig'],
   emits: ['update:config-data'],
   data: function () {
     return {
@@ -19,8 +19,7 @@ window.app.component('wallet-config', {
         return this.internalConfig
       },
       set(value) {
-        value.isLoaded = true
-        // Ensure blindbit auth fields are always present
+        value.isLoaded = true        
         value.blindbit_url = value.blindbit_url || ''       
         this.internalConfig = JSON.parse(JSON.stringify(value))
         this.$emit(
@@ -33,6 +32,7 @@ window.app.component('wallet-config', {
 
   methods: {    
     updateConfig: async function () {
+      if (!this.canEditConfig) return
       try {
         const {data} = await LNbits.api.request(
           'PUT',
@@ -49,8 +49,8 @@ window.app.component('wallet-config', {
     getConfig: async function () {
       try {        
           const [{data: blindbit}, {data: appConfig}] = await Promise.all([
-          LNbits.api.request('GET', '/silnt/api/v1/blindbit/config', this.adminkey),
-          LNbits.api.request('GET', '/silnt/api/v1/config', this.adminkey)
+          LNbits.api.request('GET', '/silnt/api/v1/blindbit/config', this.inkey),
+          LNbits.api.request('GET', '/silnt/api/v1/config', this.inkey)
       ])      
         this.config =  {
       ...blindbit,

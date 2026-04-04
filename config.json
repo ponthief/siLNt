@@ -1,7 +1,7 @@
 {
   "name": "BitSilla",
-  "short_description": "Silent Payments on LNBits",
-  "tile": "/silnt/static/bitcoin-wallet.png",
+  "short_description": "Silent Payments OnChain Wallet",
+  "tile": "/silnt/static/bitcoin-wallet.webp",
   "min_lnbits_version": "v1.0.0",
   "donate": "satoshi@bitaurus.net",
   "contributors": [

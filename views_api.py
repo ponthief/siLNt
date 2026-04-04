@@ -192,49 +192,49 @@ async def api_update_blindbit_config(
 
 # ── Scanning ──────────────────────────────────────────────────────────────────
 
-@silnt_api_router.post(
-    "/api/v1/scan",
-    description="Proxy scan request to blindbit-scan using admin-configured credentials",
-    dependencies=[Depends(require_invoice_key)],
-)
-async def api_scan_blockchain():
-    blindbit = await get_blindbit_config()    
-    if not blindbit.blindbit_url:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST,
-            detail="BlindBit endpoint not configured. An admin must set it first.",
-        )
+# @silnt_api_router.post(
+#     "/api/v1/scan",
+#     description="Proxy scan request to blindbit-scan using admin-configured credentials",
+#     dependencies=[Depends(require_invoice_key)],
+# )
+# async def api_scan_blockchain():
+#     blindbit = await get_blindbit_config()    
+#     if not blindbit.blindbit_url:
+#         raise HTTPException(
+#             status_code=HTTPStatus.BAD_REQUEST,
+#             detail="BlindBit endpoint not configured. An admin must set it first.",
+#         )
 
-    headers = {}    
+#     headers = {}    
 
-    base_url = blindbit.blindbit_url.rstrip("/")    
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            utxos_resp = await client.get(f"{base_url}/utxos", headers=headers)
-            height_resp = await client.get(f"{base_url}/height", headers=headers)
+#     base_url = blindbit.blindbit_url.rstrip("/")    
+#     try:
+#         async with httpx.AsyncClient(timeout=30.0) as client:
+#             utxos_resp = await client.get(f"{base_url}/utxos", headers=headers)
+#             height_resp = await client.get(f"{base_url}/height", headers=headers)
 
-            if utxos_resp.status_code != 200:
-                raise HTTPException(
-                    status_code=HTTPStatus.BAD_GATEWAY,
-                    detail=f"blindbit-scan /utxos returned {utxos_resp.status_code}",
-                )
+#             if utxos_resp.status_code != 200:
+#                 raise HTTPException(
+#                     status_code=HTTPStatus.BAD_GATEWAY,
+#                     detail=f"blindbit-scan /utxos returned {utxos_resp.status_code}",
+#                 )
 
-            return {
-                "utxos": utxos_resp.json(),
-                "height": height_resp.json() if height_resp.status_code == 200 else None,
-            }
+#             return {
+#                 "utxos": utxos_resp.json(),
+#                 "height": height_resp.json() if height_resp.status_code == 200 else None,
+#             }
 
-    except httpx.ConnectError:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_GATEWAY,
-            detail=f"Could not connect to blindbit-scan at {base_url}",
-        )
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=HTTPStatus.GATEWAY_TIMEOUT,
-            detail="blindbit-scan timed out",
-        )
-# ?wallet_id={wallet_id}
+#     except httpx.ConnectError:
+#         raise HTTPException(
+#             status_code=HTTPStatus.BAD_GATEWAY,
+#             detail=f"Could not connect to blindbit-scan at {base_url}",
+#         )
+#     except httpx.TimeoutException:
+#         raise HTTPException(
+#             status_code=HTTPStatus.GATEWAY_TIMEOUT,
+#             detail="blindbit-scan timed out",
+#         )
+
 @silnt_api_router.get(
     "/api/v1/utxos",
     description="Fetch UTXOs from blindbit",
@@ -249,54 +249,61 @@ async def api_get_utxos(wallet_id: str = Query(...), key_info: WalletTypeInfo = 
         "utxos": [u.dict() for u in utxos],
     }
 
-@silnt_api_router.post(
-    "/api/v1/rescan",
-    description="Trigger rescan from a given block height",
-    dependencies=[Depends(require_admin_key)],
-)
-async def api_rescan(data: RescanRequest):
-    blindbit = await get_blindbit_config()
+# @silnt_api_router.post(
+#     "/api/v1/rescan",
+#     description="Trigger rescan from a given block height",
+#     dependencies=[Depends(require_admin_key)],
+# )
+# async def api_rescan(data: RescanRequest):
+#     blindbit = await get_blindbit_config()
 
-    if not blindbit.blindbit_url:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST,
-            detail="BlindBit URL not configured. An admin must set it first.",
-        )
+#     if not blindbit.blindbit_url:
+#         raise HTTPException(
+#             status_code=HTTPStatus.BAD_REQUEST,
+#             detail="BlindBit URL not configured. An admin must set it first.",
+#         )
 
-    headers = {"Content-Type": "application/json"}
+#     headers = {"Content-Type": "application/json"}
     
 
-    base_url = blindbit.blindbit_url.rstrip("/")
+#     base_url = blindbit.blindbit_url.rstrip("/")
 
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{base_url}/rescan",
-                json={"height": data.block_height},
-                headers=headers
-            )
-            if resp.status_code != 200:
-                raise HTTPException(
-                    status_code=HTTPStatus.BAD_GATEWAY,
-                    detail=f"blindbit /rescan returned {resp.status_code}: {resp.text}",
-                )
-            return resp.json()
+#     try:
+#         async with httpx.AsyncClient(timeout=30.0) as client:
+#             resp = await client.post(
+#                 f"{base_url}/rescan",
+#                 json={"height": data.block_height},
+#                 headers=headers
+#             )
+#             if resp.status_code != 200:
+#                 raise HTTPException(
+#                     status_code=HTTPStatus.BAD_GATEWAY,
+#                     detail=f"blindbit /rescan returned {resp.status_code}: {resp.text}",
+#                 )
+#             return resp.json()
 
-    except httpx.ConnectError:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_GATEWAY,
-            detail=f"Could not connect to blindbit at {base_url}",
-        )
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=HTTPStatus.GATEWAY_TIMEOUT,
-            detail="blindbit rescan timed out",
-        )
-@silnt_api_router.post(
-    "/api/v1/wallet/{wallet_id}/scan",
-    dependencies=[Depends(require_admin_key)],
-)
-async def api_scan_wallet(wallet_id: str, data: ScanWalletRequest):    
+#     except httpx.ConnectError:
+#         raise HTTPException(
+#             status_code=HTTPStatus.BAD_GATEWAY,
+#             detail=f"Could not connect to blindbit at {base_url}",
+#         )
+#     except httpx.TimeoutException:
+#         raise HTTPException(
+#             status_code=HTTPStatus.GATEWAY_TIMEOUT,
+#             detail="blindbit rescan timed out",
+#         )
+@silnt_api_router.post("/api/v1/wallet/{wallet_id}/scan")
+async def api_scan_wallet(
+    wallet_id: str,
+    data: ScanWalletRequest,
+    key_info: WalletTypeInfo = Depends(require_invoice_key),   # was require_admin_key
+):
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
+    # Ownership guard: users may only scan wallets that belong to them.
+    if wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
     try:
         result = await scan_wallet(
             wallet_id=wallet_id,
@@ -310,11 +317,17 @@ async def api_scan_wallet(wallet_id: str, data: ScanWalletRequest):
         logger.error(f"Scan failed: {e}")
         raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail=str(e))
 
-@silnt_api_router.post(
-    "/api/v1/wallet/{wallet_id}/scan/stop",
-    dependencies=[Depends(require_admin_key)],
-)
-async def api_stop_scan(wallet_id: str):
+@silnt_api_router.post("/api/v1/wallet/{wallet_id}/scan/stop")
+async def api_stop_scan(
+    wallet_id: str,
+    key_info: WalletTypeInfo = Depends(require_invoice_key)
+):
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
+    # Ownership guard: users may only stop scans for their own wallets.
+    if wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
     request_scan_stop(wallet_id)
     return {"status": "stop requested"}
     
@@ -378,7 +391,7 @@ async def api_build_transaction(data: BuildTxRequest):
             fee_rate=data.fee_rate,
             utxos=data.utxos,
             network=wallet.network,
-        )
+        )        
         return result
 
     except HTTPException:
@@ -437,17 +450,17 @@ async def api_get_config(
 
 # ── Addresses ────────────────────────────────────────────────────────────────
 
-@silnt_api_router.get("/api/v1/address/{wallet_id}")
-async def api_get_address(
-    wallet_id, key_info: WalletTypeInfo = Depends(require_invoice_key)
-) -> str:
-    wallet = await get_silnt_wallet(wallet_id)
-    if not wallet:
-        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
-    sp_address = await get_sp_address(wallet_id)
-    assert sp_address, f"Silent Payment address doesn't exist for wallet: {wallet_id}"
-    hr_address = await get_hr_address(wallet_id)
-    return sp_address, hr_address
+# @silnt_api_router.get("/api/v1/address/{wallet_id}")
+# async def api_get_address(
+#     wallet_id, key_info: WalletTypeInfo = Depends(require_invoice_key)
+# ) -> str:
+#     wallet = await get_silnt_wallet(wallet_id)
+#     if not wallet:
+#         raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
+#     sp_address = await get_sp_address(wallet_id)
+#     assert sp_address, f"Silent Payment address doesn't exist for wallet: {wallet_id}"
+#     hr_address = await get_hr_address(wallet_id)
+#     return sp_address, hr_address
 
 
 @silnt_api_router.get(

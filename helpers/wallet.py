@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import httpx
+import io
 from base64 import b64encode
 from embit import bip32, bip39, ec, finalizer, script
 from embit.networks import NETWORKS
@@ -105,56 +106,125 @@ def compressed_pubkey_to_point(compressed: bytes) -> tuple:
     return (x, y)
 
 
+# def derive_sp_scriptpubkey(
+#     sp_address: str,
+#     spend_key_bytes: bytes,
+#     utxos: list[dict]
+# ) -> bytes:
+#     """
+#     BIP352 sender derivation.
+#     Returns raw P2TR scriptpubkey bytes for the derived Silent Payment output.
+#     """
+#     b_scan_bytes, b_spend_bytes = parse_sp_address(sp_address)
+#     B_scan = compressed_pubkey_to_point(b_scan_bytes)
+#     B_spend = compressed_pubkey_to_point(b_spend_bytes)
+
+#     a = int_from_bytes(spend_key_bytes)
+
+#     # Sort outpoints: txid (LE) || vout (4 bytes LE) [::-1]
+#     outpoints = sorted([
+#         bytes.fromhex(u["txid"]) + int(u.get("vout", 0)).to_bytes(4, "little")
+#         for u in utxos
+#     ])
+
+#     outpoints_hash = int_from_bytes(
+#         hashlib.sha256(b"".join(outpoints)).digest()
+#     )
+
+#     # Tweak scalar: a * outpoints_hash mod n
+#     n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+#     a_tweaked = (a * outpoints_hash) % n
+
+#     # ECDH: shared_secret_point = a_tweaked * B_scan
+#     ecdh_point = point_mul(B_scan, a_tweaked)
+#     if ecdh_point is None:
+#         raise ValueError("ECDH point is at infinity")
+
+#     # BIP352 tagged hash for shared secret
+#     tag = b"BIP0352/SharedSecret"
+#     tag_hash = hashlib.sha256(tag).digest()
+#     t_k_input = tag_hash + tag_hash + serP(ecdh_point) + (0).to_bytes(4, "little")
+#     t_k = int_from_bytes(hashlib.sha256(t_k_input).digest())
+
+#     # P = B_spend + t_k * G
+#     tG = pubkey_point_gen_from_int(t_k)
+#     P = point_add(B_spend, tG)
+#     if P is None:
+#         raise ValueError("Derived output point is at infinity")
+
+#     # x-only pubkey → P2TR scriptpubkey
+#     x_only = ser256(P[0])
+#     return bytes([0x51, 0x20]) + x_only
+
 def derive_sp_scriptpubkey(
     sp_address: str,
-    spend_key_bytes: bytes,
-    utxos: list[dict]
+    spend_secret: bytes,
+    utxos: list[dict],
 ) -> bytes:
-    """
-    BIP352 sender derivation.
-    Returns raw P2TR scriptpubkey bytes for the derived Silent Payment output.
-    """
     b_scan_bytes, b_spend_bytes = parse_sp_address(sp_address)
-    B_scan = compressed_pubkey_to_point(b_scan_bytes)
-    B_spend = compressed_pubkey_to_point(b_spend_bytes)
-
-    a = int_from_bytes(spend_key_bytes)
-
-    # Sort outpoints: txid (LE) || vout (4 bytes LE) [::-1]
-    outpoints = sorted([
-        bytes.fromhex(u["txid"]) + int(u.get("vout", 0)).to_bytes(4, "little")
-        for u in utxos
-    ])
-
-    outpoints_hash = int_from_bytes(
-        hashlib.sha256(b"".join(outpoints)).digest()
-    )
-
-    # Tweak scalar: a * outpoints_hash mod n
     n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-    a_tweaked = (a * outpoints_hash) % n
 
-    # ECDH: shared_secret_point = a_tweaked * B_scan
+    # Step 1: sum input private keys, negating taproot keys with odd Y
+    a_sum = 0
+    A_points = []
+    for u in utxos:
+        priv = (int.from_bytes(bytes.fromhex(u["priv_key_tweak"]), "big") +
+                int.from_bytes(spend_secret, "big")) % n
+        pub_point = pubkey_point_gen_from_int(priv)
+        if pub_point[1] % 2 == 1:  # odd Y — negate (taproot requirement)
+            priv = n - priv
+            pub_point = pubkey_point_gen_from_int(priv)
+        a_sum = (a_sum + priv) % n
+        A_points.append(pub_point)
+
+    # Step 2: A_sum = sum of all input pubkeys
+    A_sum_point = A_points[0]
+    for pt in A_points[1:]:
+        A_sum_point = point_add(A_sum_point, pt)
+    A_sum_bytes = bytes([0x02 + (A_sum_point[1] % 2)]) + ser256(A_sum_point[0])
+
+    # Step 3: smallest outpoint = min(reversed_txid || vout_LE)
+    outpoints = [
+        bytes.fromhex(u["txid"])[::-1] + int(u.get("vout", 0)).to_bytes(4, "little")
+        for u in utxos
+    ]
+    outpointL = min(outpoints)
+
+    # Step 4: input_hash = TaggedHash("BIP0352/Inputs", outpointL || A_sum)
+    input_hash_bytes = tagged_hash("BIP0352/Inputs", outpointL + A_sum_bytes)
+    input_hash = int.from_bytes(input_hash_bytes, "big")
+
+    # Step 5: shared_secret = (a_sum * input_hash) * B_scan
+    a_tweaked = (a_sum * input_hash) % n
+    B_scan = compressed_pubkey_to_point(b_scan_bytes)
     ecdh_point = point_mul(B_scan, a_tweaked)
-    if ecdh_point is None:
-        raise ValueError("ECDH point is at infinity")
 
-    # BIP352 tagged hash for shared secret
-    tag = b"BIP0352/SharedSecret"
-    tag_hash = hashlib.sha256(tag).digest()
-    t_k_input = tag_hash + tag_hash + serP(ecdh_point) + (0).to_bytes(4, "little")
-    t_k = int_from_bytes(hashlib.sha256(t_k_input).digest())
+    # Step 6: t_k = TaggedHash("BIP0352/SharedSecret", serP(ecdh) || ser32(0))
+    ecdh_compressed = bytes([0x02 + (ecdh_point[1] % 2)]) + ser256(ecdh_point[0])
+    t_k_bytes = tagged_hash("BIP0352/SharedSecret", ecdh_compressed + (0).to_bytes(4, "big"))
+    t_k = int.from_bytes(t_k_bytes, "big")
 
-    # P = B_spend + t_k * G
+    # Step 7: P = B_spend + t_k*G
+    B_spend = compressed_pubkey_to_point(b_spend_bytes)
     tG = pubkey_point_gen_from_int(t_k)
     P = point_add(B_spend, tG)
-    if P is None:
-        raise ValueError("Derived output point is at infinity")
 
-    # x-only pubkey → P2TR scriptpubkey
-    x_only = ser256(P[0])
-    return bytes([0x51, 0x20]) + x_only
+    return bytes([0x51, 0x20]) + ser256(P[0])
 
+def verify_sp_output(
+    recipient_script: Script,
+    tx_outputs: list[TransactionOutput],
+) -> bool:
+    """
+    Verify the derived SP scriptpubkey appears in the transaction outputs.
+    Call this after building tx_outputs but before signing.
+    """
+    expected = bytes(recipient_script.data)
+    for out in tx_outputs:
+        out_script = out.script_pubkey.data if hasattr(out.script_pubkey, 'data') else bytes(out.script_pubkey)
+        if out_script == expected:
+            return True
+    return False
 
 def build_transaction(
     spend_key_hex: str,
@@ -273,6 +343,14 @@ def build_transaction(
         x.script_pubkey.data.hex() if hasattr(x.script_pubkey, 'data') else bytes(x.script_pubkey).hex()
     ))
 
+    # ── 6b. Verify SP output is in tx before signing ──────────────────────
+    if recipient.startswith('sp1') or recipient.startswith('tsp1'):
+        if not verify_sp_output(recipient_script, tx_outputs):
+            raise ValueError(
+                f"Derived SP output not found in transaction outputs. "
+                f"Funds would be unrecoverable. Aborting."
+            )
+
     # ── 7. Construct PSBT ─────────────────────────────────────────────────
     tx = Transaction(vin=tx_inputs, vout=tx_outputs)    
     psbt = PSBT(tx)
@@ -309,7 +387,8 @@ def build_transaction(
         if inp.final_scriptwitness:
             tx.vin[i].witness = inp.final_scriptwitness
 
-    tx_hex = tx.serialize().hex()    
+    tx_hex = tx.serialize().hex()
+    
     return {
         "tx_hex": tx_hex,
         "fee": fee,
@@ -346,6 +425,14 @@ async def decrypt_secret(encrypted: str) -> str:
     f = Fernet(fernet_key)
     return f.decrypt(encrypted.encode()).decode()
 
+def sha256(data: bytes) -> bytes:
+        return hashlib.sha256(data).digest()
+
+def tagged_hash(tag: str, data: bytes) -> bytes:
+        tag_bytes = tag.encode()
+        tag_hash = sha256(tag_bytes)
+        return sha256(tag_hash + tag_hash + data)
+
 def taproot_sighash(
     tx: Transaction,
     input_index: int,
@@ -356,13 +443,13 @@ def taproot_sighash(
     """
     Compute BIP341 taproot key-path sighash manually.
     """
-    def sha256(data: bytes) -> bytes:
-        return hashlib.sha256(data).digest()
+    # def sha256(data: bytes) -> bytes:
+    #     return hashlib.sha256(data).digest()
 
-    def tagged_hash(tag: str, data: bytes) -> bytes:
-        tag_bytes = tag.encode()
-        tag_hash = sha256(tag_bytes)
-        return sha256(tag_hash + tag_hash + data)
+    # def tagged_hash(tag: str, data: bytes) -> bytes:
+    #     tag_bytes = tag.encode()
+    #     tag_hash = sha256(tag_bytes)
+    #     return sha256(tag_hash + tag_hash + data)
 
     # sha_prevouts
     prevouts = b""

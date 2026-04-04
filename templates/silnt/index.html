@@ -6,6 +6,8 @@
       :total="utxos.total"
       v-model:config-data="config"
       :adminkey="g.user.wallets[0].adminkey"
+      :inkey="g.user.wallets[0].inkey"
+      :can-edit-config="!!(g.user.super_user || g.user.admin)"
     >
     </wallet-config>
 
@@ -331,7 +333,7 @@
       </div>
     </q-card>    
   </q-dialog>
-    <q-dialog v-model="showRescanDialog" position="top">
+    <!-- <q-dialog v-model="showRescanDialog" position="top">
       <q-card class="q-pa-lg lnbits__dialog-card">
         <h5 class="text-subtitle1 q-my-none">Rescan Blockchain</h5>
         <q-separator class="q-mb-md q-mt-sm"></q-separator>
@@ -361,7 +363,7 @@
           <q-btn v-close-popup flat color="grey" class="q-ml-auto">Cancel</q-btn>
         </div>
       </q-card>
-  </q-dialog>
+  </q-dialog> -->
   <q-dialog v-model="showBip353Dialog" position="top">
     <q-card class="q-pa-lg lnbits__dialog-card">
       <h5 class="text-subtitle1 q-my-none">Resolve BIP353 Address</h5>

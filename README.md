@@ -21,7 +21,7 @@ A [LNbits](https://lnbits.com) extension for managing [Silent Payment](https://s
 
 - LNbits instance (self-hosted)
 - Python dependencies: `embit`, `httpx`
-- A running [blindbit-scan](https://github.com/setavenger/blindbit-scan) instance for blockchain scanning
+- A running [blindbit-oracle](https://github.com/setavenger/blindbit-oracle) instance for blockchain scanning
 
 ---
 
@@ -44,13 +44,9 @@ curl -X PUT https://<your-lnbits>/silnt/api/v1/blindbit/config \
   -H "X-Api-Key: <admin_key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "blindbit_url": "http://localhost:8888",
-    "blindbit_user": "",
-    "blindbit_pass": ""
+    "blindbit_url": "http://localhost:8001",    
   }'
 ```
-
-`blindbit_user` and `blindbit_pass` are optional and only required if your BlindBit instance is protected by HTTP Basic Auth.
 
 ---
 
@@ -141,9 +137,7 @@ Full interactive docs available at `/docs#/silnt` on your LNbits instance.
 
 ```json
 {
-  "blindbit_url": "http://localhost:8888",
-  "blindbit_user": "admin",
-  "blindbit_pass": "secret"
+  "blindbit_url": "http://localhost:8001"  
 }
 ```
 

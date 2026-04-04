@@ -217,7 +217,7 @@ window.app = Vue.createApp({
         const {data} = await LNbits.api.request(
           'POST',
           `/silnt/api/v1/wallet/${wallet.id}/scan`,
-          this.g.user.wallets[0].adminkey,
+          this.g.user.wallets[0].inkey,
           {
             from_height: this.scanDialog.lastHeight,
             to_height: this.scanDialog.chainTip
@@ -244,7 +244,7 @@ window.app = Vue.createApp({
         await LNbits.api.request(
           'POST',
           `/silnt/api/v1/wallet/${this.scanProgress.walletId}/scan/stop`,
-          this.g.user.wallets[0].adminkey
+          this.g.user.wallets[0].inkey
         )
         this.$q.notify({
           type: 'info',

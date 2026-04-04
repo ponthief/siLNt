@@ -424,7 +424,6 @@ class BlindBitOracleClient:
             resp.raise_for_status()
             data = resp.json()
             tweaks = []           
-            # for t in data.get("tweaks", []):
             for t in data:
                 tweaks.append(bytes.fromhex(t))
             return tweaks
