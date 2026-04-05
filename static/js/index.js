@@ -165,8 +165,7 @@ window.app = Vue.createApp({
         'GET',
         '/silnt/api/v1/oracle/tip',
         this.g.user.wallets[0].inkey
-      )
-      console.log(response)
+      )      
       const tip = response.data?.height ?? response.data?.block_height
       this.scanDialog.chainTip = tip
       this.scanDialog.chainTip = tip
@@ -208,12 +207,7 @@ window.app = Vue.createApp({
           // ignore poll errors
         }
       }, 1000)  // poll every second
-      try {
-        // this.$q.notify({
-        //   type: 'info',
-        //   message: `Scanning from block ${this.scanDialog.lastHeight} to ${this.scanDialog.chainTip}...`,
-        //   timeout: 5000
-        // })
+      try {        
         const {data} = await LNbits.api.request(
           'POST',
           `/silnt/api/v1/wallet/${wallet.id}/scan`,
@@ -227,7 +221,7 @@ window.app = Vue.createApp({
         this.scanProgress.active = false
         this.$q.notify({
           type: 'positive',
-          message: `Scan complete. ${data.utxos_found} UTXO(s) found across ${data.blocks_scanned} blocks.`,
+          message: `Scan complete. ${data.utxos_found} Unspent UTXO(s) found across ${data.blocks_scanned} blocks.`,
           timeout: 8000
         })
         await this.fetchUtxos(wallet)

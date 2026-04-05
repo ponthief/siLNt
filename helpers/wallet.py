@@ -106,56 +106,6 @@ def compressed_pubkey_to_point(compressed: bytes) -> tuple:
     return (x, y)
 
 
-# def derive_sp_scriptpubkey(
-#     sp_address: str,
-#     spend_key_bytes: bytes,
-#     utxos: list[dict]
-# ) -> bytes:
-#     """
-#     BIP352 sender derivation.
-#     Returns raw P2TR scriptpubkey bytes for the derived Silent Payment output.
-#     """
-#     b_scan_bytes, b_spend_bytes = parse_sp_address(sp_address)
-#     B_scan = compressed_pubkey_to_point(b_scan_bytes)
-#     B_spend = compressed_pubkey_to_point(b_spend_bytes)
-
-#     a = int_from_bytes(spend_key_bytes)
-
-#     # Sort outpoints: txid (LE) || vout (4 bytes LE) [::-1]
-#     outpoints = sorted([
-#         bytes.fromhex(u["txid"]) + int(u.get("vout", 0)).to_bytes(4, "little")
-#         for u in utxos
-#     ])
-
-#     outpoints_hash = int_from_bytes(
-#         hashlib.sha256(b"".join(outpoints)).digest()
-#     )
-
-#     # Tweak scalar: a * outpoints_hash mod n
-#     n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-#     a_tweaked = (a * outpoints_hash) % n
-
-#     # ECDH: shared_secret_point = a_tweaked * B_scan
-#     ecdh_point = point_mul(B_scan, a_tweaked)
-#     if ecdh_point is None:
-#         raise ValueError("ECDH point is at infinity")
-
-#     # BIP352 tagged hash for shared secret
-#     tag = b"BIP0352/SharedSecret"
-#     tag_hash = hashlib.sha256(tag).digest()
-#     t_k_input = tag_hash + tag_hash + serP(ecdh_point) + (0).to_bytes(4, "little")
-#     t_k = int_from_bytes(hashlib.sha256(t_k_input).digest())
-
-#     # P = B_spend + t_k * G
-#     tG = pubkey_point_gen_from_int(t_k)
-#     P = point_add(B_spend, tG)
-#     if P is None:
-#         raise ValueError("Derived output point is at infinity")
-
-#     # x-only pubkey → P2TR scriptpubkey
-#     x_only = ser256(P[0])
-#     return bytes([0x51, 0x20]) + x_only
-
 def derive_sp_scriptpubkey(
     sp_address: str,
     spend_secret: bytes,

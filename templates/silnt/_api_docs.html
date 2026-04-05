@@ -7,7 +7,7 @@
   <q-card>
     <p>
       <q-card-section>
-        Silnt<br />
+        BitSilnt<br />
         <small>
           Created by:
           <a
@@ -20,12 +20,14 @@
         </small>
         <br />
         <strong>Usage</strong><br />
-        1. Configure BlindBit scan URL (and optional auth) via the settings button<br />
+        1. Configure BlindBit Oracle URL via the settings button (admin only)<br />
         2. Add a Silent Payment wallet account using a 12-word BIP39 mnemonic<br />
         3. Set the block height of your wallet's first transaction (born-at height)<br />
         4. Optionally add a Human Readable Address (BIP353 email format)<br />
-        5. Click <em>Scan Blockchain</em> to fetch UTXOs from your BlindBit instance<br />
-        6. Wallet balance updates automatically after each scan (unspent UTXOs only)<br />
+        5. Click the scan button on the wallet row to scan the blockchain for UTXOs<br />
+        6. Click the database button to load already-scanned UTXOs from the DB<br />
+        7. Wallet balance updates automatically after each scan (unspent UTXOs only)<br />
+        8. Use the Send button to build and broadcast a Bitcoin transaction<br />
       </q-card-section>
     </p>
   </q-card>
@@ -48,7 +50,7 @@
         <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
         <code>{"X-Api-Key": &lt;invoice_key&gt;}</code><br />
         <h5 class="text-caption q-mt-sm q-mb-none">Query Parameters</h5>
-        <code>network=Mainnet | Testnet (default: Mainnet)</code>
+        <code>network=mainnet | testnet (default: mainnet)</code>
         <h5 class="text-caption q-mt-sm q-mb-none">Returns 200 OK (application/json)</h5>
         <code>[&lt;wallet_account_object&gt;, ...]</code>
         <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
@@ -82,21 +84,20 @@
       <q-card-section>
         <code><span class="text-blue">POST</span> /silnt/api/v1/wallet</code>
         <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
-        <code>{"X-Api-Key": &lt;admin_key&gt;}</code><br />
+        <code>{"X-Api-Key": &lt;invoice_key&gt;}</code><br />
         <h5 class="text-caption q-mt-sm q-mb-none">Body (application/json)</h5>
         <code
-          >{"title": &lt;string&gt;, "mnemonic": &lt;encrypted_string&gt;,
+          >{"mnemonic": &lt;encrypted_string&gt;, "title": &lt;string&gt;,
           "hr_address": &lt;string&gt;, "last_height": &lt;string&gt;,
-          "network": "Mainnet" | "Testnet"}</code
+          "network": "mainnet" | "testnet"}</code
         >
         <h5 class="text-caption q-mt-sm q-mb-none">Returns 200 OK (application/json)</h5>
         <code>""</code>
         <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
         <code
           >curl -X POST {{ request.base_url }}silnt/api/v1/wallet -H
-          "X-Api-Key: &lt;admin_key&gt;" -H "Content-Type: application/json" -d
-          '{"title": "My Wallet", "mnemonic": "...", "last_height": "840000",
-          "network": "Mainnet"}'
+          "X-Api-Key: &lt;invoice_key&gt;" -H "Content-Type: application/json" -d
+          '{"mnemonic": "...", "last_height": "840000", "network": "mainnet"}'
         </code>
       </q-card-section>
     </q-card>
@@ -107,19 +108,19 @@
       <q-card-section>
         <code><span class="text-blue">PUT</span> /silnt/api/v1/wallet/{wallet_id}</code>
         <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
-        <code>{"X-Api-Key": &lt;admin_key&gt;}</code><br />
+        <code>{"X-Api-Key": &lt;invoice_key&gt;}</code><br />
         <h5 class="text-caption q-mt-sm q-mb-none">Body (application/json)</h5>
         <code
           >{"hr_address": &lt;string&gt;, "last_height": &lt;string&gt;,
-          "balance": &lt;integer&gt;}</code
+          "title": &lt;string&gt;, "balance": &lt;integer&gt;}</code
         >
         <h5 class="text-caption q-mt-sm q-mb-none">Returns 200 OK (application/json)</h5>
         <code>""</code>
         <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
         <code
           >curl -X PUT {{ request.base_url }}silnt/api/v1/wallet/&lt;wallet_id&gt; -H
-          "X-Api-Key: &lt;admin_key&gt;" -H "Content-Type: application/json" -d
-          '{"hr_address": "alice@domain.com", "balance": 100000}'
+          "X-Api-Key: &lt;invoice_key&gt;" -H "Content-Type: application/json" -d
+          '{"hr_address": "alice@domain.com"}'
         </code>
       </q-card-section>
     </q-card>
@@ -130,26 +131,113 @@
       <q-card-section>
         <code><span class="text-blue">DELETE</span> /silnt/api/v1/wallet/{wallet_id}</code>
         <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
-        <code>{"X-Api-Key": &lt;admin_key&gt;}</code><br />
+        <code>{"X-Api-Key": &lt;invoice_key&gt;}</code><br />
         <h5 class="text-caption q-mt-sm q-mb-none">Returns 204 No Content</h5>
         <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
         <code
           >curl -X DELETE {{ request.base_url }}silnt/api/v1/wallet/&lt;wallet_id&gt; -H
-          "X-Api-Key: &lt;admin_key&gt;"
+          "X-Api-Key: &lt;invoice_key&gt;"
         </code>
       </q-card-section>
     </q-card>
   </q-expansion-item>
 
-  <!-- ── BlindBit Config ── -->
+  <!-- ── Scanning ── -->
 
-  <q-expansion-item group="api" dense expand-separator label="Get BlindBit Config">
+  <q-expansion-item group="api" dense expand-separator label="Scan Wallet">
+    <q-card>
+      <q-card-section>
+        <code><span class="text-blue">POST</span> /silnt/api/v1/wallet/{wallet_id}/scan</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
+        <code>{"X-Api-Key": &lt;invoice_key&gt;}</code><br />
+        <h5 class="text-caption q-mt-sm q-mb-none">Body (application/json)</h5>
+        <code>{"from_height": &lt;integer&gt;, "to_height": &lt;integer&gt;}</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Returns 200 OK (application/json)</h5>
+        <code
+          >{"utxos_found": &lt;integer&gt;, "blocks_scanned": &lt;integer&gt;,
+          "final_height": &lt;integer&gt;, "balance": &lt;integer&gt;}</code
+        >
+        <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
+        <code
+          >curl -X POST {{ request.base_url }}silnt/api/v1/wallet/&lt;wallet_id&gt;/scan -H
+          "X-Api-Key: &lt;invoice_key&gt;" -H "Content-Type: application/json" -d
+          '{"from_height": 840000, "to_height": 850000}'
+        </code>
+      </q-card-section>
+    </q-card>
+  </q-expansion-item>
+
+  <q-expansion-item group="api" dense expand-separator label="Stop Scan">
+    <q-card>
+      <q-card-section>
+        <code><span class="text-blue">POST</span> /silnt/api/v1/wallet/{wallet_id}/scan/stop</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
+        <code>{"X-Api-Key": &lt;invoice_key&gt;}</code><br />
+        <h5 class="text-caption q-mt-sm q-mb-none">Returns 200 OK (application/json)</h5>
+        <code>{"status": "stop requested"}</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
+        <code
+          >curl -X POST {{ request.base_url }}silnt/api/v1/wallet/&lt;wallet_id&gt;/scan/stop -H
+          "X-Api-Key: &lt;invoice_key&gt;"
+        </code>
+      </q-card-section>
+    </q-card>
+  </q-expansion-item>
+
+  <q-expansion-item group="api" dense expand-separator label="Get Scan Progress">
+    <q-card>
+      <q-card-section>
+        <code><span class="text-blue">GET</span> /silnt/api/v1/wallet/{wallet_id}/scan/progress</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
+        <code>{"X-Api-Key": &lt;invoice_key&gt;}</code><br />
+        <h5 class="text-caption q-mt-sm q-mb-none">Returns 200 OK (application/json)</h5>
+        <code
+          >{"active": &lt;boolean&gt;, "current": &lt;integer&gt;,
+          "total": &lt;integer&gt;, "found": &lt;integer&gt;}</code
+        >
+        <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
+        <code
+          >curl -X GET {{ request.base_url }}silnt/api/v1/wallet/&lt;wallet_id&gt;/scan/progress -H
+          "X-Api-Key: &lt;invoice_key&gt;"
+        </code>
+      </q-card-section>
+    </q-card>
+  </q-expansion-item>
+
+  <!-- ── UTXOs ── -->
+
+  <q-expansion-item group="api" dense expand-separator label="Get UTXOs from DB">
+    <q-card>
+      <q-card-section>
+        <code><span class="text-blue">GET</span> /silnt/api/v1/utxos</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
+        <code>{"X-Api-Key": &lt;invoice_key&gt;}</code><br />
+        <h5 class="text-caption q-mt-sm q-mb-none">Query Parameters</h5>
+        <code>wallet_id=&lt;string&gt; (required)</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Returns 200 OK (application/json)</h5>
+        <code>{"utxos": [&lt;utxo_object&gt;, ...]}</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
+        <code
+          >curl -X GET "{{ request.base_url }}silnt/api/v1/utxos?wallet_id=&lt;wallet_id&gt;" -H
+          "X-Api-Key: &lt;invoice_key&gt;"
+        </code>
+      </q-card-section>
+    </q-card>
+  </q-expansion-item>
+
+  <!-- ── BlindBit Oracle ── -->
+
+  <q-expansion-item group="api" dense expand-separator label="Get BlindBit Oracle Config">
     <q-card>
       <q-card-section>
         <code><span class="text-blue">GET</span> /silnt/api/v1/blindbit/config</code>
         <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
         <code>{"X-Api-Key": &lt;invoice_key&gt;}</code><br />
-        <h5 class="text-caption q-mt-sm q-mb-none">Returns 200 OK (application/json)</h5>        
+        <h5 class="text-caption q-mt-sm q-mb-none">Returns 200 OK (application/json)</h5>
+        <code
+          >{"blindbit_url": &lt;string&gt;, "blindbit_user": &lt;string&gt;,
+          "blindbit_pass": &lt;string&gt;}</code
+        >
         <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
         <code
           >curl -X GET {{ request.base_url }}silnt/api/v1/blindbit/config -H
@@ -159,7 +247,7 @@
     </q-card>
   </q-expansion-item>
 
-  <q-expansion-item group="api" dense expand-separator label="Update BlindBit Config">
+  <q-expansion-item group="api" dense expand-separator label="Update BlindBit Oracle Config">
     <q-card>
       <q-card-section>
         <code><span class="text-blue">PUT</span> /silnt/api/v1/blindbit/config</code>
@@ -179,49 +267,123 @@
         <code
           >curl -X PUT {{ request.base_url }}silnt/api/v1/blindbit/config -H
           "X-Api-Key: &lt;admin_key&gt;" -H "Content-Type: application/json" -d
-          '{"blindbit_url": "http://localhost:8888", "blindbit_user": "",
-          "blindbit_pass": ""}'
+          '{"blindbit_url": "https://localhost:8001", "blindbit_user": "user",
+          "blindbit_pass": "pass"}'
         </code>
       </q-card-section>
     </q-card>
   </q-expansion-item>
 
-  <!-- ── Scanning ── -->
-
-  <q-expansion-item group="api" dense expand-separator label="Scan Blockchain">
+  <q-expansion-item group="api" dense expand-separator label="Get Oracle Chain Tip">
     <q-card>
       <q-card-section>
-        <code><span class="text-blue">POST</span> /silnt/api/v1/scan</code>
+        <code><span class="text-blue">GET</span> /silnt/api/v1/oracle/tip</code>
         <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
         <code>{"X-Api-Key": &lt;invoice_key&gt;}</code><br />
-        <h5 class="text-caption q-mt-sm q-mb-none">Body (application/json)</h5>
         <h5 class="text-caption q-mt-sm q-mb-none">Returns 200 OK (application/json)</h5>
-        <code
-          >{"utxos": [&lt;utxo_object&gt;, ...], "height": {"height":
-          &lt;integer&gt;}}</code
-        >
+        <code>{"height": &lt;integer&gt;}</code>
         <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
         <code
-          >curl -X POST {{ request.base_url }}silnt/api/v1/scan -H
+          >curl -X GET {{ request.base_url }}silnt/api/v1/oracle/tip -H
           "X-Api-Key: &lt;invoice_key&gt;"
         </code>
       </q-card-section>
     </q-card>
   </q-expansion-item>
 
-  <!-- ── Addresses ── -->
+  <!-- ── BIP353 ── -->
 
-  <q-expansion-item group="api" dense expand-separator label="Get Wallet Addresses">
+  <q-expansion-item group="api" dense expand-separator label="Resolve BIP353 Address">
     <q-card>
       <q-card-section>
-        <code><span class="text-blue">GET</span> /silnt/api/v1/address/{wallet_id}</code>
+        <code><span class="text-blue">GET</span> /silnt/api/v1/bip353/resolve</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
+        <code>{"X-Api-Key": &lt;invoice_key&gt;}</code><br />
+        <h5 class="text-caption q-mt-sm q-mb-none">Query Parameters</h5>
+        <code>address=&lt;email_format&gt; e.g. alice@domain.com (required)</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Returns 200 OK (application/json)</h5>
+        <code
+          >{"address": &lt;string&gt;, "dns_domain": &lt;string&gt;,
+          "result": &lt;string&gt;}</code
+        >
+        <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
+        <code
+          >curl -X GET "{{ request.base_url }}silnt/api/v1/bip353/resolve?address=alice@domain.com"
+          -H "X-Api-Key: &lt;invoice_key&gt;"
+        </code>
+      </q-card-section>
+    </q-card>
+  </q-expansion-item>
+
+  <!-- ── Transactions ── -->
+
+  <q-expansion-item group="api" dense expand-separator label="Build Transaction">
+    <q-card>
+      <q-card-section>
+        <code><span class="text-blue">POST</span> /silnt/api/v1/tx/build</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
+        <code>{"X-Api-Key": &lt;admin_key&gt;}</code><br />
+        <h5 class="text-caption q-mt-sm q-mb-none">Body (application/json)</h5>
+        <code
+          >{"wallet_id": &lt;string&gt;, "recipient": &lt;string&gt;,
+          "amount": &lt;integer&gt;, "fee_rate": &lt;integer&gt;,
+          "memo": &lt;string&gt;, "utxos": [{"txid": &lt;string&gt;,
+          "amount": &lt;integer&gt;, "vout": &lt;integer&gt;,
+          "priv_key_tweak": &lt;string&gt;, "pub_key": &lt;string&gt;}]}</code
+        >
+        <h5 class="text-caption q-mt-sm q-mb-none">Returns 200 OK (application/json)</h5>
+        <code
+          >{"tx_hex": &lt;string&gt;, "fee": &lt;integer&gt;,
+          "amount": &lt;integer&gt;, "change": &lt;integer&gt;,
+          "total_input": &lt;integer&gt;, "recipient": &lt;string&gt;}</code
+        >
+        <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
+        <code
+          >curl -X POST {{ request.base_url }}silnt/api/v1/tx/build -H
+          "X-Api-Key: &lt;admin_key&gt;" -H "Content-Type: application/json" -d
+          '{"wallet_id": "...", "recipient": "sp1qq...", "amount": 1000,
+          "fee_rate": 1, "utxos": [...]}'
+        </code>
+      </q-card-section>
+    </q-card>
+  </q-expansion-item>
+
+  <q-expansion-item group="api" dense expand-separator label="Broadcast Transaction">
+    <q-card>
+      <q-card-section>
+        <code><span class="text-blue">POST</span> /silnt/api/v1/tx/broadcast</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
+        <code>{"X-Api-Key": &lt;admin_key&gt;}</code><br />
+        <h5 class="text-caption q-mt-sm q-mb-none">Body (application/json)</h5>
+        <code>{"tx_hex": &lt;string&gt;}</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Returns 200 OK (application/json)</h5>
+        <code>{"txid": &lt;string&gt;}</code>
+        <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
+        <code
+          >curl -X POST {{ request.base_url }}silnt/api/v1/tx/broadcast -H
+          "X-Api-Key: &lt;admin_key&gt;" -H "Content-Type: application/json" -d
+          '{"tx_hex": "0200000001..."}'
+        </code>
+      </q-card-section>
+    </q-card>
+  </q-expansion-item>
+
+  <!-- ── App Config ── -->
+
+  <q-expansion-item group="api" dense expand-separator label="Get App Config">
+    <q-card>
+      <q-card-section>
+        <code><span class="text-blue">GET</span> /silnt/api/v1/config</code>
         <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
         <code>{"X-Api-Key": &lt;invoice_key&gt;}</code><br />
         <h5 class="text-caption q-mt-sm q-mb-none">Returns 200 OK (application/json)</h5>
-        <code>[&lt;sp_address&gt;, &lt;hr_address&gt;]</code>
+        <code
+          >{"mempool_endpoint": &lt;string&gt;, "sats_denominated": &lt;boolean&gt;,
+          "network": &lt;string&gt;}</code
+        >
         <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
         <code
-          >curl -X GET {{ request.base_url }}silnt/api/v1/address/&lt;wallet_id&gt; -H
+          >curl -X GET {{ request.base_url }}silnt/api/v1/config -H
           "X-Api-Key: &lt;invoice_key&gt;"
         </code>
       </q-card-section>

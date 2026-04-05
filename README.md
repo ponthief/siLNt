@@ -1,6 +1,6 @@
-# Silnt — Silent Payments Wallet Extension for LNbits
+# SiLNt — Silent Payments Wallet Extension for LNbits
 
-A [LNbits](https://lnbits.com) extension for managing [Silent Payment](https://silentpayments.xyz) Bitcoin wallets, with blockchain scanning powered by [BlindBit](https://github.com/setavenger/blindbit-scan).
+A [LNbits](https://lnbits.com) extension for managing [Silent Payment](https://silentpayments.xyz) Bitcoin wallets, with blockchain scanning powered by [BlindBit-Oracle](https://github.com/setavenger/blindbit-oracle).
 
 ---
 
@@ -8,19 +8,19 @@ A [LNbits](https://lnbits.com) extension for managing [Silent Payment](https://s
 
 - Generate Silent Payment addresses from a BIP39 mnemonic
 - Store and manage multiple Silent Payment wallet accounts per user
-- Support for Mainnet and Testnet
+- Support for Mainnet only
 - Human Readable Address support ([BIP353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki) email format)
 - Blockchain scanning via a self-hosted BlindBit instance
 - UTXO tracking with automatic balance updates (unspent only)
 - PSBT-based payment flow
-- Admin-controlled BlindBit connection settings with optional Basic Auth
+- Admin-controlled BlindBit connection settings
 
 ---
 
 ## Requirements
 
 - LNbits instance (self-hosted)
-- Python dependencies: `embit`, `httpx`
+- Python dependencies: `embit`, `httpx`, `coincurve`
 - A running [blindbit-oracle](https://github.com/setavenger/blindbit-oracle) instance for blockchain scanning
 
 ---
@@ -75,7 +75,7 @@ Wallet balance is updated automatically after each scan, counting only **unspent
 
 ### 3. Make a Payment
 
-Click **New Payment** to open the PSBT-based payment flow. Select UTXOs as inputs, specify outputs, and sign the resulting PSBT with your hardware wallet or signing device. You can also paste a pre-signed transaction via **From Signed Tnx**.
+Click **Send** to open the PSBT-based payment flow. Select UTXOs as inputs, specify outputs, and sign the resulting PSBT with your hardware wallet or signing device. You can also paste a pre-signed transaction via **From Signed Tnx**.
 
 ---
 
@@ -106,11 +106,6 @@ All endpoints are prefixed with `/silnt/api/v1`. Authentication uses the `X-Api-
 |---|---|---|---|
 | `POST` | `/scan` | Invoice Key | Proxy scan to BlindBit, returns UTXOs and height |
 
-### Addresses
-
-| Method | Endpoint | Auth | Description |
-|---|---|---|---|
-| `GET` | `/address/{wallet_id}` | Invoice Key | Get Silent Payment and HR addresses |
 
 Full interactive docs available at `/docs#/silnt` on your LNbits instance.
 
@@ -201,6 +196,9 @@ silnt/
 ```
 
 ---
+## References
+
+[BIP353 Light Client Specifications](https://github.com/setavenger/BIP0352-light-client-specification)
 
 ## Contributing
 

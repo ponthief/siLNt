@@ -154,7 +154,7 @@
           class="text-caption text-grey text-italic q-pa-sm"
           style="border:1px solid #e0e0e0;border-radius:4px"
         >
-          No unspent UTXOs available. Please scan the blockchain first.
+          No unspent UTXOs available. Please scan the blockchain first or Load from DB.
         </div>
         <q-list
           v-else
@@ -332,38 +332,7 @@
         <q-btn v-close-popup flat color="grey" class="q-ml-auto">Cancel</q-btn>
       </div>
     </q-card>    
-  </q-dialog>
-    <!-- <q-dialog v-model="showRescanDialog" position="top">
-      <q-card class="q-pa-lg lnbits__dialog-card">
-        <h5 class="text-subtitle1 q-my-none">Rescan Blockchain</h5>
-        <q-separator class="q-mb-md q-mt-sm"></q-separator>
-
-        <p class="text-body2 text-grey q-mb-md">
-          Enter the block height to rescan from. Use your wallet's born-at height
-          to rescan from the beginning.
-        </p>
-
-        <q-input
-          filled
-          dense
-          v-model.number="rescanHeight"
-          type="number"
-          label="Rescan from Height"
-          class="q-mb-md"
-        ></q-input>
-
-        <div class="row q-gutter-sm">
-          <q-btn
-            unelevated
-            color="orange"
-            label="Start Rescan"
-            :disable="!rescanHeight"
-            @click="rescanBlockchain"
-          ></q-btn>
-          <q-btn v-close-popup flat color="grey" class="q-ml-auto">Cancel</q-btn>
-        </div>
-      </q-card>
-  </q-dialog> -->
+  </q-dialog>   
   <q-dialog v-model="showBip353Dialog" position="top">
     <q-card class="q-pa-lg lnbits__dialog-card">
       <h5 class="text-subtitle1 q-my-none">Resolve BIP353 Address</h5>

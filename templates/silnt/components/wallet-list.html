@@ -215,7 +215,7 @@
         v-model="formDialog.data.mnemonic"
         height="30px"
         autogrow
-        label="12 words mnemonic - STORE SAFELY!!"
+        label="12 words mnemonic - STORE SAFELY SINCE I WON'T!!"
         ><q-tooltip
             anchor="center middle"
             self="center middle"
@@ -229,13 +229,13 @@
         dense
         v-model.trim="formDialog.data.last_height"
         type="text"
-        label="Born at Height:"
+        label="Born at Height (Mandatory):"
         ><q-tooltip
             anchor="center middle"
             self="center middle"
             :offset="[0, 10]"
           >
-            Block Height of the First Transaction
+            Block Height of the First Transaction or enter latest Block Height on Mempool
       </q-tooltip>
       </q-input>
       <q-input
@@ -243,7 +243,7 @@
         dense
         v-model.trim="formDialog.data.hr_address"
         type="text"
-        label="Human Readable Address"
+        label="Human Readable Address (Optional)"
         :hint="formDialog.data.hr_address ? 'Will be validated against BIP353 DNS on submit' : ''"
       ><q-tooltip
             anchor="center middle"
@@ -259,7 +259,7 @@
           color="primary"
           label="Add Wallet Account"
           :disable="
-                (formDialog.data.mnemonic == null) || formDialog.data.last_height == null || showCreating"
+                (formDialog.data.mnemonic == null || formDialog.data.last_height == null || formDialog.data.title == null) || showCreating"
           type="submit"
         >
         </q-btn>
@@ -284,7 +284,7 @@
         dense
         v-model.trim="updateDialog.data.last_height"
         type="text"
-        label="Born at Height"
+        label="Born at Height:"
         >
         <q-tooltip
             anchor="center middle"

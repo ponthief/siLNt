@@ -444,6 +444,23 @@ class BlindBitOracleClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def get_spent_index(self, height: int) -> Optional[dict]:        
+        async with self._client() as client:
+            resp = await client.get(f"{self.base_url}/spent-index/{height}")
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            return resp.json()
+
+
+    async def get_block_hash(self, height: int) -> Optional[dict]:
+        """Returns the hash for the block."""
+        async with self._client() as client:
+            resp = await client.get(f"{self.base_url}/block-hash/{height}")
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            return resp.json()
 
 # ── Block scanner ──────────────────────────────────────────────────────────────
 
@@ -481,13 +498,10 @@ async def mark_spent_utxos(
     wallet_id: str,
 ) -> None:
     """
-    Check spent filter and mark UTXOs as spent in the DB.
+    Check spent outpoints index and mark UTXOs as spent in the DB.
+    Skips GCS filter check — fetches spent index directly for owned UTXOs.
     """
     try:
-        filter_data = await client.get_spent_filter(height)
-        if not filter_data:
-            return
-
         # Get current unspent UTXOs from DB
         rows = await db.fetchall(
             "SELECT txid, vout FROM silnt.utxos WHERE wallet_id = :wallet_id AND utxo_state = 'unspent'",
@@ -496,27 +510,45 @@ async def mark_spent_utxos(
         if not rows:
             return
 
-        # The filter data contains spent outpoint hashes
-        # We compare our UTXOs against the spent index
-        spent_index = filter_data.get("data", [])
-        block_hash = bytes.fromhex(filter_data.get("block_hash", ""))
+        # Fetch block hash for this height
+        block_hash_data = await client.get_block_hash(height)
+        if not block_hash_data:
+            return
+        block_hash_bytes = bytes.fromhex(block_hash_data.get('block_hash'))
+        block_hash_le = block_hash_bytes[::-1]
 
+        # Compute short hashes for our UTXOs
+        our_hashes: dict[str, dict] = {}
         for row in rows:
-            txid_bytes = bytes.fromhex(row["txid"])[::-1]  # internal byte order
+            txid_le = bytes.fromhex(row["txid"])[::-1]
             vout_bytes = struct.pack("<I", row["vout"])
-            outpoint = txid_bytes + vout_bytes
-            outpoint_hash_full = hashlib.sha256(outpoint + block_hash[::-1]).digest()
-            short_hash = outpoint_hash_full[:8].hex()
+            outpoint = txid_le + vout_bytes
+            full_hash = hashlib.sha256(outpoint + block_hash_le).digest()
+            short_hash = full_hash[:8].hex()
+            our_hashes[short_hash] = {"txid": row["txid"], "vout": row["vout"]}
 
-            if short_hash in spent_index:
+        if not our_hashes:
+            return
+
+        # Fetch spent index and check against our hashes
+        spent_index = await client.get_spent_index(height)
+        if not spent_index:
+            return
+
+        # spent_index["data"] is a list of 8-byte hex hashes
+        spent_hashes = set(spent_index.get("data", []))
+
+        for short_hash, utxo in our_hashes.items():
+            if short_hash in spent_hashes:
                 await db.execute(
-                    "UPDATE silnt.utxos SET utxo_state = 'spent' WHERE txid = :txid AND vout = :vout AND wallet_id = :wallet_id",
-                    {"txid": row["txid"], "vout": row["vout"], "wallet_id": wallet_id}
+                    """UPDATE silnt.utxos SET utxo_state = 'spent'
+                       WHERE txid = :txid AND vout = :vout AND wallet_id = :wallet_id""",
+                    {"txid": utxo["txid"], "vout": utxo["vout"], "wallet_id": wallet_id}
                 )
-                logger.info(f"Marked UTXO {row['txid']}:{row['vout']} as spent at block {height}")
+                logger.info(f"Marked UTXO {utxo['txid']}:{utxo['vout']} as spent at block {height}")
 
     except Exception as e:
-        logger.warning(f"Block {height}: could not check spent filter: {e}")
+        logger.warning(f"mark_spent_utxos error at block: {height}: {e}")
 
 
 # ── Last scan height ───────────────────────────────────────────────────────────
@@ -644,7 +676,7 @@ async def scan_wallet(
     balance = sum(row["amount"] for row in unspent_rows)
     await update_balance(wallet_id, balance)
 
-    logger.info(f"Scan complete: {blocks_scanned} blocks, {total_found} UTXOs found, balance={balance} sats")
+    logger.info(f"Scan complete: {blocks_scanned} blocks, {total_found} Unspent UTXOs found, balance={balance} sats")
     set_scan_progress(wallet_id, total_blocks, total_blocks, total_found, active=False)
     return {
         "utxos_found": total_found,
