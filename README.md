@@ -12,7 +12,7 @@ A [LNbits](https://lnbits.com) extension for managing [Silent Payment](https://s
 - Human Readable Address support ([BIP353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki) email format)
 - Blockchain scanning via a self-hosted BlindBit instance
 - UTXO tracking with automatic balance updates (unspent only)
-- PSBT-based payment flow
+- Send to another SilentPayment/On-Chain or BIP-353 Address
 - Admin-controlled BlindBit connection settings
 
 ---
@@ -75,7 +75,7 @@ Wallet balance is updated automatically after each scan, counting only **unspent
 
 ### 3. Make a Payment
 
-Click **Send** to open the PSBT-based payment flow. Select UTXOs as inputs, specify outputs, and sign the resulting PSBT with your hardware wallet or signing device. You can also paste a pre-signed transaction via **From Signed Tnx**.
+Click **Send** to open the Send Payment flow. Select UTXOs as inputs, specify recipient, and sign the resulting transaction. Click **Broadcast** to broadcast transaction for "mining".
 
 ---
 

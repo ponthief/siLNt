@@ -12,7 +12,6 @@ from .helpers.wallet import (
 )
 from .helpers.scan import scan_wallet, get_scan_progress, request_scan_stop
 from .helpers.address_resolver import bip353_resolve
-from .helpers.mempool import mempool_call_endpoint
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from lnbits.core.models import WalletTypeInfo
 from lnbits.decorators import require_admin_key, require_invoice_key
@@ -91,9 +90,7 @@ async def api_wallet_create(
             sp_address='',
             spend_key='',
             scan_secret=''
-        )
-        if data.last_height is None:
-            data.last_height = await mempool_call_endpoint('/api/blocks/tip/height', 'GET')
+        )        
         (sp_address, scan_secret, spend_key) = await generate_silent_wallet_address(
             decrypt_mnemonic(data.mnemonic, str(data.last_height))
         )
@@ -106,7 +103,24 @@ async def api_wallet_create(
             None,
         )
         if existing_wallet:           
-            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=f"Silent Payment Wallet already exists!")                       
+            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=f"Silent Payment Wallet already exists!")
+        if data.hr_address:
+            try:
+                resolved = bip353_resolve(data.hr_address)
+                result = resolved.get("result", "")
+                result = result.replace("bitcoin:?sp=", "").replace("sp=", "").strip()
+                if result.lower() != sp_address.lower():
+                    raise HTTPException(
+                        status_code=HTTPStatus.BAD_REQUEST,
+                        detail=f"BIP353 address resolves to a different SP address than the wallet's."
+                    )
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_REQUEST,
+                    detail=f"BIP353 resolution failed for {data.hr_address}: {str(e)}"
+                )                       
         new_wallet.scan_secret = scan_secret
         new_wallet.spend_key = spend_key
         new_wallet.sp_address = sp_address
@@ -124,7 +138,25 @@ async def api_wallet_update(
         wallet = await get_silnt_wallet(wallet_id)
         if not wallet:
             raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
-        if data.hr_address is not None and data.hr_address != wallet.hr_address:
+        if data.hr_address is not None and data.hr_address != wallet.hr_address:            
+            # Validate BIP353 resolves to this wallet's SP address
+            if data.hr_address:  # only validate if non-empty
+                try:
+                    resolved = bip353_resolve(data.hr_address)
+                    result = resolved.get("result", "")
+                    result = result.replace("bitcoin:?sp=", "").replace("sp=", "").strip()
+                    if result.lower() != wallet.sp_address.lower():
+                        raise HTTPException(
+                            status_code=HTTPStatus.BAD_REQUEST,
+                            detail=f"BIP353 address resolves to a different SP address than this wallet's."
+                        )
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=HTTPStatus.BAD_REQUEST,
+                        detail=f"BIP353 resolution failed for {data.hr_address}: {str(e)}"
+                    )
             await update_hr_address(wallet.id, data.hr_address)
         if data.last_height is not None and int(data.last_height) != wallet.last_height:
             await update_last_height(wallet.id, int(data.last_height))
