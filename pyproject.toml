@@ -7,11 +7,12 @@ authors = [{ name = "Bitaurus", email = "ponthief@bitaurus.net" }]
 urls = { Homepage = "https://bitaurus.net", Repository = "https://github.com/ponthief/silnt" }
 
 dependencies = [
- "bitcoinlib>=0.6.12.1",
  "coincurve>=20.0.0",
  "dnspython>=2.7.0",
  "embit>=0.8.0",
+ "fastapi>=0.115.13", 
  "lnbits>1",
+ "pydantic>=1.10.18",
 ]
 
 [tool.uv]

@@ -2,7 +2,7 @@ from fastapi import APIRouter
 from fastapi.staticfiles import StaticFiles
 
 from .crud import db
-from .views import silnt_generic_router 
+from .views import silnt_generic_router
 from .views_api import silnt_api_router
 
 silnt_static_files = [

@@ -12,14 +12,28 @@ from loguru import logger
 from ..crud import get_or_create_server_secret
 from lnbits.utils.crypto import AESCipher
 from cryptography.fernet import Fernet
-from embit.transaction import Transaction, TransactionInput, TransactionOutput, SIGHASH, Witness
+from embit.transaction import (
+    Transaction,
+    TransactionInput,
+    TransactionOutput,
+    SIGHASH,
+    Witness,
+)
 from embit.psbt import PSBT, InputScope
 from embit.script import Script
 from embit.networks import NETWORKS
 from .curve import (
-    decode, convertbits, pubkey_point_gen_from_int,
-    int_from_bytes, point_add, point_mul, serP, ser256,
-    has_even_y, G, p as CURVE_P
+    decode,
+    convertbits,
+    pubkey_point_gen_from_int,
+    int_from_bytes,
+    point_add,
+    point_mul,
+    serP,
+    ser256,
+    has_even_y,
+    G,
+    p as CURVE_P,
 )
 from embit.ec import SchnorrSig
 import coincurve
@@ -32,61 +46,71 @@ def encrypt_spend_key(spend_priv_hex: str, scan_key_hex: str) -> str:
     f = Fernet(fernet_key)
     return f.encrypt(spend_priv_hex.encode()).decode()
 
+
 def decrypt_spend_key(encrypted: str, scan_key_hex: str) -> str:
     key_bytes = hashlib.sha256(scan_key_hex.encode()).digest()
     fernet_key = base64.urlsafe_b64encode(key_bytes)
     f = Fernet(fernet_key)
     return f.decrypt(encrypted.encode()).decode()
 
+
 def get_seed(mnemonic) -> bytes:
     """
     Re‑creates the BIP‑39 seed from the hard‑coded mnemonic.
     Returns the 64‑byte seed (as `bytes`).
-    """    
+    """
     seed = bip39.mnemonic_to_seed(mnemonic)
     return seed
 
-def generate_hardened_keys(seed) -> dict:    
-    root = bip32.HDKey.from_seed(seed, version=NETWORKS["main"]["xprv"])    
+
+def generate_hardened_keys(seed) -> dict:
+    root = bip32.HDKey.from_seed(seed, version=NETWORKS["main"]["xprv"])
     scan_private_key = root.derive("m/352h/0h/0h/1h/0").key.secret
-    spend_private_key = root.derive("m/352h/0h/0h/0h/0").key.secret    
-    scank = root.derive("m/352h/0h/0h/1h/0").key.secret    
-    spendk = root.derive("m/352h/0h/0h/0h/0")    
+    spend_private_key = root.derive("m/352h/0h/0h/0h/0").key.secret
+    scank = root.derive("m/352h/0h/0h/1h/0").key.secret
+    spendk = root.derive("m/352h/0h/0h/0h/0")
     # Store the keys in a dictionary
     key_material = {
-        'scan_priv_key': scan_private_key,
-        'spend_priv_key': spend_private_key,
-        'scank': hexlify(scank).decode(),
-        'spendk': spendk.get_public_key()
+        "scan_priv_key": scan_private_key,
+        "spend_priv_key": spend_private_key,
+        "scank": hexlify(scank).decode(),
+        "spendk": spendk.get_public_key(),
     }
     return key_material
 
-def encode_silent_payment_address(B_scan: Point, B_m: Point, hrp: str = 'tsp', version: int = 0) -> str:
+
+def encode_silent_payment_address(
+    B_scan: Point, B_m: Point, hrp: str = "tsp", version: int = 0
+) -> str:
     if B_scan is None or B_m is None:
-        raise ValueError('ERROR: Invalid data.')
-    ret = bech32_encode(hrp, [version] + convertbits(serP(B_scan) + serP(B_m), 8, 5), Encoding.BECH32M)
+        raise ValueError("ERROR: Invalid data.")
+    ret = bech32_encode(
+        hrp, [version] + convertbits(serP(B_scan) + serP(B_m), 8, 5), Encoding.BECH32M
+    )
     if decode(hrp, ret) == (None, None):
-        raise ValueError('ERROR: Invalid data.')
+        raise ValueError("ERROR: Invalid data.")
     return ret
 
-async def generate_silent_wallet_address(mnemonic) -> tuple:    
+
+async def generate_silent_wallet_address(mnemonic) -> tuple:
     seed = get_seed(mnemonic)
-    key_material = generate_hardened_keys(seed)       
-    # Receiver's scan and spend public key 
-    B_scan = pubkey_point_gen_from_int(int_from_bytes(key_material['scan_priv_key']))
-    B_spend = pubkey_point_gen_from_int(int_from_bytes(key_material['spend_priv_key']))        
-    sp = encode_silent_payment_address(B_scan, B_spend, 'sp', 0)
+    key_material = generate_hardened_keys(seed)
+    # Receiver's scan and spend public key
+    B_scan = pubkey_point_gen_from_int(int_from_bytes(key_material["scan_priv_key"]))
+    B_spend = pubkey_point_gen_from_int(int_from_bytes(key_material["spend_priv_key"]))
+    sp = encode_silent_payment_address(B_scan, B_spend, "sp", 0)
     # Encrypt spend private key using scan key as encryption key
-    spend_priv_hex = hexlify(key_material['spend_priv_key']).decode()
-    scan_key_hex = key_material['scank']    
+    spend_priv_hex = hexlify(key_material["spend_priv_key"]).decode()
+    scan_key_hex = key_material["scank"]
     encrypted_spend_key = encrypt_spend_key(spend_priv_hex, scan_key_hex)
-     # Encrypt scan secret using server secret
-    encrypted_scan_secret = await encrypt_secret(scan_key_hex)    
-    return (str(sp),  encrypted_scan_secret, str(encrypted_spend_key))
+    # Encrypt scan secret using server secret
+    encrypted_scan_secret = await encrypt_secret(scan_key_hex)
+    return (str(sp), encrypted_scan_secret, str(encrypted_spend_key))
+
 
 def parse_sp_address(sp_address: str) -> tuple:
     """Extract B_scan and B_spend as compressed pubkey bytes from a Silent Payment address."""
-    hrp = 'tsp' if sp_address.startswith('tsp') else 'sp'
+    hrp = "tsp" if sp_address.startswith("tsp") else "sp"
     version, decoded = decode(hrp, sp_address)
     if decoded is None:
         raise ValueError(f"Invalid Silent Payment address: {sp_address}")
@@ -118,8 +142,10 @@ def derive_sp_scriptpubkey(
     a_sum = 0
     A_points = []
     for u in utxos:
-        priv = (int.from_bytes(bytes.fromhex(u["priv_key_tweak"]), "big") +
-                int.from_bytes(spend_secret, "big")) % n
+        priv = (
+            int.from_bytes(bytes.fromhex(u["priv_key_tweak"]), "big")
+            + int.from_bytes(spend_secret, "big")
+        ) % n
         pub_point = pubkey_point_gen_from_int(priv)
         if pub_point[1] % 2 == 1:  # odd Y — negate (taproot requirement)
             priv = n - priv
@@ -151,7 +177,9 @@ def derive_sp_scriptpubkey(
 
     # Step 6: t_k = TaggedHash("BIP0352/SharedSecret", serP(ecdh) || ser32(0))
     ecdh_compressed = bytes([0x02 + (ecdh_point[1] % 2)]) + ser256(ecdh_point[0])
-    t_k_bytes = tagged_hash("BIP0352/SharedSecret", ecdh_compressed + (0).to_bytes(4, "big"))
+    t_k_bytes = tagged_hash(
+        "BIP0352/SharedSecret", ecdh_compressed + (0).to_bytes(4, "big")
+    )
     t_k = int.from_bytes(t_k_bytes, "big")
 
     # Step 7: P = B_spend + t_k*G
@@ -160,6 +188,7 @@ def derive_sp_scriptpubkey(
     P = point_add(B_spend, tG)
 
     return bytes([0x51, 0x20]) + ser256(P[0])
+
 
 def verify_sp_output(
     recipient_script: Script,
@@ -171,10 +200,15 @@ def verify_sp_output(
     """
     expected = bytes(recipient_script.data)
     for out in tx_outputs:
-        out_script = out.script_pubkey.data if hasattr(out.script_pubkey, 'data') else bytes(out.script_pubkey)
+        out_script = (
+            out.script_pubkey.data
+            if hasattr(out.script_pubkey, "data")
+            else bytes(out.script_pubkey)
+        )
         if out_script == expected:
             return True
     return False
+
 
 def build_transaction(
     spend_key_hex: str,
@@ -182,22 +216,22 @@ def build_transaction(
     amount: int,
     fee_rate: int,
     utxos: list[dict],
-    network: str = "Mainnet"
+    network: str = "Mainnet",
 ) -> dict:
     """
     Build and sign a Bitcoin transaction.
     Supports Silent Payment addresses (sp1/tsp1) and standard on-chain addresses.
     Returns dict with tx_hex, fee, amount, change.
-    """    
+    """
     # # ── 1. Parse spend key ────────────────────────────────────────────
-    spend_key = ec.PrivateKey(bytes.fromhex(spend_key_hex))    
+    spend_key = ec.PrivateKey(bytes.fromhex(spend_key_hex))
 
     n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 
     # ── 2. Build per-input tweaked keys and scripts ───────────────────
     input_keys = []
-    input_scripts = []    
-    for utxo in utxos:        
+    input_scripts = []
+    for utxo in utxos:
         # BlindBit: full_signing_key = priv_key_tweak + spend_key
         priv_key_tweak_hex = utxo.get("priv_key_tweak") or ""
         if not priv_key_tweak_hex:
@@ -218,20 +252,20 @@ def build_transaction(
             full_secret_int = n - full_secret_int
             full_pub_point = pubkey_point_gen_from_int(full_secret_int)
 
-        signing_key = ec.PrivateKey(full_secret_int.to_bytes(32, 'big'))
+        signing_key = ec.PrivateKey(full_secret_int.to_bytes(32, "big"))
 
         # ScriptPubKey uses pub_key from BlindBit directly (top level)
         actual_x_only = bytes.fromhex(pub_key_hex)  # already x-only 32 bytes
         actual_script = Script(bytes([0x51, 0x20]) + actual_x_only)
 
         # Verify
-        derived_x = ser256(full_pub_point[0]).hex()        
+        derived_x = ser256(full_pub_point[0]).hex()
 
         input_keys.append(signing_key)
         input_scripts.append((actual_script, actual_x_only))
 
     # ── 3. Recipient scriptpubkey ─────────────────────────────────────
-    if recipient.startswith('sp1'):
+    if recipient.startswith("sp1"):
         recipient_script = Script(
             derive_sp_scriptpubkey(recipient, spend_key.secret, utxos)
         )
@@ -253,32 +287,25 @@ def build_transaction(
             f"Insufficient funds. Need {amount + fee} sats "
             f"(including {fee} sats fee), have {total_input} sats."
         )
-    
 
     # ── 5. Build inputs ───────────────────────────────────────────────────
     tx_inputs_with_keys = [
-    (
-        TransactionInput(
-            bytes.fromhex(u["txid"]),
-            int(u.get("vout", 0))
-        ),
-        input_keys[i],
-        input_scripts[i],
-        u["amount"]
-    )
-    for i, u in enumerate(utxos)
-]
+        (
+            TransactionInput(bytes.fromhex(u["txid"]), int(u.get("vout", 0))),
+            input_keys[i],
+            input_scripts[i],
+            u["amount"],
+        )
+        for i, u in enumerate(utxos)
+    ]
 
     # BIP69 sort
-    tx_inputs_with_keys.sort(key=lambda x: (       
-        x[0].txid.hex(),        
-        x[0].vout
-    ))
+    tx_inputs_with_keys.sort(key=lambda x: (x[0].txid.hex(), x[0].vout))
 
-    tx_inputs          = [t[0] for t in tx_inputs_with_keys]
-    input_keys_sorted  = [t[1] for t in tx_inputs_with_keys]
+    tx_inputs = [t[0] for t in tx_inputs_with_keys]
+    input_keys_sorted = [t[1] for t in tx_inputs_with_keys]
     input_scripts_sorted = [t[2] for t in tx_inputs_with_keys]
-    input_amounts_sorted = [t[3] for t in tx_inputs_with_keys]    
+    input_amounts_sorted = [t[3] for t in tx_inputs_with_keys]
 
     # ── 6. Build outputs ──────────────────────────────────────────────────
     tx_outputs = [TransactionOutput(amount, recipient_script)]
@@ -288,13 +315,17 @@ def build_transaction(
         tx_outputs.append(TransactionOutput(change_amount, change_script))
 
     # BIP69: sort outputs by value then scriptpubkey
-    tx_outputs.sort(key=lambda x: (
-        x.value,
-        x.script_pubkey.data.hex() if hasattr(x.script_pubkey, 'data') else bytes(x.script_pubkey).hex()
-    ))
+    tx_outputs.sort(
+        key=lambda x: (
+            x.value,
+            x.script_pubkey.data.hex()
+            if hasattr(x.script_pubkey, "data")
+            else bytes(x.script_pubkey).hex(),
+        )
+    )
 
     # ── 6b. Verify SP output is in tx before signing ──────────────────────
-    if recipient.startswith('sp1') or recipient.startswith('tsp1'):
+    if recipient.startswith("sp1") or recipient.startswith("tsp1"):
         if not verify_sp_output(recipient_script, tx_outputs):
             raise ValueError(
                 f"Derived SP output not found in transaction outputs. "
@@ -302,19 +333,18 @@ def build_transaction(
             )
 
     # ── 7. Construct PSBT ─────────────────────────────────────────────────
-    tx = Transaction(vin=tx_inputs, vout=tx_outputs)    
+    tx = Transaction(vin=tx_inputs, vout=tx_outputs)
     psbt = PSBT(tx)
 
     for i in range(len(tx_inputs)):
         inp = psbt.inputs[i]
         inp.witness_utxo = TransactionOutput(
-            input_amounts_sorted[i],
-            input_scripts_sorted[i][0]
+            input_amounts_sorted[i], input_scripts_sorted[i][0]
         )
 
     # ── 8. Collect sighash inputs ─────────────────────────────────────────
     utxo_amounts = [inp.witness_utxo.value for inp in psbt.inputs]
-    utxo_scripts = [inp.witness_utxo.script_pubkey for inp in psbt.inputs]    
+    utxo_scripts = [inp.witness_utxo.script_pubkey for inp in psbt.inputs]
 
     # ── 9. Sign each input with sorted keys ──────────────────────────────
     for i in range(len(psbt.inputs)):
@@ -322,12 +352,12 @@ def build_transaction(
         priv_bytes = input_keys_sorted[i].secret  # ← use sorted keys
         cc_key = coincurve.PrivateKey(priv_bytes)
         sig_bytes = cc_key.sign_schnorr(h)
-        sig_bytes = sig_bytes.rjust(64, b'\x00')
-        psbt.inputs[i].taproot_key_sig = SchnorrSig.parse(sig_bytes)                
-        
+        sig_bytes = sig_bytes.rjust(64, b"\x00")
+        psbt.inputs[i].taproot_key_sig = SchnorrSig.parse(sig_bytes)
+
     # ── 10. Finalize manually ──────────────────────────────────────────────
     for inp in psbt.inputs:
-        if inp.taproot_key_sig is not None:            
+        if inp.taproot_key_sig is not None:
             inp.final_scriptwitness = Witness([inp.taproot_key_sig.serialize()])
             inp.final_scriptsig = Script(b"")
 
@@ -338,7 +368,7 @@ def build_transaction(
             tx.vin[i].witness = inp.final_scriptwitness
 
     tx_hex = tx.serialize().hex()
-    
+
     return {
         "tx_hex": tx_hex,
         "fee": fee,
@@ -348,7 +378,10 @@ def build_transaction(
         "recipient": recipient,
     }
 
-def decrypt_mnemonic(m: str | None = None, k: str | None = None, urlsafe: bool = False) -> str | None:
+
+def decrypt_mnemonic(
+    m: str | None = None, k: str | None = None, urlsafe: bool = False
+) -> str | None:
     """
     Decrypt message with the secret key
 
@@ -361,34 +394,39 @@ def decrypt_mnemonic(m: str | None = None, k: str | None = None, urlsafe: bool =
         return None
     return AESCipher(key=k).decrypt(m, urlsafe=urlsafe)
 
-async def encrypt_secret(value: str) -> str:    
+
+async def encrypt_secret(value: str) -> str:
     server_secret = await get_or_create_server_secret()
     key_bytes = hashlib.sha256(server_secret.encode()).digest()
     fernet_key = base64.urlsafe_b64encode(key_bytes)
     f = Fernet(fernet_key)
     return f.encrypt(value.encode()).decode()
 
-async def decrypt_secret(encrypted: str) -> str:    
+
+async def decrypt_secret(encrypted: str) -> str:
     server_secret = await get_or_create_server_secret()
     key_bytes = hashlib.sha256(server_secret.encode()).digest()
     fernet_key = base64.urlsafe_b64encode(key_bytes)
     f = Fernet(fernet_key)
     return f.decrypt(encrypted.encode()).decode()
 
+
 def sha256(data: bytes) -> bytes:
-        return hashlib.sha256(data).digest()
+    return hashlib.sha256(data).digest()
+
 
 def tagged_hash(tag: str, data: bytes) -> bytes:
-        tag_bytes = tag.encode()
-        tag_hash = sha256(tag_bytes)
-        return sha256(tag_hash + tag_hash + data)
+    tag_bytes = tag.encode()
+    tag_hash = sha256(tag_bytes)
+    return sha256(tag_hash + tag_hash + data)
+
 
 def taproot_sighash(
     tx: Transaction,
     input_index: int,
     utxo_scripts: list,
     utxo_amounts: list,
-    sighash_type: int = 0
+    sighash_type: int = 0,
 ) -> bytes:
     """
     Compute BIP341 taproot key-path sighash manually.
@@ -404,58 +442,61 @@ def taproot_sighash(
     # sha_prevouts
     prevouts = b""
     for vin in tx.vin:
-        prevouts += vin.txid[::-1] + vin.vout.to_bytes(4, 'little')
-    sha_prevouts = sha256(prevouts)    
+        prevouts += vin.txid[::-1] + vin.vout.to_bytes(4, "little")
+    sha_prevouts = sha256(prevouts)
     # sha_amounts
     amounts = b""
     for amt in utxo_amounts:
-        amounts += amt.to_bytes(8, 'little')
-    sha_amounts = sha256(amounts)    
+        amounts += amt.to_bytes(8, "little")
+    sha_amounts = sha256(amounts)
     # sha_scriptpubkeys
     scripts = b""
     for s in utxo_scripts:
-        script_bytes = s.data if hasattr(s, 'data') else bytes(s)
-        scripts += len(script_bytes).to_bytes(1, 'little') + script_bytes
-    sha_scriptpubkeys = sha256(scripts)    
+        script_bytes = s.data if hasattr(s, "data") else bytes(s)
+        scripts += len(script_bytes).to_bytes(1, "little") + script_bytes
+    sha_scriptpubkeys = sha256(scripts)
     # sha_sequences
     sequences = b""
     for vin in tx.vin:
-        sequences += vin.sequence.to_bytes(4, 'little')         
-    sha_sequences = sha256(sequences)           
+        sequences += vin.sequence.to_bytes(4, "little")
+    sha_sequences = sha256(sequences)
     # sha_outputs
     outputs = b""
     for vout in tx.vout:
-        script_bytes = vout.script_pubkey.data if hasattr(vout.script_pubkey, 'data') else bytes(vout.script_pubkey)
-        outputs += vout.value.to_bytes(8, 'little')
-        outputs += len(script_bytes).to_bytes(1, 'little') + script_bytes
-    sha_outputs = sha256(outputs)    
+        script_bytes = (
+            vout.script_pubkey.data
+            if hasattr(vout.script_pubkey, "data")
+            else bytes(vout.script_pubkey)
+        )
+        outputs += vout.value.to_bytes(8, "little")
+        outputs += len(script_bytes).to_bytes(1, "little") + script_bytes
+    sha_outputs = sha256(outputs)
     # spend_type = 0 (key path, no annex)
-    spend_type = (0).to_bytes(1, 'little')
+    spend_type = (0).to_bytes(1, "little")
 
     # input data
     vin = tx.vin[input_index]
     input_data = (
-        vin.txid +
-        vin.vout.to_bytes(4, 'little') +
-        utxo_amounts[input_index].to_bytes(8, 'little') +
-        len(utxo_scripts[input_index].data).to_bytes(1, 'little') +
-        utxo_scripts[input_index].data +
-        vin.sequence.to_bytes(4, 'little')
+        vin.txid
+        + vin.vout.to_bytes(4, "little")
+        + utxo_amounts[input_index].to_bytes(8, "little")
+        + len(utxo_scripts[input_index].data).to_bytes(1, "little")
+        + utxo_scripts[input_index].data
+        + vin.sequence.to_bytes(4, "little")
     )
 
     # Full sighash preimage
     preimage = (
-        bytes([0x00]) +                          # epoch
-        sighash_type.to_bytes(1, 'little') +     # hash_type
-        tx.version.to_bytes(4, 'little') +       # nVersion
-        tx.locktime.to_bytes(4, 'little') +      # nLockTime
-        sha_prevouts +
-        sha_amounts +
-        sha_scriptpubkeys +
-        sha_sequences +
-        sha_outputs +
-        spend_type +
-        input_index.to_bytes(4, 'little')        # input_index
-    )    
+        bytes([0x00])  # epoch
+        + sighash_type.to_bytes(1, "little")  # hash_type
+        + tx.version.to_bytes(4, "little")  # nVersion
+        + tx.locktime.to_bytes(4, "little")  # nLockTime
+        + sha_prevouts
+        + sha_amounts
+        + sha_scriptpubkeys
+        + sha_sequences
+        + sha_outputs
+        + spend_type
+        + input_index.to_bytes(4, "little")  # input_index
+    )
     return tagged_hash("TapSighash", preimage)
-
