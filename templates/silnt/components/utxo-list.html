@@ -79,15 +79,23 @@
                 color="negative"
                 class="q-mr-sm cursor-pointer"
                 @click="props.row.expanded = !props.row.expanded"
-              >spent</q-badge>
+              >spent</q-badge>              
+              <q-badge
+                v-else-if="props.row.utxo_state === 'broadcasted'"
+                color="blue"
+                class="q-mr-sm cursor-pointer"
+                @click="props.row.expanded = !props.row.expanded"
+              >
+                <q-icon name="send" size="10px" class="q-mr-xs"></q-icon>
+                broadcasted
+              </q-badge>
               <q-badge
                 v-else
                 color="grey"
                 class="q-mr-sm cursor-pointer"
                 @click="props.row.expanded = !props.row.expanded"
                 v-text="props.row.utxo_state || 'unknown'"
-              ></q-badge>
-
+              ></q-badge>               
               <!-- Label badge if this UTXO has a silent payment label -->
               <q-badge
                 v-if="props.row.label"
@@ -132,7 +140,12 @@
                 ></a>
               </div>
             </div>
-
+             <div v-if="props.row.utxo_state === 'broadcasted'" class="row items-center q-mb-sm">
+            <div class="col-2 text-weight-bold">Status</div>
+            <div class="col-10 text-caption text-grey">
+              Pending confirmation and NOT persisted. Scan ONLY after confirmation to update your UTXO list.
+            </div>
+          </div>
             <!-- Label details (if present) -->
             <div v-if="props.row.label" class="q-mt-sm">
               <div class="row items-center q-mb-sm">

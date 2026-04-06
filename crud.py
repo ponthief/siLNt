@@ -8,6 +8,7 @@ from .models import Config, BlindbitConfig, WalletAccount, UTXORecord
 from embit.descriptor import Descriptor, Key
 from embit.descriptor.arguments import AllowedDerivation
 from embit.networks import NETWORKS
+from datetime import datetime
 
 db = Database("ext_silnt")
 
@@ -151,64 +152,30 @@ async def get_or_create_server_secret() -> str:
 
 async def get_utxos_for_wallet(wallet_id: str) -> list[UTXORecord]:
     return await db.fetchall(
-        "SELECT * FROM silnt.utxos WHERE wallet_id = :wallet_id",
+        "SELECT * FROM silnt.utxos WHERE wallet_id = :wallet_id ORDER BY timestamp DESC",
         {"wallet_id": wallet_id},
         UTXORecord,
     )
 
 
-async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> None:
-    await delete_utxos_for_wallet(wallet_id)
-    for utxo in utxos:
+async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> None:    
+    for utxo in utxos:        
         await db.execute(
             """INSERT INTO silnt.utxos (txid, vout, amount, priv_key_tweak, pub_key, utxo_state, timestamp, wallet_id)
             VALUES (:txid, :vout, :amount, :priv_key_tweak, :pub_key, :utxo_state, :timestamp, :wallet_id)
-            ON CONFLICT (txid) DO UPDATE SET
+            ON CONFLICT (txid, vout) DO UPDATE SET
                 utxo_state = EXCLUDED.utxo_state,
                 amount = EXCLUDED.amount,
                 priv_key_tweak = EXCLUDED.priv_key_tweak,
                 pub_key = EXCLUDED.pub_key""",
             utxo.to_db_row(wallet_id),
+        )                
+
+async def update_unconfirmed_utxo(wallet_id: str, txid: str):
+     await db.execute(
+            "UPDATE silnt.utxos SET utxo_state = 'unconfirmed_spent' WHERE txid = :txid AND wallet_id = :wallet_id",
+            {"txid": txid, "wallet_id": wallet_id}
         )
-        # txid = utxo.txid.hex()
-        # vout = utxo.vout
-        # amount = utxo.amount
-        # priv_key_tweak = utxo.get('priv_key_tweak') or ''
-        # pub_key = utxo.pub_key or ''
-        # utxo_state = utxoutxo_state') or 'unknown'
-
-        # existing = await db.fetchone(
-        #     "SELECT txid FROM silnt.utxos WHERE txid = :txid AND vout = :vout",
-        #     {"txid": txid, "vout": vout},
-        # )
-        # if existing:
-        #     await db.execute(
-        #         """UPDATE silnt.utxos SET
-        #             amount = :amount,
-        #             priv_key_tweak = :priv_key_tweak,
-        #             pub_key = :pub_key,
-        #             utxo_state = :utxo_state,
-        #             wallet_id = :wallet_id
-        #         WHERE txid = :txid AND vout = :vout""",
-        #         {
-        #             "txid": txid, "vout": vout, "amount": amount,
-        #             "priv_key_tweak": priv_key_tweak, "pub_key": pub_key,
-        #             "utxo_state": utxo_state, "wallet_id": wallet_id
-        #         },
-        #     )
-        # else:
-        #     await db.execute(
-        #         """INSERT INTO silnt.utxos
-        #             (txid, vout, amount, priv_key_tweak, pub_key, utxo_state, wallet_id)
-        #         VALUES
-        #             (:txid, :vout, :amount, :priv_key_tweak, :pub_key, :utxo_state, :wallet_id)""",
-        #         {
-        #             "txid": txid, "vout": vout, "amount": amount,
-        #             "priv_key_tweak": priv_key_tweak, "pub_key": pub_key,
-        #             "utxo_state": utxo_state, "wallet_id": wallet_id
-        #         },
-        #     )
-
 
 # ── Global admin-only blindbit config ───────────────────────────────────────
 

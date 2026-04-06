@@ -104,6 +104,16 @@ window.app.component('utxo-list', {
       this.utxoSelectAmount = totalPayedAmount
       this.applyUtxoSelectionMode()
     },
+    unspentTotal: function () {
+      return (this.utxos || [])
+        .filter(u => u.utxo_state === 'unspent')
+        .reduce((t, u) => t + (u.amount || 0), 0)
+    },
+    spentTotal: function () {
+      return (this.utxos || [])
+        .filter(u => u.utxo_state === 'spent')
+        .reduce((t, u) => t + (u.amount || 0), 0)
+    },
     updateUtxoSelection: function () {
       this.utxoSelectAmount = this.payedAmount
       this.applyUtxoSelectionMode()

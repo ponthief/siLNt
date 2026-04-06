@@ -511,18 +511,12 @@ async def scan_block(
     """
     Scan a single block for UTXOs belonging to this wallet.
     Returns list of owned UTXO dicts ready for DB insertion.
-    """
-    # Plug in real keys, tweaks, and UTXOs from your BlindBit client
-    # scan_key = bytes.fromhex("your_32_byte_scan_secret_key_hex")
-    # spend_pub_key = bytes.fromhex("your_33_byte_spend_pubkey_hex")
+    """    
     tweaks = await client.get_tweaks(height, DUST_LIMIT)
-    labels: list[Label] = []  # populate with your wallet's labels
+    labels: list[Label] = []
     utxos = await client.get_utxos(height)
     if not utxos:
-        return []
-    # tweaks: list[bytes] = []  # from BlindBit GetTweaks(blockHeight, dustLimit)
-    # utxos: list[UTXOServed] = []  # from BlindBit GetUTXOs(blockHeight)
-
+        return []    
     labels = create_labels(scan_secret_bytes, count=21)
     owned = sync_block(tweaks, utxos, scan_secret_bytes, spend_pub_bytes, labels)
 
@@ -539,9 +533,9 @@ async def mark_spent_utxos(
     Skips GCS filter check — fetches spent index directly for owned UTXOs.
     """
     try:
-        # Get current unspent UTXOs from DB
+        # Get current unconfirmd_spent and unspent UTXOs from DB
         rows = await db.fetchall(
-            "SELECT txid, vout FROM silnt.utxos WHERE wallet_id = :wallet_id AND utxo_state = 'unspent'",
+            "SELECT txid, vout FROM silnt.utxos WHERE wallet_id = :wallet_id AND utxo_state in ('unspent','unconfirmed_spent')",
             {"wallet_id": wallet_id},
         )
         if not rows:

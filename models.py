@@ -58,6 +58,8 @@ class BuildTxRequest(BaseModel):
 
 class BroadcastTxRequest(BaseModel):
     tx_hex: str
+    wallet_id: Optional[str] = None
+    spent_txids: list[str] = []
 
 
 class Config(BaseModel):

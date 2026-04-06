@@ -44,3 +44,8 @@ async def m001_initial(db):
         );
         """
     )
+    await db.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_silnt_utxos_vout ON silnt.utxos (txid, vout);
+        """
+    )

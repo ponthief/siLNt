@@ -1,4 +1,5 @@
 import base64
+import coincurve
 import hashlib
 import httpx
 import io
@@ -36,7 +37,7 @@ from .curve import (
     p as CURVE_P,
 )
 from embit.ec import SchnorrSig
-import coincurve
+
 
 
 def encrypt_spend_key(spend_priv_hex: str, scan_key_hex: str) -> str:
@@ -430,14 +431,7 @@ def taproot_sighash(
 ) -> bytes:
     """
     Compute BIP341 taproot key-path sighash manually.
-    """
-    # def sha256(data: bytes) -> bytes:
-    #     return hashlib.sha256(data).digest()
-
-    # def tagged_hash(tag: str, data: bytes) -> bytes:
-    #     tag_bytes = tag.encode()
-    #     tag_hash = sha256(tag_bytes)
-    #     return sha256(tag_hash + tag_hash + data)
+    """    
 
     # sha_prevouts
     prevouts = b""

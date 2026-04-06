@@ -1,8 +1,3 @@
-// TODO were was this needed?
-// Vue.filter('reverse', function (value) {
-//   // slice to make a copy of array, then reverse the copy
-//   return value.slice().reverse()
-// })
 window.app = Vue.createApp({
   el: '#vue',
   mixins: [window.windowMixin],
@@ -379,21 +374,64 @@ window.app = Vue.createApp({
     broadcastTransaction: async function () {
       this.broadcastLoading = true
       try {
-        await LNbits.api.request(
+        const {data} = await LNbits.api.request(
           'POST',
           '/silnt/api/v1/tx/broadcast',
           this.g.user.wallets[0].adminkey,
-          { tx_hex: this.sendTxResult }
+          { tx_hex: this.sendTxResult,
+            wallet_id: this.sendWallet?.id,
+            spent_txids: this.sendUtxos
+              .filter(u => u.selected)
+              .map(u => u.txid)
+           }
         )
+        const txid = data.txid
+
+        const mempoolUrl = `https://${this.mempoolHostname}/tx/${txid}`
+        // Mark unconfirmed_spent UTXOs in the local list
+        const selectedTxids = this.sendUtxos
+          .filter(u => u.selected)
+          .map(u => u.txid)
+
+         this.utxos.data = this.utxos.data.map(u =>
+          selectedTxids.includes(u.txid)
+            ? { ...u, utxo_state: 'unconfirmed_spent' }
+            : u
+        )
+        // Add the broadcasted transaction as a pending entry in the UTXO list
+        this.utxos.data.push({
+          txid: txid,
+          vout: 0,
+          amount: 0,
+          utxo_state: 'broadcasted',
+          timestamp: Math.floor(Date.now() / 1000),
+          wallet: this.sendWallet?.id,
+          priv_key_tweak: '',
+          pub_key: '',
+          label: null,
+          _broadcasted: true
+        })
+         // Recalculate total
+        this.utxos.total = this.utxos.data
+        .filter(u => u.utxo_state === 'unspent')
+        .reduce((sum, u) => sum + (u.amount || 0), 0)
+
         this.$q.notify({
           type: 'positive',
-          message: 'Transaction broadcast successfully!',
-          timeout: 8000
+          message: `Transaction broadcast! View on mempool`,
+          actions: [{
+            // label: txid.substring(0, 16) + '...',
+            lable: 'View on Mempool',
+            color: 'white',
+            handler: () => window.open(mempoolUrl, '_blank')
+          }],
+          timeout: 15000
         })
         this.showBroadcastConfirm = false  
         this.showSendDialog = false
         this.sendTxResult = null
         this.sendTxFee = 0
+        this.tab = 'utxos'
       } catch (err) {
         LNbits.utils.notifyApiError(err)
       } finally {

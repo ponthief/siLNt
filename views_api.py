@@ -35,6 +35,7 @@ from .crud import (
     get_spend_key,
     get_utxos_for_wallet,
     insert_utxos_for_wallet,
+    update_unconfirmed_utxo
 )
 
 from .models import (
@@ -391,7 +392,7 @@ async def api_build_transaction(data: BuildTxRequest):
 @silnt_api_router.post(
     "/api/v1/tx/broadcast", dependencies=[Depends(require_admin_key)]
 )
-async def api_broadcast_transaction(data: BroadcastTxRequest):
+async def api_broadcast_transaction(data: BroadcastTxRequest):    
     try:
         config = Config()
         base = config.mempool_endpoint.rstrip("/")
@@ -406,7 +407,12 @@ async def api_broadcast_transaction(data: BroadcastTxRequest):
                     status_code=HTTPStatus.BAD_GATEWAY,
                     detail=f"Broadcast failed: {resp.text}",
                 )
-            return {"txid": resp.text.strip()}
+            txid = resp.text.strip()
+            if data.spent_txids and data.wallet_id:
+               for spent_txid in data.spent_txids:
+                   await update_unconfirmed_utxo(data.wallet_id, spent_txid)            
+               logger.info(f"Marked {len(data.spent_txids)} UTXOs as unconfirmed_spent after broadcast of {txid}")
+            return {"txid": txid}
 
     except HTTPException:
         raise
