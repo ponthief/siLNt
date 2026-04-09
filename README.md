@@ -27,8 +27,8 @@ A [LNbits](https://lnbits.com) extension for managing [Silent Payment](https://s
 
 ## Installation
 
-1. Copy the `silnt` folder into your LNbits `lnbits/extensions/` directory.
-2. Enable the extension from the LNbits admin panel under **Manage Extensions**.
+1. As Admin user, navigate to Settings -> Extensions and add Source:[Ponthief-Extensions] (https://raw.githubusercontent.com/ponthief/lnbits-extensions/cardanostra/extensions.json).
+2. Install/Enable the extension from the LNbits admin panel under **Extensions**.
 3. Run database migrations (handled automatically on first load via LNbits migration system).
 
 ---
@@ -90,7 +90,7 @@ All endpoints are prefixed with `/silnt/api/v1`. Authentication uses the `X-Api-
 | `GET` | `/wallet` | Invoice Key | List all wallet accounts |
 | `GET` | `/wallet/{wallet_id}` | Invoice Key | Get a wallet account |
 | `POST` | `/wallet` | Admin Key | Create a wallet account |
-| `PUT` | `/wallet/{wallet_id}` | Admin Key | Update hr_address, last_height, or balance |
+| `PUT` | `/wallet/{wallet_id}` | Admin Key | Update hr_address, last_height|
 | `DELETE` | `/wallet/{wallet_id}` | Admin Key | Delete wallet and all its UTXOs |
 
 ### BlindBit Config
