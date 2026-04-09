@@ -7,8 +7,8 @@ from .views_api import silnt_api_router
 
 silnt_static_files = [
     {
-        "path": "/silnt/static",
-        "app": StaticFiles(packages=[("lnbits", "extensions/silnt/static")]),
+        "path": "/siLNt/static",
+        "app": StaticFiles(packages=[("lnbits", "extensions/siLNt/static")]),
         "name": "silnt_static",
     }
 ]

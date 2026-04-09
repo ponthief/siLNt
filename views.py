@@ -8,7 +8,7 @@ silnt_generic_router = APIRouter()
 
 
 def silnt_renderer():
-    return template_renderer(["silnt/templates"])
+    return template_renderer(["siLNt/templates"])
 
 
 @silnt_generic_router.get("/", response_class=HTMLResponse)
