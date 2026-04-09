@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import APIRouter
 from fastapi.staticfiles import StaticFiles
 
@@ -17,4 +18,17 @@ silnt_ext: APIRouter = APIRouter(prefix="/silnt", tags=["silnt"])
 silnt_ext.include_router(silnt_generic_router)
 silnt_ext.include_router(silnt_api_router)
 
-__all__ = ["siLNt_ext", "silnt_static_files", "db"]
+scheduled_tasks: list[asyncio.Task] = []
+
+def silnt_start():
+    from lnbits.tasks import create_permanent_unique_task    
+    task = create_permanent_unique_task("ext_silnt", wait_for_paid_invoices)
+    scheduled_tasks.append(task)
+       
+def silnt_stop():    
+    for task in scheduled_tasks:
+        try:
+            task.cancel()
+        except Exception as ex:
+            logger.warning(ex)
+__all__ = ["silnt_start", "silnt_stop", "silnt_ext", "silnt_static_files", "db"]
