@@ -17,4 +17,4 @@ silnt_ext: APIRouter = APIRouter(prefix="/silnt", tags=["silnt"])
 silnt_ext.include_router(silnt_generic_router)
 silnt_ext.include_router(silnt_api_router)
 
-__all__ = ["silnt_ext", "silnt_static_files", "db"]
+__all__ = ["siLNt_ext", "silnt_static_files", "db"]
