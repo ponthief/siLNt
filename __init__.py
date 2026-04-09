@@ -14,9 +14,9 @@ silnt_static_files = [
     }
 ]
 
-silnt_ext: APIRouter = APIRouter(prefix="/silnt", tags=["silnt"])
-silnt_ext.include_router(silnt_generic_router)
-silnt_ext.include_router(silnt_api_router)
+siLNt_ext: APIRouter = APIRouter(prefix="/silnt", tags=["silnt"])
+siLNt_ext.include_router(silnt_generic_router)
+siLNt_ext.include_router(silnt_api_router)
 
 scheduled_tasks: list[asyncio.Task] = []
 
@@ -31,4 +31,4 @@ def silnt_stop():
             task.cancel()
         except Exception as ex:
             logger.warning(ex)
-__all__ = ["silnt_start", "silnt_stop", "silnt_ext", "silnt_static_files", "db"]
+__all__ = ["silnt_start", "silnt_stop", "siLNt_ext", "silnt_static_files", "db"]
