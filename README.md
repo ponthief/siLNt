@@ -27,7 +27,7 @@ A [LNbits](https://lnbits.com) extension for managing [Silent Payment](https://s
 
 ## Installation
 
-1. As Admin user, navigate to Settings -> Extensions and add Source:[Ponthief-Extensions] (https://raw.githubusercontent.com/ponthief/lnbits-extensions/cardanostra/extensions.json).
+1. As Admin user, navigate to Settings -> Extensions and add Source:[Ponthief-Extensions](https://raw.githubusercontent.com/ponthief/lnbits-extensions/extensions/extensions.json).
 2. Install/Enable the extension from the LNbits admin panel under **Extensions**.
 3. Run database migrations (handled automatically on first load via LNbits migration system).
 
