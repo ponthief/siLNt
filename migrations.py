@@ -16,7 +16,7 @@ async def m001_initial(db):
             sp_address TEXT NOT NULL,
             hr_address TEXT NOT NULL,
             last_height INTEGER,
-            last_scan_height INTEGER NOT NULL DEFAULT 0
+            last_scan_height INTEGER NOT NULL DEFAULT 0,
             balance {db.big_int}
         );
     """
