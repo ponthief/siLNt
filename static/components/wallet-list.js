@@ -136,7 +136,7 @@ window.app.component('wallet-list', {
       try {             
         const response = await LNbits.api.request(
           'POST',
-          '/silnt/api/v1/wallet',
+          '/siLNt/api/v1/wallet',
           this.inkey,
           data
         )        
@@ -165,7 +165,7 @@ window.app.component('wallet-list', {
       try {        
         const response = await LNbits.api.request(
           'PUT',
-          '/silnt/api/v1/wallet/' + data.id,
+          '/siLNt/api/v1/wallet/' + data.id,
           this.inkey,
           data
         )            
@@ -189,7 +189,7 @@ window.app.component('wallet-list', {
           try {
             await LNbits.api.request(
               'DELETE',
-              '/silnt/api/v1/wallet/' + walletAccountId,
+              '/siLNt/api/v1/wallet/' + walletAccountId,
               this.inkey
             )
             this.walletAccounts = _.reject(this.walletAccounts, function (obj) {
@@ -207,11 +207,11 @@ window.app.component('wallet-list', {
         })
     },
 // ?network=${this.network}
-    getSilntWallets: async function () {      
+    getsiLNtWallets: async function () {      
       try {
         const {data} = await LNbits.api.request(
           'GET',
-          `/silnt/api/v1/wallet`,
+          `/siLNt/api/v1/wallet`,
           this.inkey
         )        
         return data
@@ -227,7 +227,7 @@ window.app.component('wallet-list', {
     },
     refreshWalletAccounts: async function () {
       this.walletAccounts = []
-      const wallets = await this.getSilntWallets()           
+      const wallets = await this.getsiLNtWallets()           
       this.walletAccounts = wallets.map(w => mapWalletAccount(w))      
       this.$emit('accounts-update', this.walletAccounts)
     },
@@ -235,7 +235,7 @@ window.app.component('wallet-list', {
       try {        
         await LNbits.api.request(
           'PUT',
-          `/silnt/api/v1/wallet/${walletId}`,
+          `/siLNt/api/v1/wallet/${walletId}`,
           this.inkey,
           { balance }
         )
@@ -258,7 +258,7 @@ window.app.component('wallet-list', {
       try {
         await LNbits.api.request(
           'GET',
-          `/silnt/api/v1/bip353/resolve?address=${encodeURIComponent(address)}`,
+          `/siLNt/api/v1/bip353/resolve?address=${encodeURIComponent(address)}`,
           this.inkey
         )
         this.$q.notify({

@@ -89,7 +89,7 @@ window.app = Vue.createApp({
       try {
         const {data} = await LNbits.api.request(
           'GET',
-          `/silnt/api/v1/utxos?wallet_id=${wallet.id}`,
+          `/siLNt/api/v1/utxos?wallet_id=${wallet.id}`,
           this.g.user.wallets[0].inkey
         )
 
@@ -138,7 +138,7 @@ window.app = Vue.createApp({
       try {
       const {data: freshWallet} = await LNbits.api.request(
         'GET',
-        `/silnt/api/v1/wallet/${wallet.id}`,
+        `/siLNt/api/v1/wallet/${wallet.id}`,
         this.g.user.wallets[0].inkey
       )
       wallet = mapWalletAccount(freshWallet)
@@ -158,7 +158,7 @@ window.app = Vue.createApp({
     try {
       const response = await LNbits.api.request(
         'GET',
-        '/silnt/api/v1/oracle/tip',
+        '/siLNt/api/v1/oracle/tip',
         this.g.user.wallets[0].inkey
       )      
       const tip = response.data?.height ?? response.data?.block_height
@@ -188,7 +188,7 @@ window.app = Vue.createApp({
         try {
           const {data} = await LNbits.api.request(
             'GET',
-            `/silnt/api/v1/wallet/${wallet.id}/scan/progress`,
+            `/siLNt/api/v1/wallet/${wallet.id}/scan/progress`,
             this.g.user.wallets[0].inkey
           )
           this.scanProgress.current = data.current || 0
@@ -205,7 +205,7 @@ window.app = Vue.createApp({
       try {        
         const {data} = await LNbits.api.request(
           'POST',
-          `/silnt/api/v1/wallet/${wallet.id}/scan`,
+          `/siLNt/api/v1/wallet/${wallet.id}/scan`,
           this.g.user.wallets[0].inkey,
           {
             from_height: this.scanDialog.lastHeight,
@@ -232,7 +232,7 @@ window.app = Vue.createApp({
       try {
         await LNbits.api.request(
           'POST',
-          `/silnt/api/v1/wallet/${this.scanProgress.walletId}/scan/stop`,
+          `/siLNt/api/v1/wallet/${this.scanProgress.walletId}/scan/stop`,
           this.g.user.wallets[0].inkey
         )
         this.$q.notify({
@@ -253,7 +253,7 @@ window.app = Vue.createApp({
       try {
         const {data} = await LNbits.api.request(
           'GET',
-          `/silnt/api/v1/bip353/resolve?address=${encodeURIComponent(this.bip353Address)}`,
+          `/siLNt/api/v1/bip353/resolve?address=${encodeURIComponent(this.bip353Address)}`,
           this.g.user.wallets[0].inkey
         )
 
@@ -340,7 +340,7 @@ window.app = Vue.createApp({
         const selectedUtxos = this.sendUtxos.filter(u => u.selected)       
         const {data} = await LNbits.api.request(
           'POST',
-          '/silnt/api/v1/tx/build',
+          '/siLNt/api/v1/tx/build',
           this.g.user.wallets[0].adminkey,
           {
             wallet_id: this.sendWallet.id,
@@ -376,7 +376,7 @@ window.app = Vue.createApp({
       try {
         const {data} = await LNbits.api.request(
           'POST',
-          '/silnt/api/v1/tx/broadcast',
+          '/siLNt/api/v1/tx/broadcast',
           this.g.user.wallets[0].adminkey,
           { tx_hex: this.sendTxResult,
             wallet_id: this.sendWallet?.id,

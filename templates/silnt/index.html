@@ -95,7 +95,7 @@
       </q-card-section>
       <q-card-section class="q-pa-none">
         <q-separator></q-separator>
-        <q-list> {% include "silnt/_api_docs.html" %} </q-list>
+        <q-list> {% include "siLNt/_api_docs.html" %} </q-list>
       </q-card-section>
     </q-card>
   </div>
@@ -443,13 +443,13 @@
 {% endblock %} {% block vue_templates %}
 
 <template id="wallet-config"
-  >{% include("silnt/components/wallet-config.html") %}</template
+  >{% include("siLNt/components/wallet-config.html") %}</template
 >
 <template id="utxo-list"
-  >{% include("silnt/components/utxo-list.html") %}</template
+  >{% include("siLNt/components/utxo-list.html") %}</template
 >
 <template id="wallet-list"
-  >{% include("silnt/components/wallet-list.html") %}</template
+  >{% include("siLNt/components/wallet-list.html") %}</template
 >
 
 {% endblock %} {% block scripts %} {{ window_vars(user) }}
@@ -460,16 +460,16 @@
 </style>
 <script type="text/javascript" src="https://mempool.space/mempool.js"></script>
 
-<script src="{{ static_url_for('silnt/static', 'js/tables.js') }}"></script>
-<script src="{{ static_url_for('silnt/static', 'js/map.js') }}"></script>
-<script src="{{ static_url_for('silnt/static', 'js/utils.js') }}"></script>
-<script src="{{ static_url_for('silnt/static', 'js/bip39-word-list.js') }}"></script>
+<script src="{{ static_url_for('siLNt/static', 'js/tables.js') }}"></script>
+<script src="{{ static_url_for('siLNt/static', 'js/map.js') }}"></script>
+<script src="{{ static_url_for('siLNt/static', 'js/utils.js') }}"></script>
+<script src="{{ static_url_for('siLNt/static', 'js/bip39-word-list.js') }}"></script>
 
-<script src="{{ static_url_for('silnt/static', 'js/index.js') }}"></script>
-<script src="{{ static_url_for('silnt/static', 'components/wallet-config.js') }}"></script>
-<script src="{{ static_url_for('silnt/static', 'components/wallet-list.js') }}"></script>
-<script src="{{ static_url_for('silnt/static', 'components/utxo-list.js') }}"></script>
-<script src="{{ static_url_for('silnt/static', 'js/crypto/aes.js') }}"></script>
+<script src="{{ static_url_for('siLNt/static', 'js/index.js') }}"></script>
+<script src="{{ static_url_for('siLNt/static', 'components/wallet-config.js') }}"></script>
+<script src="{{ static_url_for('siLNt/static', 'components/wallet-list.js') }}"></script>
+<script src="{{ static_url_for('siLNt/static', 'components/utxo-list.js') }}"></script>
+<script src="{{ static_url_for('siLNt/static', 'js/crypto/aes.js') }}"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/3.1.2/rollups/aes.js"></script>
 
 {% endblock %}
