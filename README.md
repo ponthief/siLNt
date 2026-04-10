@@ -40,7 +40,7 @@ A [LNbits](https://lnbits.com) extension for managing [Silent Payment](https://s
 Before scanning, an admin must configure the BlindBit connection via the **Settings** button (⚙️) in the extension UI, or via the API:
 
 ```bash
-curl -X PUT https://<your-lnbits>/silnt/api/v1/blindbit/config \
+curl -X PUT https://<your-lnbits>/siLNt/api/v1/blindbit/config \
   -H "X-Api-Key: <admin_key>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -81,7 +81,7 @@ Click **Send** to open the Send Payment flow. Select UTXOs as inputs, specify re
 
 ## API Reference
 
-All endpoints are prefixed with `/silnt/api/v1`. Authentication uses the `X-Api-Key` header.
+All endpoints are prefixed with `/siLNt/api/v1`. Authentication uses the `X-Api-Key` header.
 
 ### Wallets
 
@@ -107,7 +107,7 @@ All endpoints are prefixed with `/silnt/api/v1`. Authentication uses the `X-Api-
 | `POST` | `/scan` | Invoice Key | Proxy scan to BlindBit, returns UTXOs and height |
 
 
-Full interactive docs available at `/docs#/silnt` on your LNbits instance.
+Full interactive docs available at `/docs#/siLNt` on your LNbits instance.
 
 ---
 
@@ -168,7 +168,7 @@ Full interactive docs available at `/docs#/silnt` on your LNbits instance.
 ## Project Structure
 
 ```
-silnt/
+siLNt/
 ├── __init__.py
 ├── views.py               # Page routes
 ├── views_api.py           # REST API endpoints
