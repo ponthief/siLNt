@@ -394,8 +394,9 @@ async def api_build_transaction(data: BuildTxRequest):
 )
 async def api_broadcast_transaction(data: BroadcastTxRequest):    
     try:
+        blindbit = await get_blindbit_config()
         config = Config()
-        base = config.mempool_endpoint.rstrip("/")
+        base = (blindbit.mempool_url or "https://mempool.space" ).rstrip("/")
         mempool_url = f"{base}/api/tx"
 
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -431,9 +432,10 @@ async def api_broadcast_transaction(data: BroadcastTxRequest):
 async def api_get_config(
     key_info: WalletTypeInfo = Depends(require_invoice_key),
 ) -> dict:
+    blindbit = await get_blindbit_config()
     config = Config()
     return {
-        "mempool_endpoint": config.mempool_endpoint,
+        "mempool_endpoint": blindbit.mempool_url or  "https://mempool.space",
         "sats_denominated": config.sats_denominated,
         "network": config.network,
     }

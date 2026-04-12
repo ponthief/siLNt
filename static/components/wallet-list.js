@@ -7,7 +7,7 @@ window.app.component('wallet-list', {
     'adminkey',
     'inkey',
     'sats-denominated',
-    'addresses',
+    // 'addresses',
     'network',
     'scannedUtxos'   
   ],
@@ -278,12 +278,12 @@ window.app.component('wallet-list', {
         return false
       }
     },
-    getBalanceForWallet: function (walletId) {
-      const amount = this.addresses
-        .filter(a => a.wallet === walletId)
-        .reduce((t, a) => t + a.amount || 0, 0)
-      return this.satBtc(amount)
-    },
+    // getBalanceForWallet: function (walletId) {
+    //   const amount = this.addresses
+    //     .filter(a => a.wallet === walletId)
+    //     .reduce((t, a) => t + a.amount || 0, 0)
+    //   return this.satBtc(amount)
+    // },
     closeFormDialog: function () {
       this.formDialog.data = {               
         hr_address: '',     // ← empty string not null

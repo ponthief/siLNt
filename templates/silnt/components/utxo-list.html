@@ -134,7 +134,7 @@
               <div class="col-10" style="font-family: monospace; word-break: break-all">
                 <a
                   style="color: unset"
-                  :href="'https://' + mempoolEndpoint + '/tx/' + props.row.txid"
+                  :href="mempoolEndpoint + '/tx/' + props.row.txid"
                   target="_blank"
                   v-text="props.row.txid"
                 ></a>

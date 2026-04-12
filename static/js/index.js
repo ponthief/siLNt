@@ -66,24 +66,33 @@ window.app = Vue.createApp({
       const hasFee = this.sendForm.feeRate > 0
       return hasRecipient && hasUtxos && hasAmount && hasFee && !this.sendLoading
     },
-    mempoolHostname: function () {      
-      if (!this.config || !this.config.isLoaded) return 'mempool.space'
+    mempoolBaseUrl: function () {      
+      if (!this.config || !this.config.isLoaded) return 'https://mempool.space'
       try {
-        const endpoint = this.config.mempool_endpoint || 'https://mempool.space'
-        let hostname = new URL(endpoint).hostname
-        if ((this.config.network || '').toLowerCase() === 'testnet') {
-          hostname += '/testnet'
-        }
-        return hostname
-      } catch (e) {
-        return 'mempool.space'
-      }
-    },    
+        const endpoint = this.config.mempool_url || 'https://mempool.space'        
+        const withProtocol = endpoint.startsWith('http')
+          ? endpoint
+          : `https://${endpoint}`
+        const url = new URL(withProtocol)
+        let base = `${url.protocol}//${url.hostname}`
+        if (url.port) base += `:${url.port}`              
+        return base.replace(/\/$/, '') 
+        } catch (e) {
+            return 'https://mempool.space'
+          }        
+    },
+  //   mempoolHostname: function () {
+  //   try {
+  //     const url = new URL(this.mempoolBaseUrl)
+  //     console.log(url.host + (url.pathname !== '/' ? url.pathname : ''))
+  //     return url.host + (url.pathname !== '/' ? url.pathname : '')
+  //   } catch (e) {
+  //     return 'mempool.space'
+  //   }
+  // },    
   },
 
   methods: {
-
-    //################### UTXOs ###################
     fetchUtxos: async function (wallet) {      
       if (!wallet || !wallet.id) return
       try {
@@ -387,7 +396,7 @@ window.app = Vue.createApp({
         )
         const txid = data.txid
 
-        const mempoolUrl = `https://${this.mempoolHostname}/tx/${txid}`
+        const mempoolUrl = `${this.mempoolBaseUrl}/tx/${txid}`
         // Mark unconfirmed_spent UTXOs in the local list
         const selectedTxids = this.sendUtxos
           .filter(u => u.selected)

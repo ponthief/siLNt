@@ -21,7 +21,15 @@
           type="text"
           label="BlindBit Oracle URL"          
         >
-        </q-input>                         
+        </q-input>
+        <q-input
+        filled
+        dense
+        v-model.trim="config.mempool_url"
+        type="text"
+        label="Mempool URL"
+        hint="Default: https://mempool.space"
+        ></q-input>                        
 
         <div class="row q-mt-lg">
           <q-btn

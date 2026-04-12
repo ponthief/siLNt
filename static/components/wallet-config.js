@@ -20,7 +20,8 @@ window.app.component('wallet-config', {
       },
       set(value) {
         value.isLoaded = true        
-        value.blindbit_url = value.blindbit_url || ''       
+        value.blindbit_url = value.blindbit_url || ''
+        value.mempool_url = value.mempool_url || 'https://mempool.space'       
         this.internalConfig = JSON.parse(JSON.stringify(value))
         this.$emit(
           'update:config-data',
@@ -41,7 +42,11 @@ window.app.component('wallet-config', {
           this.config
         )
         this.show = false
-        this.config = data
+        this.config = {
+        ...this.internalConfig,  
+        ...data,                 
+        mempool_url: data.mempool_url || this.internalConfig.mempool_url || 'https://mempool.space'
+      }
       } catch (error) {
         LNbits.utils.notifyApiError(error)
       }
@@ -54,8 +59,9 @@ window.app.component('wallet-config', {
       ])      
         this.config =  {
       ...blindbit,
-      ...appConfig
-    }     
+      ...appConfig,
+      mempool_url: blindbit.mempool_url || 'https://mempool.space'      
+    }       
       } catch (error) {
         LNbits.utils.notifyApiError(error)
       }
