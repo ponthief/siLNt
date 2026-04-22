@@ -494,3 +494,47 @@ def taproot_sighash(
         + input_index.to_bytes(4, "little")  # input_index
     )
     return tagged_hash("TapSighash", preimage)
+
+def generate_labeled_sp_address(
+    scan_secret_hex: str,
+    spend_pub_hex: str,
+    m: int,
+    hrp: str = 'sp'
+) -> str:
+    """
+    Derive a BIP352 labeled Silent Payment address.
+    B_m = B_spend + hash(b_scan || m) * G
+    m=0 is reserved for change, user labels start at m=1
+    """    
+
+    scan_secret_bytes = bytes.fromhex(scan_secret_hex)
+    spend_pub_bytes = bytes.fromhex(spend_pub_hex)
+
+    # hash("BIP0352/Label" || b_scan || m)
+    tag = b"BIP0352/Label"
+    tag_hash = hashlib.sha256(tag).digest()
+    label_hash = hashlib.sha256(
+        tag_hash + tag_hash + scan_secret_bytes + m.to_bytes(4, 'little')
+    ).digest()
+
+    # B_m = B_spend + label_hash * G
+    label_point = coincurve.PublicKey.from_secret(label_hash)
+    spend_pub = coincurve.PublicKey(spend_pub_bytes)
+    B_m = coincurve.PublicKey.combine_keys([spend_pub, label_point])
+    B_m_bytes = B_m.format(compressed=True)
+
+    # Encode as SP address: B_scan || B_m
+    B_scan = coincurve.PublicKey.from_secret(scan_secret_bytes).format(compressed=True)
+    
+    address = bech32_encode(
+        hrp,
+        [0] + convertbits(B_scan + B_m_bytes, 8, 5),
+        Encoding.BECH32M
+    )
+    return address
+
+
+def get_spend_pub_from_secret(spend_secret_hex: str) -> str:
+    """Derive compressed spend public key from spend private key hex."""    
+    pub = coincurve.PublicKey.from_secret(bytes.fromhex(spend_secret_hex))
+    return pub.format(compressed=True).hex()

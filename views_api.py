@@ -9,6 +9,8 @@ from .helpers.wallet import (
     decrypt_spend_key,
     decrypt_secret,
     build_transaction,
+    generate_labeled_sp_address,
+    get_spend_pub_from_secret
 )
 from .helpers.scan import scan_wallet, get_scan_progress, request_scan_stop
 from .helpers.address_resolver import bip353_resolve
@@ -35,7 +37,11 @@ from .crud import (
     get_spend_key,
     get_utxos_for_wallet,
     insert_utxos_for_wallet,
-    update_unconfirmed_utxo
+    update_unconfirmed_utxo,
+    get_wallet_addresses,
+    count_wallet_addresses,
+    insert_wallet_address,    
+    delete_wallet_address
 )
 
 from .models import (
@@ -46,10 +52,15 @@ from .models import (
     BroadcastTxRequest,
     Config,    
     ScanWalletRequest,
+    SaveAddressRequest,
+    PreviewAddressRequest
 )
 
 
+MAX_ADDRESSES_PER_WALLET = 10
+
 silnt_api_router = APIRouter()
+
 
 
 # ── Wallets ──────────────────────────────────────────────────────────────────
@@ -199,8 +210,102 @@ async def api_wallet_delete(wallet_id: str):
         )
     await delete_silnt_wallet(wallet_id)
     await delete_utxos_for_wallet(wallet_id)
+    await delete_wallet_addresses(wallet_id)
     return "", HTTPStatus.NO_CONTENT
 
+
+@silnt_api_router.get("/api/v1/wallet/{wallet_id}/addresses")
+async def api_get_wallet_addresses(
+    wallet_id: str,
+    key_info: WalletTypeInfo = Depends(require_invoice_key)
+):
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
+    if wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+    addresses = await get_wallet_addresses(wallet_id)
+    return {"addresses": addresses, "max": MAX_ADDRESSES_PER_WALLET}
+
+
+@silnt_api_router.post("/api/v1/wallet/{wallet_id}/addresses/preview")
+async def api_preview_wallet_address(
+    wallet_id: str,
+    data: PreviewAddressRequest,
+    key_info: WalletTypeInfo = Depends(require_invoice_key)
+):
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
+    if wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+
+    scan_secret = await decrypt_secret(wallet.scan_secret)
+    spend_key_encrypted = await get_spend_key(wallet_id)
+    spend_key_hex = decrypt_spend_key(spend_key_encrypted, scan_secret)
+    spend_pub_hex = get_spend_pub_from_secret(spend_key_hex)
+    hrp = 'sp'
+
+    try:
+        sp_address = generate_labeled_sp_address(
+            scan_secret_hex=scan_secret,
+            spend_pub_hex=spend_pub_hex,
+            m=data.label_index,
+            hrp=hrp
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate address: {str(e)}"
+        )
+
+    return {
+        "sp_address": sp_address,
+        "label_index": data.label_index,
+        "wallet_id": wallet_id
+    }
+
+@silnt_api_router.delete("/api/v1/wallet/{wallet_id}/addresses/{address_id}")
+async def api_delete_wallet_address(
+    wallet_id: str,
+    address_id: str,
+    key_info: WalletTypeInfo = Depends(require_invoice_key)
+):
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
+    if wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+    await delete_wallet_address(address_id, wallet_id)
+    return "", HTTPStatus.NO_CONTENT
+
+
+@silnt_api_router.post("/api/v1/wallet/{wallet_id}/addresses")
+async def api_save_generated_wallet_address(
+    wallet_id: str,
+    data: SaveAddressRequest,
+    key_info: WalletTypeInfo = Depends(require_invoice_key)
+):
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
+    if wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+
+    count = await count_wallet_addresses(wallet_id)
+    if count >= MAX_ADDRESSES_PER_WALLET:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"Maximum of {MAX_ADDRESSES_PER_WALLET} addresses per wallet reached."
+        )
+    addr_id = urlsafe_short_hash()
+    await insert_wallet_address(wallet_id, data.sp_address, data.label_index, addr_id)
+    return {
+        "sp_address": data.sp_address,
+        "label_index": data.label_index,
+        "wallet_id": wallet_id,
+        "id": addr_id
+    }
 
 @silnt_api_router.get(
     "/api/v1/oracle/tip",

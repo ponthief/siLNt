@@ -56,98 +56,131 @@
       </template>
       <template v-slot:body="props">
         <q-tr :props="props">
-            <q-td key="sp_address" :props="props" style="max-width:160px">
-            <div style="display:flex;align-items:center">
-              <span
-                v-text="props.row.sp_address ? props.row.sp_address.slice(0, 14) + '...' : ''"
-                style="
-                  overflow: hidden;
-                  text-overflow: ellipsis;
-                  white-space: nowrap;
-                  cursor: pointer;
-                "
-              ></span>
-              <q-tooltip>
-                <span v-text="props.row.sp_address"></span>
-              </q-tooltip>
+          <q-td key="sp_address" :props="props" style="vertical-align: top">
+            <span style="cursor:pointer">
+              <span v-text="props.row.sp_address ? props.row.sp_address.slice(0, 14) + '...' : ''"></span>
+              <q-tooltip v-text="props.row.sp_address"></q-tooltip>
+            </span>
+
+            <!-- Labeled addresses -->
+            <div
+              v-for="addr in props.row.addresses"
+              :key="addr.id || addr._tempId"
+              class="row items-center no-wrap q-mt-xs"
+              style="border-left: 2px solid #9c27b0; padding-left: 6px"
+            >
+              <span class="col text-orange" style="font-family:monospace;font-size:10px;cursor:pointer">
+                <span v-text="addr.sp_address ? addr.sp_address.slice(0, 14) + '...' : ''"></span>
+                <q-tooltip v-text="addr.sp_address"></q-tooltip>
+              </span>
+              <div class="col-auto row no-wrap">
+                <q-btn flat dense size="xs" icon="content_copy" color="grey"
+                  @click="copyText(addr.sp_address)">
+                  <q-tooltip>Copy</q-tooltip>
+                </q-btn>
+                <q-btn flat dense size="xs" icon="qr_code" color="purple"
+                  @click="showQrCodeAddress(addr.sp_address)">
+                  <q-tooltip>QR Code</q-tooltip>
+                </q-btn>
+                <q-btn
+                  v-if="!addr.id"
+                  flat dense size="xs" icon="save" color="positive"
+                  @click="saveAddress(props.row, addr)">
+                  <q-tooltip>Save address</q-tooltip>
+                </q-btn>
+                <q-btn flat dense size="xs" icon="delete" color="pink"
+                  @click="deleteAddress(props.row, addr)">
+                  <q-tooltip>Delete</q-tooltip>
+                </q-btn>
+              </div>
             </div>
           </q-td>                
-          <q-td key="title" :props="props">
+          <q-td key="title" :props="props" style="vertical-align: top">
             <div v-text="props.row.title"></div>
           </q-td>          
-          <q-td key="hr_address" :props="props">
+          <q-td key="hr_address" :props="props" style="vertical-align: top">
             <div v-text="props.row.hr_address"></div>
           </q-td>          
-          <q-td key="last_height" :props="props">
+          <q-td key="last_height" :props="props" style="vertical-align: top">
             <div v-text="props.row.last_height"></div>
           </q-td>
-          <q-td key="balance" :props="props">
+          <q-td key="balance" :props="props" style="vertical-align: top">
             <div v-text="props.row.balance"></div>
           </q-td>          
-          <q-td auto-width>
-                  <q-btn
-                  flat
-                  dense
-                  size="xs"
-                  @click="$emit('send-wallet', props.row)"
-                  icon="send"
-                  color="green"
-                >
-                  <q-tooltip>Send</q-tooltip>
-                </q-btn>
-                 <q-btn
-                  flat
-                  dense
-                  size="xs"
-                  @click="$emit('fetch-utxos', props.row)"
-                  icon="storage"
-                  color="teal"
-                >
-                  <q-tooltip>Load UTXOs from DB</q-tooltip>
-                </q-btn>
-                <q-btn
-                  flat
-                  dense
-                  size="xs"
-                  @click="$emit('scan-wallet', props.row)"
-                  icon="radar"
-                  color="green"
-                >                  
-                  <q-tooltip>Scan Blockchain</q-tooltip>
-                </q-btn>
-                <q-btn
-                  flat
-                  dense
-                  size="xs"
-                  @click="updateWalletDialog(props.row.id)"
-                  icon="edit"
-                  color="light-blue"
-                >
-                  <q-tooltip>Edit Wallet's HR Address/Height</q-tooltip>
-                </q-btn>
-                <q-btn
-                flat
-                dense
-                size="xs"
-                @click="showQrCode(props.row)"
-                icon="qr_code"
-                color="purple"
+          <q-td auto-width style="vertical-align: top">
+            <q-btn
+              flat
+              dense
+              size="xs"
+              @click="$emit('send-wallet', props.row)"
+              icon="send"
+              color="green"
+            >
+              <q-tooltip>Send</q-tooltip>
+            </q-btn>
+            <q-btn
+              flat
+              dense
+              size="xs"
+              @click="$emit('fetch-utxos', props.row)"
+              icon="storage"
+              color="teal"
+            >
+              <q-tooltip>Load UTXOs from DB</q-tooltip>
+            </q-btn>
+            <q-btn
+              flat
+              dense
+              size="xs"
+              @click="$emit('scan-wallet', props.row)"
+              icon="radar"
+              color="green"
+            >                  
+              <q-tooltip>Scan Blockchain</q-tooltip>
+            </q-btn>
+            <q-btn
+              flat
+              dense
+              size="xs"
+              @click="updateWalletDialog(props.row.id)"
+              icon="edit"
+              color="light-blue"
+            >
+              <q-tooltip>Edit Wallet's HR Address/Height</q-tooltip>
+            </q-btn>
+            <q-btn
+              flat
+              dense
+              size="xs"
+              @click="showQrCode(props.row)"
+              icon="qr_code"
+              color="purple"
+            >
+              <q-tooltip>Show SP Address QR</q-tooltip>
+            </q-btn>                        
+            <q-btn
+              flat
+              dense
+              size="xs"
+              @click="deleteWalletDialog(props.row.id, true)"
+              icon="cancel"
+              color="pink"
+            >
+              <q-tooltip
+                >Deleting wallet will also delete all UTXOs</q-tooltip
               >
-                <q-tooltip>Show SP Address QR</q-tooltip>
-              </q-btn>                        
-                <q-btn
-                  flat
-                  dense
-                  size="xs"
-                  @click="deleteWalletDialog(props.row.id, true)"
-                  icon="cancel"
-                  color="pink"
-                >
-                  <q-tooltip
-                    >Deleting wallet will also delete all UTXOs</q-tooltip
-                  >
-                </q-btn>
-              </q-td>
+            </q-btn>
+            <q-btn
+              flat
+              dense
+              size="xs"
+              @click="generateAddress(props.row)"
+              icon="add_circle_outline"
+              color="deep-purple"
+            >
+              <q-tooltip>Generate SP Address</q-tooltip>
+            </q-btn>
+          </q-td>
         </q-tr>
       </template>
     </q-table>

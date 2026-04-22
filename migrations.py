@@ -49,3 +49,14 @@ async def m001_initial(db):
         CREATE UNIQUE INDEX IF NOT EXISTS idx_silnt_utxos_vout ON silnt.utxos (txid, vout);
         """
     )
+
+async def m002_subaccounts(db):
+    await db.execute("""
+    CREATE TABLE IF NOT EXISTS silnt.wallet_addresses (
+        sp_address TEXT PRIMARY KEY,
+        id TEXT NOT NULL,
+        wallet_id TEXT NOT NULL,        
+        label_index INTEGER NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT 0        
+    )
+    """)

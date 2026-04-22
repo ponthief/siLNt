@@ -1,9 +1,10 @@
 import json
+import time
 from typing import Optional, Tuple
 import secrets
 from lnbits.db import Database
 from lnbits.helpers import urlsafe_short_hash
-from .models import Config, BlindbitConfig, WalletAccount, UTXORecord
+from .models import Config, BlindbitConfig, WalletAccount, UTXORecord, WalletAddress
 
 from embit.descriptor import Descriptor, Key
 from embit.descriptor.arguments import AllowedDerivation
@@ -176,6 +177,46 @@ async def update_unconfirmed_utxo(wallet_id: str, txid: str):
             "UPDATE silnt.utxos SET utxo_state = 'unconfirmed_spent' WHERE txid = :txid AND wallet_id = :wallet_id",
             {"txid": txid, "wallet_id": wallet_id}
         )
+
+async def get_wallet_addresses(wallet_id: str) -> list:
+    return await db.fetchall(
+        "SELECT * FROM silnt.wallet_addresses WHERE wallet_id = :wallet_id ORDER BY label_index ASC",
+        {"wallet_id": wallet_id},
+    )
+
+async def count_wallet_addresses(wallet_id: str) -> int:
+    row = await db.fetchone(
+        "SELECT COUNT(*) as cnt FROM silnt.wallet_addresses WHERE wallet_id = :wallet_id",
+        {"wallet_id": wallet_id},
+    )
+    return row["cnt"] if row else 0
+
+async def insert_wallet_address(wallet_id: str, sp_address: str, label_index: int, address_id) -> None:       
+    await db.execute(
+        """INSERT INTO silnt.wallet_addresses (id, wallet_id, sp_address, label_index, created_at)
+           VALUES (:id, :wallet_id, :sp_address, :label_index, :created_at)""",
+        {
+            "id": address_id,
+            "wallet_id": wallet_id,
+            "sp_address": sp_address,
+            "label_index": label_index,
+            "created_at": int(time.time())            
+        }
+    )
+    
+
+
+async def delete_wallet_addresses(wallet_id: str) -> None:
+    await db.execute(
+        "DELETE FROM silnt.wallet_addresses WHERE wallet_id = :wallet_id",
+        {"wallet_id": wallet_id},
+    )
+
+async def delete_wallet_address(address_id: str, wallet_id: str) -> None:
+    await db.execute(
+        "DELETE FROM silnt.wallet_addresses WHERE id = :id AND wallet_id = :wallet_id",
+        {"id": address_id, "wallet_id": wallet_id},
+    )
 
 # ── Global admin-only blindbit config ───────────────────────────────────────
 

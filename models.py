@@ -67,3 +67,16 @@ class Config(BaseModel):
     sats_denominated: bool = True
     network: str = "mainnet"
 
+class WalletAddress(BaseModel):
+    id: str
+    wallet_id: str
+    sp_address: str
+    label_index: int
+    created_at: int = 0
+
+class PreviewAddressRequest(BaseModel):
+    label_index: int
+
+class SaveAddressRequest(BaseModel):
+    sp_address: str
+    label_index: int

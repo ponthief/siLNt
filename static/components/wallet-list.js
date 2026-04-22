@@ -36,6 +36,12 @@ window.app.component('wallet-list', {
         show: false,
         address: ''
       },
+      addressDialog: {
+        show: false,
+        wallet: null,
+        addresses: [],
+        generating: false
+      },
       bip353Valid: true,          
       showCreating: false,
       showUpdating: false,
@@ -206,7 +212,6 @@ window.app.component('wallet-list', {
           }
         })
     },
-// ?network=${this.network}
     getsiLNtWallets: async function () {      
       try {
         const {data} = await LNbits.api.request(
@@ -228,7 +233,12 @@ window.app.component('wallet-list', {
     refreshWalletAccounts: async function () {
       this.walletAccounts = []
       const wallets = await this.getsiLNtWallets()           
-      this.walletAccounts = wallets.map(w => mapWalletAccount(w))      
+       this.walletAccounts = wallets.map(w => ({
+        ...mapWalletAccount(w),
+        expanded: false,
+        addresses: [],
+        loadingAddresses: false
+      }))      
       this.$emit('accounts-update', this.walletAccounts)
     },
     updateWalletBalance: async function (walletId, balance) {
@@ -278,12 +288,94 @@ window.app.component('wallet-list', {
         return false
       }
     },
-    // getBalanceForWallet: function (walletId) {
-    //   const amount = this.addresses
-    //     .filter(a => a.wallet === walletId)
-    //     .reduce((t, a) => t + a.amount || 0, 0)
-    //   return this.satBtc(amount)
-    // },
+    toggleAddresses: async function (wallet) {
+    wallet.expanded = !wallet.expanded
+    if (wallet.expanded && !wallet.addresses.length) {
+      wallet.loadingAddresses = true
+      try {
+        const {data} = await LNbits.api.request(
+          'GET',
+          `/siLNt/api/v1/wallet/${wallet.id}/addresses`,
+          this.inkey
+        )
+        wallet.addresses = data.addresses || []
+      } catch (error) {
+        LNbits.utils.notifyApiError(error)
+      } finally {
+        wallet.loadingAddresses = false
+      }
+    }
+  },
+    generateAddress: async function (wallet) {
+      const rw = this.walletAccounts.find(w => w.id === wallet.id)
+      if (!rw) return
+
+      if ((rw.addresses || []).length >= 10) {
+        this.$q.notify({ type: 'warning', message: 'Maximum of 10 labeled addresses per wallet reached.', timeout: 5000 })
+        return
+      }
+
+      const currentAddresses = rw.addresses || []
+      const existingMax = currentAddresses.reduce((max, a) => Math.max(max, a.label_index || 0), 0)
+      const nextIndex = existingMax + 1
+
+      try {
+        const {data} = await LNbits.api.request(
+          'POST',
+          `/siLNt/api/v1/wallet/${rw.id}/addresses/preview`,
+          this.inkey,
+          { label_index: nextIndex }
+        )
+        rw.addresses = [...currentAddresses, {
+          _tempId: Date.now(),
+          id: null,
+          wallet_id: rw.id,
+          sp_address: data.sp_address,
+          label_index: nextIndex,
+          saved: false
+        }]
+      } catch (error) {
+        LNbits.utils.notifyApiError(error)
+      }
+    },
+
+    saveAddress: async function (wallet, addr) {
+      const rw = this.walletAccounts.find(w => w.id === wallet.id)
+      if (!rw) return
+      try {
+        const {data} = await LNbits.api.request('POST', `/siLNt/api/v1/wallet/${rw.id}/addresses`, this.inkey, {
+          sp_address: addr.sp_address,
+          label_index: addr.label_index          
+        })
+        const idx = rw.addresses.findIndex(a => a._tempId === addr._tempId)
+        if (idx !== -1) rw.addresses.splice(idx, 1, { ...data, saved: true })
+        Quasar.Notify.create({ type: 'positive', message: 'Address saved.' })
+      } catch (error) {
+        LNbits.utils.notifyApiError(error)
+      }
+    },
+
+    deleteAddress: async function (wallet, addr) {
+      const rw = this.walletAccounts.find(w => w.id === wallet.id)
+      if (!rw) return
+      if (!addr.id) {
+        rw.addresses = rw.addresses.filter(a => a._tempId !== addr._tempId)
+        return
+      }
+      LNbits.utils.confirmDialog('Delete this labeled address?').onOk(async () => {
+        try {
+          await LNbits.api.request('DELETE', `/siLNt/api/v1/wallet/${rw.id}/addresses/${addr.id}`, this.inkey)
+          rw.addresses = rw.addresses.filter(a => a.id !== addr.id)
+          Quasar.Notify.create({ type: 'positive', message: 'Address deleted.' })
+        } catch (error) {
+          LNbits.utils.notifyApiError(error)
+        }
+      })
+    },
+    showQrCodeAddress: function (address) {
+      this.qrDialog.address = address
+      this.qrDialog.show = true
+    },
     closeFormDialog: function () {
       this.formDialog.data = {               
         hr_address: '',     // ← empty string not null
