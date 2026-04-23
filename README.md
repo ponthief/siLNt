@@ -164,7 +164,7 @@ Full interactive docs available at `/docs#/siLNt` on your LNbits instance.
 ## Security Notes
 
 - Mnemonics are **never stored in the database**. They are AES-encrypted client-side before transmission and used only to derive the Silent Payment address, scan key, and spend key at wallet creation time.
-- For added privacy, Mempool URL is configurable and can be set to local instance.
+- For added privacy, Mempool URL should be configured to point to local instance.
 - Invoice Key is required for all write operations (wallet creation, config updates, deletions).
 
 ---

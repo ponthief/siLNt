@@ -69,6 +69,13 @@
               class="row items-center no-wrap q-mt-xs"
               style="border-left: 2px solid #9c27b0; padding-left: 6px"
             >
+            <q-badge
+                v-if="!addr.id"
+                color="warning"
+                text-color="dark"
+                class="q-mr-xs"
+                style="font-size:9px"
+              >unsaved</q-badge>
               <span class="col text-orange" style="font-family:monospace;font-size:10px;cursor:pointer">
                 <span v-text="addr.sp_address ? addr.sp_address.slice(0, 14) + '...' : ''"></span>
                 <q-tooltip v-text="addr.sp_address"></q-tooltip>

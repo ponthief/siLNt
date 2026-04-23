@@ -50,7 +50,7 @@ window.app = Vue.createApp({
       },
       sendLoading: false,
       broadcastLoading: false,
-      sendTxResult: null,     
+      sendTxResult: null         
     }
   },
   computed: {
@@ -80,16 +80,7 @@ window.app = Vue.createApp({
         } catch (e) {
             return 'https://mempool.space'
           }        
-    },
-  //   mempoolHostname: function () {
-  //   try {
-  //     const url = new URL(this.mempoolBaseUrl)
-  //     console.log(url.host + (url.pathname !== '/' ? url.pathname : ''))
-  //     return url.host + (url.pathname !== '/' ? url.pathname : '')
-  //   } catch (e) {
-  //     return 'mempool.space'
-  //   }
-  // },    
+    }    
   },
 
   methods: {
@@ -450,7 +441,7 @@ window.app = Vue.createApp({
     confirmBroadcast: function () {
       this.showBroadcastConfirm = true
     },                   
-  },
+  }, 
   created: async function () {       
   }
 })

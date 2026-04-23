@@ -11,7 +11,7 @@ window.app.component('wallet-list', {
     'network',
     'scannedUtxos'   
   ],
-  emits: ['accounts-update',  'fetch-utxos', 'scan-wallet', 'clear-utxos', 'open-bip353', 'send-wallet'],
+  emits: ['accounts-update', 'fetch-utxos', 'scan-wallet', 'clear-utxos', 'open-bip353', 'send-wallet'],
   data: function () {
     return {
       walletAccounts: [],
@@ -351,6 +351,7 @@ window.app.component('wallet-list', {
           label_index: nextIndex,
           saved: false
         }]
+        this.$emit('addresses-changed')
       } catch (error) {
         LNbits.utils.notifyApiError(error)
       }
@@ -366,6 +367,7 @@ window.app.component('wallet-list', {
         })
         const idx = rw.addresses.findIndex(a => a._tempId === addr._tempId)
         if (idx !== -1) rw.addresses.splice(idx, 1, { ...data, saved: true })
+        this.$emit('addresses-changed')
         Quasar.Notify.create({ type: 'positive', message: 'Address saved.' })
       } catch (error) {
         LNbits.utils.notifyApiError(error)
@@ -389,6 +391,11 @@ window.app.component('wallet-list', {
         }
       })
     },
+    created: async function () {
+      if (this.inkey) {
+        await this.refreshWalletAccounts()
+      }      
+    },    
     showQrCodeAddress: function (address) {
       this.qrDialog.address = address
       this.qrDialog.show = true
