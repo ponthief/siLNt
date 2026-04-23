@@ -233,12 +233,29 @@ window.app.component('wallet-list', {
     refreshWalletAccounts: async function () {
       this.walletAccounts = []
       const wallets = await this.getsiLNtWallets()           
-       this.walletAccounts = wallets.map(w => ({
-        ...mapWalletAccount(w),
-        expanded: false,
-        addresses: [],
-        loadingAddresses: false
-      }))      
+      // Load addresses for each wallet in parallel
+      const walletsWithAddresses = await Promise.all(
+        wallets.map(async w => {
+          let addresses = []
+          try {
+            const {data} = await LNbits.api.request(
+              'GET',
+              `/siLNt/api/v1/wallet/${w.id}/addresses`,
+              this.inkey
+            )
+            addresses = data.addresses || []
+          } catch (e) {
+            // ignore — wallet still loads without addresses
+          }
+          return {
+            ...mapWalletAccount(w),
+            expanded: false,
+            addresses: addresses,
+            loadingAddresses: false
+          }
+        })
+      )
+      this.walletAccounts = walletsWithAddresses     
       this.$emit('accounts-update', this.walletAccounts)
     },
     updateWalletBalance: async function (walletId, balance) {
@@ -290,7 +307,7 @@ window.app.component('wallet-list', {
     },
     toggleAddresses: async function (wallet) {
     wallet.expanded = !wallet.expanded
-    if (wallet.expanded && !wallet.addresses.length) {
+    if (wallet.expanded && !wallet.addresses.length && !wallet.loadingAddresses) {
       wallet.loadingAddresses = true
       try {
         const {data} = await LNbits.api.request(
