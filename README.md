@@ -48,6 +48,10 @@ curl -X PUT https://<your-lnbits>/siLNt/api/v1/blindbit/config \
   }'
 ```
 
+### Mempool Connection
+
+Optionaly, Admin user can configure Mempool URL. Default: [Mempool](https://mempool.space)
+
 ---
 
 ## Usage
@@ -160,7 +164,7 @@ Full interactive docs available at `/docs#/siLNt` on your LNbits instance.
 ## Security Notes
 
 - Mnemonics are **never stored in the database**. They are AES-encrypted client-side before transmission and used only to derive the Silent Payment address, scan key, and spend key at wallet creation time.
-- BlindBit credentials are stored server-side and used only for proxied scan requests — they are never returned to the browser in a usable form.
+- For added privacy, Mempool URL is configurable and can be set to local instance.
 - Invoice Key is required for all write operations (wallet creation, config updates, deletions).
 
 ---
