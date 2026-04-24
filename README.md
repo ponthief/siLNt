@@ -1,6 +1,6 @@
 # SiLNt — Silent Payments Wallet Extension for LNbits
 
-A [LNbits](https://lnbits.com) extension for managing [Silent Payment](https://silentpayments.xyz) Bitcoin wallets, with blockchain scanning powered by [BlindBit-Oracle](https://github.com/setavenger/blindbit-oracle).
+A [LNbits](https://lnbits.com) extension for managing [Silent Payment](https://silentpayments.xyz) Bitcoin wallets, with blockchain scanning powered by a self-hosted [BlindBit Oracle](https://github.com/setavenger/blindbit-oracle).
 
 ---
 
@@ -8,49 +8,55 @@ A [LNbits](https://lnbits.com) extension for managing [Silent Payment](https://s
 
 - Generate Silent Payment addresses from a BIP39 mnemonic
 - Store and manage multiple Silent Payment wallet accounts per user
-- Support for Mainnet only
-- Human Readable Address support ([BIP353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki) email format)
-- Blockchain scanning via a self-hosted BlindBit instance
+- Generate up to 10 BIP352 labeled SP subaccount addresses per wallet
+- Human Readable Address support ([BIP353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki) email format) — validated against SP address on create/update
+- Blockchain scanning via a self-hosted BlindBit Oracle with real-time progress tracking and stop/resume
 - UTXO tracking with automatic balance updates (unspent only)
-- Send to another SilentPayment/On-Chain or BIP-353 Address
-- Admin-controlled BlindBit connection settings
+- Send to Silent Payment, on-chain, or BIP353 email addresses
+- Configurable Mempool URL (supports local instances via http or https)
+- Admin-controlled BlindBit Oracle connection settings
+- QR code display for SP addresses and subaccount addresses
 
 ---
 
 ## Requirements
 
 - LNbits instance (self-hosted)
-- Python dependencies: `embit`, `httpx`, `coincurve`
+- Python dependencies: `embit`, `httpx`, `coincurve`, `cryptography`, `dnspython`, `ecdsa`
 - A running [blindbit-oracle](https://github.com/setavenger/blindbit-oracle) instance for blockchain scanning
 
 ---
 
 ## Installation
 
-1. As Admin user, navigate to Settings -> Extensions and add Source: [Ponthief-Extensions](https://raw.githubusercontent.com/ponthief/lnbits-extensions/extensions/extensions.json).
+1. As Admin user, navigate to **Settings → Extensions** and add Source:
+   [Ponthief-Extensions](https://raw.githubusercontent.com/ponthief/lnbits-extensions/extensions/extensions.json)
 2. Install/Enable the extension from the LNbits admin panel under **Extensions**.
-3. Run database migrations (handled automatically on first load via LNbits migration system).
+3. Database migrations run automatically on first load.
 
 ---
 
 ## Configuration
 
-### BlindBit Connection
+### BlindBit Oracle Connection
 
-Before scanning, an admin must configure the BlindBit connection via the **Settings** button (⚙️) in the extension UI, or via the API:
+Before scanning, an admin must configure the BlindBit Oracle connection via the **Settings** button (⚙️) in the extension UI, or via the API:
 
 ```bash
 curl -X PUT https://<your-lnbits>/siLNt/api/v1/blindbit/config \
   -H "X-Api-Key: <admin_key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "blindbit_url": "http://localhost:8001",    
+    "blindbit_url": "http://localhost:8001",
+    "blindbit_user": "",
+    "blindbit_pass": "",
+    "mempool_url": "https://mempool.space"
   }'
 ```
 
-### Mempool Connection
+### Mempool URL
 
-Optionaly, Admin user can configure Mempool URL. Default: [Mempool](https://mempool.space)
+The Mempool URL is configured alongside the BlindBit Oracle settings. It defaults to `https://mempool.space` but can be pointed to a local Mempool instance for added privacy. Both `http` and `https` are supported.
 
 ---
 
@@ -58,28 +64,47 @@ Optionaly, Admin user can configure Mempool URL. Default: [Mempool](https://memp
 
 ### 1. Add a Wallet Account
 
-Click **Silent Payments Wallet Account** → **New Wallet Account** and fill in:
+Click **Silent Payments Wallet Account → New Wallet Account** and fill in:
 
 | Field | Description |
 |---|---|
-| Title | Display name for the wallet |
-| Mnemonic | 12-word BIP39 seed phrase (encrypted client-side, never stored in plaintext) |
+| Mnemonic | 12-word BIP39 seed phrase (AES-encrypted client-side, never stored) |
 | Born at Height | Block height of the wallet's first transaction — reduces scan time |
-| Human Readable Address | Optional BIP353 email-format address (e.g. `alice@domain.com`) |
+| Human Readable Address | Optional BIP353 email-format address (e.g. `alice@domain.com`) — must resolve to this wallet's SP address |
 
-> **Note:** The mnemonic is AES-encrypted using the born-at height as the key before being sent to the server. It is not stored in the database.
+> The mnemonic is AES-encrypted using the born-at height as the key before transmission. It is never stored in the database.
 
-### 2. Scan the Blockchain
+### 2. Generate Labeled SP Addresses (Subaccounts)
 
-Click **Scan Blockchain** to proxy a scan request through LNbits to your BlindBit instance. The extension fetches:
-- All UTXOs associated with the wallet's Silent Payment address
-- The current block height
+Click **+** on a wallet row to generate a new BIP352 labeled SP address (up to 10 per wallet). Labeled addresses appear inline below the main SP address with an amber border. Click **Save** to persist to the database — unsaved addresses are marked with an `unsaved` badge.
 
-Wallet balance is updated automatically after each scan, counting only **unspent** UTXOs.
+### 3. Scan the Blockchain
 
-### 3. Make a Payment
+Click the **Bitcoin** icon button on a wallet row to open the scan dialog. The dialog shows:
+- **Scan From** — last scanned height (editable)
+- **Chain Tip** — fetched live from the Oracle (editable)
+- **Blocks to Scan** — calculated automatically
 
-Click **Send** to open the Send Payment flow. Select UTXOs as inputs, specify recipient, and sign the resulting transaction. Click **Broadcast** to broadcast transaction for "mining".
+Click **Sync to Tip** to start scanning. A progress bar shows real-time progress. Click **Stop** to pause — progress is saved and the next scan resumes from where it left off.
+
+### 4. Load UTXOs from DB
+
+Click the **database** icon button on a wallet row to load previously scanned UTXOs from the local database.
+
+### 5. Make a Payment
+
+Click **Send** to open the Send Payment flow:
+1. Select UTXOs to spend (checkbox + amount shown)
+2. Enter recipient (SP address, on-chain address, or BIP353 email)
+3. Set amount and fee rate
+4. Click **Build Transaction** — reviews fee before broadcasting
+5. Click **Broadcast** → confirm in the confirmation dialog
+
+After broadcast, selected UTXOs are marked as spent and a Mempool link is shown in the notification.
+
+### 6. Resolve BIP353
+
+Click **Resolve BIP353** to look up a BIP353 email-format address and display the resolved SP address.
 
 ---
 
@@ -93,25 +118,61 @@ All endpoints are prefixed with `/siLNt/api/v1`. Authentication uses the `X-Api-
 |---|---|---|---|
 | `GET` | `/wallet` | Invoice Key | List all wallet accounts |
 | `GET` | `/wallet/{wallet_id}` | Invoice Key | Get a wallet account |
-| `POST` | `/wallet` | Admin Key | Create a wallet account |
-| `PUT` | `/wallet/{wallet_id}` | Admin Key | Update hr_address, last_height|
-| `DELETE` | `/wallet/{wallet_id}` | Admin Key | Delete wallet and all its UTXOs |
+| `POST` | `/wallet` | Invoice Key | Create a wallet account |
+| `PUT` | `/wallet/{wallet_id}` | Invoice Key | Update hr_address, last_height, title, balance |
+| `DELETE` | `/wallet/{wallet_id}` | Invoice Key | Delete wallet, UTXOs and labeled addresses |
 
-### BlindBit Config
+### Labeled SP Addresses
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `GET` | `/blindbit/config` | Invoice Key | Get BlindBit connection settings |
-| `PUT` | `/blindbit/config` | Admin Key | Update BlindBit connection settings |
+| `GET` | `/wallet/{wallet_id}/addresses` | Invoice Key | List saved labeled SP addresses |
+| `POST` | `/wallet/{wallet_id}/addresses/preview` | Invoice Key | Preview a labeled SP address (not saved) |
+| `POST` | `/wallet/{wallet_id}/addresses` | Invoice Key | Save a labeled SP address to DB |
+| `DELETE` | `/wallet/{wallet_id}/addresses/{address_id}` | Invoice Key | Delete a labeled SP address |
 
 ### Scanning
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `POST` | `/scan` | Invoice Key | Proxy scan to BlindBit, returns UTXOs and height |
+| `POST` | `/wallet/{wallet_id}/scan` | Invoice Key | Scan blockchain for UTXOs |
+| `POST` | `/wallet/{wallet_id}/scan/stop` | Invoice Key | Stop an in-progress scan |
+| `GET` | `/wallet/{wallet_id}/scan/progress` | Invoice Key | Get real-time scan progress |
 
+### UTXOs
 
-Full interactive docs available at `/docs#/siLNt` on your LNbits instance.
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` | `/utxos?wallet_id=` | Invoice Key | Load UTXOs from DB for a wallet |
+
+### BlindBit Oracle
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` | `/blindbit/config` | Invoice Key | Get Oracle connection settings |
+| `PUT` | `/blindbit/config` | Admin Key | Update Oracle connection settings incl. Mempool URL |
+| `GET` | `/oracle/tip` | Invoice Key | Get current chain tip from Oracle |
+
+### BIP353
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` | `/bip353/resolve?address=` | Invoice Key | Resolve a BIP353 email-format address |
+
+### Transactions
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `POST` | `/tx/build` | Admin Key | Build and sign a transaction |
+| `POST` | `/tx/broadcast` | Admin Key | Broadcast a signed transaction |
+
+### Config
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` | `/config` | Invoice Key | Get app config including mempool endpoint |
+
+Full interactive docs at `/docs#/siLNt` on your LNbits instance.
 
 ---
 
@@ -123,12 +184,25 @@ Full interactive docs available at `/docs#/siLNt` on your LNbits instance.
 {
   "id": "abc123xyz",
   "user": "usr_abc123",
-  "title": "My Silent Wallet",
+  "title": "sp1qqw...",
   "balance": 100000,
   "hr_address": "alice@domain.com",
-  "network": "Mainnet",
+  "network": "mainnet",
   "last_height": 840000,
+  "last_scan_height": 842000,
   "sp_address": "sp1qqw..."
+}
+```
+
+### WalletAddress (Labeled SP)
+
+```json
+{
+  "id": "xyz789",
+  "wallet_id": "abc123xyz",
+  "sp_address": "sp1qq...",
+  "label_index": 1,
+  "created_at": 1710000000
 }
 ```
 
@@ -136,26 +210,25 @@ Full interactive docs available at `/docs#/siLNt` on your LNbits instance.
 
 ```json
 {
-  "blindbit_url": "http://localhost:8001"  
+  "blindbit_url": "http://localhost:8001",
+  "blindbit_user": "",
+  "blindbit_pass": "",
+  "mempool_url": "https://mempool.space"
 }
 ```
 
-### ScanResult
+### UTXORecord
 
 ```json
 {
-  "utxos": [
-    {
-      "txid": "a1b2c3...",
-      "amount": 50000,
-      "utxo_state": "unspent",
-      "label": "",
-      "timestamp": 1710000000
-    }
-  ],
-  "height": {
-    "height": 840100
-  }
+  "txid": "a1b2c3...",
+  "vout": 0,
+  "amount": 50000,
+  "priv_key_tweak": "...",
+  "pub_key": "...",
+  "timestamp": 1710000000,
+  "utxo_state": "unspent",
+  "wallet_id": "abc123xyz"
 }
 ```
 
@@ -163,9 +236,12 @@ Full interactive docs available at `/docs#/siLNt` on your LNbits instance.
 
 ## Security Notes
 
-- Mnemonics are **never stored in the database**. They are AES-encrypted client-side before transmission and used only to derive the Silent Payment address, scan key, and spend key at wallet creation time.
-- For added privacy, Mempool URL should be configured to point to local instance.
-- Invoice Key is required for all write operations (wallet creation, config updates, deletions).
+- Mnemonics are **never stored**. AES-encrypted client-side before transmission, used only to derive keys at creation time.
+- The `scan_secret` (scan private key) is encrypted at rest using a server-side Fernet key.
+- The `spend_key` is encrypted at rest using the `scan_secret` as the AES key — double-layered protection.
+- BIP353 `hr_address` is validated server-side on create and update — it must resolve to the wallet's SP address.
+- Configure `mempool_url` to point to a local Mempool instance for transaction broadcasting privacy.
+- Admin Key is required for all write operations that affect funds (tx build, broadcast, BlindBit config).
 
 ---
 
@@ -174,25 +250,27 @@ Full interactive docs available at `/docs#/siLNt` on your LNbits instance.
 ```
 siLNt/
 ├── __init__.py
-├── views.py               # Page routes
-├── views_api.py           # REST API endpoints
-├── crud.py                # Database operations
-├── models.py              # Pydantic models
-├── migrations.py          # DB schema migrations
+├── views.py                    # Page routes
+├── views_api.py                # REST API endpoints
+├── crud.py                     # Database operations
+├── models.py                   # Pydantic models
+├── migrations.py               # DB schema migrations
 ├── helpers/
-│   └── wallet.py          # Silent Payment address derivation, mnemonic decryption
+│   ├── wallet.py               # SP address derivation, key encryption, tx building
+│   ├── scan.py                 # Blockchain scanner (BlindBit Oracle client)
+│   ├── address_resolver.py     # BIP353 DNS resolution
+│   └── curve.py                # secp256k1 EC math helpers
 ├── static/
 │   ├── js/
-│   │   ├── index.js       # Main Vue app
-│   │   ├── tables.js      # Table definitions
-│   │   ├── map.js         # Data mapping functions
-│   │   └── utils.js       # Utility functions
+│   │   ├── index.js            # Main Vue app
+│   │   ├── tables.js           # Table column definitions
+│   │   ├── map.js              # Data mapping functions
+│   │   ├── utils.js            # Utility functions
+│   │   └── bip39-word-list.js  # BIP39 word list for mnemonic validation
 │   └── components/
-│       ├── wallet-config.js / .html
-│       ├── wallet-list.js / .html
-│       ├── utxo-list.js / .html
-│       ├── payment.js / .html
-│       └── send-to.js / .html
+│       ├── wallet-config.js / .html   # BlindBit Oracle settings
+│       ├── wallet-list.js / .html     # Wallet table with labeled addresses
+│       └── utxo-list.js / .html       # UTXO table
 └── templates/
     └── silnt/
         ├── index.html
@@ -200,9 +278,15 @@ siLNt/
 ```
 
 ---
+
 ## References
 
-[BIP353 Light Client Specifications](https://github.com/setavenger/BIP0352-light-client-specification)
+- [BIP352 — Silent Payments](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki)
+- [BIP353 — DNS Payment Instructions](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki)
+- [BIP352 Light Client Specification](https://github.com/setavenger/BIP0352-light-client-specification)
+- [BlindBit Oracle](https://github.com/setavenger/blindbit-oracle)
+
+---
 
 ## Contributing
 
@@ -212,7 +296,7 @@ Pull requests welcome. Please open an issue first to discuss significant changes
 
 ## Author
 
-Created by [Ponthief](https://github.com/ponthief)
+Created by [Ponthief](https://github.com/ponthief) at [Bitaurus](https://bitaurus.net)
 
 ---
 
