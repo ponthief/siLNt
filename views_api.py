@@ -322,7 +322,7 @@ async def api_get_chain_tip():
     try:
         async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
             resp = await client.get(
-                f"{blindbit.blindbit_url.rstrip('/')}/block-height", headers=headers
+                f"{blindbit.blindbit_url.rstrip('/')}/info", headers=headers
             )
             resp.raise_for_status()
             return resp.json()

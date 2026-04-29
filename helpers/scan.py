@@ -5,11 +5,8 @@ Connects to a BlindBit Oracle (https://localhost:8001) and scans for UTXOs
 belonging to the wallet's Silent Payment address.
 
 Oracle endpoints used:
-  GET /tweaks/{height}?dustLimit={dust}   — per-block tweaks
+  GET /tweaks/{height}                    — per-block tweaks
   GET /utxos/{height}                     — per-block UTXOs
-  GET /filter/spent/{height}              — spent outpoints filter (GCS)
-
-Mirrors the logic in blindbit-scan/pkg/daemon/scan.go.
 """
 
 from __future__ import annotations
@@ -33,6 +30,7 @@ from ..crud import (
     update_balance,
     get_or_create_server_secret,
     get_silnt_wallet,
+    get_wallet_addresses
 )
 from .wallet import decrypt_secret, decrypt_spend_key
 
@@ -206,12 +204,12 @@ def create_label(scan_key: bytes, m: int) -> Label:
     return Label(pub_key=pub_key, tweak=tweak, m=m)
 
 
-def create_labels(scan_key: bytes, count: int = 21) -> list[Label]:
+def create_labels(scan_key: bytes, indices: list[int]) -> list[Label]:
     """
     Create `count` labels starting from m=0 (change label).
     Mirrors BlindBit's labelCount config.
-    """
-    return [create_label(scan_key, m) for m in range(count)]
+    """    
+    return [create_label(scan_key, m) for m in indices]
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +338,95 @@ def receiver_scan_transaction(
 # ---------------------------------------------------------------------------
 
 
+def sync_block_from_compute_index(
+    index: list[dict],
+    scan_key: bytes,
+    spend_pub_key: bytes,
+    labels: list[Label],
+) -> list[OwnedUTXO]:
+    """
+    Process Compute Index response.
+    Each entry has: {txid, tweak, outputs: [x-only-hex, ...]}
+    """
+    owned_utxos: list[OwnedUTXO] = []
+
+    for entry in index:
+        tweak_hex = entry.get("tweak", "")
+        txid = entry.get("txid", "")
+        outputs_hex = entry.get("outputs", [])
+
+        if not tweak_hex or not outputs_hex:
+            continue
+
+        try:
+            tweak_bytes = bytes.fromhex(tweak_hex)
+            # outputs are shortened (8 bytes / 16 hex chars) — can only use for
+            # matching, not for full pubkey recovery. Use receiver_scan_transaction
+            # with the full tweak to derive expected outputs and match.
+            shared_secret = create_shared_secret(tweak_bytes, scan_key, input_hash=None)
+
+            # Derive expected x-only outputs for k=0,1,2...
+            # outputs in compute index are shortened — 8 bytes each
+            # Build set for fast lookup
+            short_outputs = set(outputs_hex)
+
+            # Check if any of our derived outputs match
+            k = 0
+            while True:
+                output_pub_key, t_k = create_output_pub_key_and_tweak(
+                    shared_secret, spend_pub_key, k
+                )
+                short = output_pub_key.hex()[:16]  # first 8 bytes
+
+                matched = False
+
+                # Direct match
+                if short in short_outputs:
+                    owned_utxos.append(OwnedUTXO(
+                        txid=bytes.fromhex(txid),
+                        vout=k,  # vout not available in compute index
+                        amount=0,  # amount not available — fetch separately if needed
+                        priv_key_tweak=t_k,
+                        pub_key=output_pub_key,
+                        utxo_state="unspent",
+                        timestamp=0,
+                        label=None,
+                    ))
+                    matched = True
+
+                # Label match
+                if labels:
+                    out_pk_33 = b"\x02" + output_pub_key
+                    for label in labels:
+                        try:
+                            label_out = add_public_keys(out_pk_33, label.pub_key)
+                            label_short = label_out[1:].hex()[:16]
+                            if label_short in short_outputs:
+                                sec_key_tweak = add_private_keys(t_k, label.tweak)
+                                owned_utxos.append(OwnedUTXO(
+                                    txid=bytes.fromhex(txid),
+                                    vout=k,
+                                    amount=0,
+                                    priv_key_tweak=sec_key_tweak,
+                                    pub_key=label_out[1:],
+                                    utxo_state="unspent",
+                                    timestamp=0,
+                                    label=label,
+                                ))
+                                matched = True
+                        except Exception:
+                            pass
+
+                if not matched:
+                    break
+                k += 1
+
+        except Exception as e:
+            logger.warning(f"compute_index entry error for txid {txid}: {e}")
+            continue
+
+    return owned_utxos
+
 def sync_block(
     tweaks: list[bytes | str],  # list of 33-byte tweaks, bytes or hex strings
     utxos: list[
@@ -352,9 +439,9 @@ def sync_block(
     # Step 1 & 2: precompute potential output pubkeys for every tweak
     tweak_script_map: dict[bytes, tuple[bytes, bytes]] = {}
 
-    tweak = bytes.fromhex(tweaks[0]) if isinstance(tweaks[0], str) else tweaks[0]
-    shared = create_shared_secret(tweak, scan_key, None)
-    t_k, _ = create_output_pub_key_and_tweak(shared, spend_pub_key, 0)
+    # tweak = bytes.fromhex(tweaks[0]) if isinstance(tweaks[0], str) else tweaks[0]
+    # shared = create_shared_secret(tweak, scan_key, None)
+    # t_k, _ = create_output_pub_key_and_tweak(shared, spend_pub_key, 0)
     for raw_tweak in tweaks:
         tweak = bytes.fromhex(raw_tweak) if isinstance(raw_tweak, str) else raw_tweak
         shared_secret = create_shared_secret(tweak, scan_key, input_hash=None)
@@ -385,7 +472,7 @@ def sync_block(
 
     for utxo in utxos:
         txid_b = bytes.fromhex(utxo["txid"])
-        x_only = bytes.fromhex(utxo["scriptpubkey"])[2:]
+        x_only = bytes.fromhex(utxo["pubkey"])
         txid_groups.setdefault(txid_b, []).append(utxo)
         helper_mapping[x_only] = txid_b
 
@@ -399,7 +486,7 @@ def sync_block(
     owned_utxos: list[OwnedUTXO] = []
 
     for tweak, relevant_utxos in tweaks_outputs_to_check.items():
-        tx_outputs = [bytes.fromhex(u["scriptpubkey"])[2:] for u in relevant_utxos]
+        tx_outputs = [bytes.fromhex(u["pubkey"]) for u in relevant_utxos]
 
         found = receiver_scan_transaction(
             scan_key=scan_key,
@@ -412,16 +499,16 @@ def sync_block(
 
         for fo in found:
             for utxo in relevant_utxos:
-                if fo.output == bytes.fromhex(utxo["scriptpubkey"])[2:]:
+                if fo.output == bytes.fromhex(utxo["pubkey"]):
                     owned_utxos.append(
                         OwnedUTXO(
                             txid=bytes.fromhex(utxo["txid"]),
                             vout=utxo["vout"],
-                            amount=utxo["value"],
+                            amount=utxo["amount"],
                             priv_key_tweak=fo.sec_key_tweak,
                             pub_key=fo.output,
-                            utxo_state="spent" if utxo.get("spent") else "unspent",
-                            timestamp=utxo.get("timestamp"),
+                            utxo_state="unspent",
+                            timestamp=utxo.get("timestamp", 0),
                             label=fo.label,
                         )
                     )
@@ -445,20 +532,20 @@ class BlindBitOracleClient:
 
     async def get_chain_tip(self) -> int:
         async with self._client() as client:
-            resp = await client.get(f"{self.base_url}/block-height")
+            resp = await client.get(f"{self.base_url}/info")
             resp.raise_for_status()
-            return resp.json()["block_height"]
+            return resp.json()["height"]
 
     async def get_tweaks(
-        self, height: int, dust_limit: int = DUST_LIMIT
+        self, height: int
     ) -> list[bytes]:
         """Returns list of 33-byte compressed pubkey tweaks for the block."""
         async with self._client() as client:
             resp = await client.get(
-                f"{self.base_url}/tweaks/{height}", params={"dustLimit": dust_limit}
+                f"{self.base_url}/tweaks/{height}"
             )
             resp.raise_for_status()
-            data = resp.json()
+            data = resp.json()["index"]
             tweaks = []
             for t in data:
                 tweaks.append(bytes.fromhex(t))
@@ -469,20 +556,44 @@ class BlindBitOracleClient:
         async with self._client() as client:
             resp = await client.get(f"{self.base_url}/utxos/{height}")
             resp.raise_for_status()
-            return resp.json()
+            return resp.json()["index"]
 
-    async def get_spent_filter(self, height: int) -> Optional[dict]:
-        """Returns the spent outpoints GCS filter for the block."""
+    # async def get_spent_filter(self, height: int) -> Optional[dict]:
+    #     """Returns the spent outpoints GCS filter for the block."""
+    #     async with self._client() as client:
+    #         resp = await client.get(f"{self.base_url}/filter/spent/{height}")
+    #         if resp.status_code == 404:
+    #             return None
+    #         resp.raise_for_status()
+    #         return resp.json()
+
+    # async def get_spent_index(self, height: int) -> Optional[dict]:
+    #     async with self._client() as client:
+    #         resp = await client.get(f"{self.base_url}/spent-outputs/{height}")
+    #         if resp.status_code == 404:
+    #             return None
+    #         resp.raise_for_status()
+    #         return resp.json()
+
+    async def get_spent_outputs(self, height: int) -> Optional[dict]:
+        """
+        Spent Outputs (Shortened) — first 8 bytes of x-only pubkeys of spent outputs.
+        Replaces deprecated spent-index endpoint.
+        """
         async with self._client() as client:
-            resp = await client.get(f"{self.base_url}/filter/spent/{height}")
+            resp = await client.get(f"{self.base_url}/spent-outputs/{height}")
             if resp.status_code == 404:
                 return None
             resp.raise_for_status()
             return resp.json()
 
-    async def get_spent_index(self, height: int) -> Optional[dict]:
+    async def get_compute_index(self, height: int) -> Optional[dict]:
+        """
+        Compute Index — combined tweak + output info per transaction.
+        Can replace separate tweaks + utxos calls.
+        """
         async with self._client() as client:
-            resp = await client.get(f"{self.base_url}/spent-index/{height}")
+            resp = await client.get(f"{self.base_url}/compute-index/{height}")
             if resp.status_code == 404:
                 return None
             resp.raise_for_status()
@@ -491,7 +602,7 @@ class BlindBitOracleClient:
     async def get_block_hash(self, height: int) -> Optional[dict]:
         """Returns the hash for the block."""
         async with self._client() as client:
-            resp = await client.get(f"{self.base_url}/block-hash/{height}")
+            resp = await client.get(f"{self.base_url}/blockhash/{height}")
             if resp.status_code == 404:
                 return None
             resp.raise_for_status()
@@ -507,85 +618,100 @@ async def scan_block(
     scan_secret_bytes: bytes,
     spend_pub_bytes: bytes,
     spend_secret_bytes: bytes,
-) -> list[dict]:
-    """
-    Scan a single block for UTXOs belonging to this wallet.
-    Returns list of owned UTXO dicts ready for DB insertion.
-    """    
-    tweaks = await client.get_tweaks(height, DUST_LIMIT)
-    labels: list[Label] = []
+    labels: list[Label],          # ← pre-computed, passed in
+) -> list[OwnedUTXO]:
+    """Scan a single block. Labels are pre-computed outside the loop."""
+
+    # Try Compute Index first
+    compute_data = await client.get_compute_index(height)
+    if compute_data:
+        matches = sync_block_from_compute_index(
+            compute_data["index"],
+            scan_secret_bytes,
+            spend_pub_bytes,
+            labels
+        )
+        if matches:
+            # Only fetch full utxos if we have matches
+            full_utxos = await client.get_utxos(height)
+            utxo_lookup = {u["pubkey"]: u for u in full_utxos if "pubkey" in u}
+            for owned in matches:
+                pub_hex = owned.pub_key.hex()
+                full = utxo_lookup.get(pub_hex)
+                if not full:
+                    # fallback: match by short prefix
+                    short = pub_hex[:16]
+                    full = next(
+                        (u for u in full_utxos if u.get("pubkey", "")[:16] == short),
+                        None
+                    )
+                if full:
+                    owned.vout = full.get("vout", owned.vout)
+                    owned.amount = full.get("amount", owned.amount)
+                    owned.timestamp = full.get("timestamp", owned.timestamp)
+                    owned.utxo_state = "spent" if full.get("spent") else "unspent"
+                    owned.pub_key = bytes.fromhex(full["pubkey"])
+        return matches
+
+    # Fallback: separate tweaks + utxos
+    tweaks = await client.get_tweaks(height)
+    if not tweaks:
+        return []
     utxos = await client.get_utxos(height)
     if not utxos:
-        return []    
-    labels = create_labels(scan_secret_bytes, count=21)
-    owned = sync_block(tweaks, utxos, scan_secret_bytes, spend_pub_bytes, labels)
-
-    return owned
+        return []
+    return sync_block(tweaks, utxos, scan_secret_bytes, spend_pub_bytes, labels)
 
 
-async def mark_spent_utxos(
-    height: int,
+async def mark_spent_utxos_batch(
+    heights: list[int],
     client: BlindBitOracleClient,
     wallet_id: str,
+    owned_utxos_lookup: dict[str, dict],  # txid:vout -> row — pre-fetched
 ) -> None:
     """
-    Check spent outpoints index and mark UTXOs as spent in the DB.
-    Skips GCS filter check — fetches spent index directly for owned UTXOs.
+    Check spent outputs for a batch of heights.
+    owned_utxos_lookup is pre-fetched once per scan batch.
     """
-    try:
-        # Get current unconfirmd_spent and unspent UTXOs from DB
-        rows = await db.fetchall(
-            "SELECT txid, vout FROM silnt.utxos WHERE wallet_id = :wallet_id AND utxo_state in ('unspent','unconfirmed_spent')",
-            {"wallet_id": wallet_id},
-        )
-        if not rows:
-            return
+    if not owned_utxos_lookup:
+        return
 
-        # Fetch block hash for this height
-        block_hash_data = await client.get_block_hash(height)
-        if not block_hash_data:
-            return
-        block_hash_bytes = bytes.fromhex(block_hash_data.get("block_hash"))
-        block_hash_le = block_hash_bytes[::-1]
+    async def check_height(height: int):
+        try:
+            spent_data = await client.get_spent_outputs(height)
+            if not spent_data:
+                return
 
-        # Compute short hashes for our UTXOs
-        our_hashes: dict[str, dict] = {}
-        for row in rows:
-            txid_le = bytes.fromhex(row["txid"])[::-1]
-            vout_bytes = struct.pack("<I", row["vout"])
-            outpoint = txid_le + vout_bytes
-            full_hash = hashlib.sha256(outpoint + block_hash_le).digest()
-            short_hash = full_hash[:8].hex()
-            our_hashes[short_hash] = {"txid": row["txid"], "vout": row["vout"]}
+            spent_set = set(spent_data.get("index", []))
+            if not spent_set:
+                return
 
-        if not our_hashes:
-            return
+            block_utxos = await client.get_utxos(height)
+            utxo_pub_lookup = {
+                f"{u['txid']}:{u['vout']}": u.get("pubkey", "")[:16]
+                for u in block_utxos
+            }
 
-        # Fetch spent index and check against our hashes
-        spent_index = await client.get_spent_index(height)
-        if not spent_index:
-            return
+            for lookup_key, row in owned_utxos_lookup.items():
+                short_pub = utxo_pub_lookup.get(lookup_key, "")
+                if short_pub and short_pub in spent_set:
+                    await db.execute(
+                        """UPDATE silnt.utxos SET utxo_state = 'spent'
+                           WHERE txid = :txid AND vout = :vout
+                           AND wallet_id = :wallet_id""",
+                        {
+                            "txid": row["txid"],
+                            "vout": row["vout"],
+                            "wallet_id": wallet_id,
+                        },
+                    )
+                    logger.info(
+                        f"Marked UTXO {row['txid']}:{row['vout']} as spent at block {height}"
+                    )
+        except Exception as e:
+            logger.warning(f"mark_spent_utxos error at block {height}: {e}")
 
-        # spent_index["data"] is a list of 8-byte hex hashes
-        spent_hashes = set(spent_index.get("data", []))
-
-        for short_hash, utxo in our_hashes.items():
-            if short_hash in spent_hashes:
-                await db.execute(
-                    """UPDATE silnt.utxos SET utxo_state = 'spent'
-                       WHERE txid = :txid AND vout = :vout AND wallet_id = :wallet_id""",
-                    {
-                        "txid": utxo["txid"],
-                        "vout": utxo["vout"],
-                        "wallet_id": wallet_id,
-                    },
-                )
-                logger.info(
-                    f"Marked UTXO {utxo['txid']}:{utxo['vout']} as spent at block {height}"
-                )
-
-    except Exception as e:
-        logger.warning(f"mark_spent_utxos error at block: {height}: {e}")
+    await asyncio.gather(*[check_height(h) for h in heights])
 
 
 # ── Last scan height ───────────────────────────────────────────────────────────
@@ -657,6 +783,14 @@ async def scan_wallet(
 
     logger.info(f"Scanning wallet {wallet_id} from block {start} to {end}")
 
+    # ── Pre-compute labels ONCE ───────────────────────────────────────────────
+    saved_addresses = await get_wallet_addresses(wallet_id)
+    labels = create_labels(
+        scan_secret_bytes,
+        indices=[addr.label_index for addr in saved_addresses]
+    )
+    logger.debug(f"Scanning with {len(labels)} label(s) for wallet {wallet_id}")
+
     # ── Scan blocks ───────────────────────────────────────────────────────────
     total_found = 0
     blocks_scanned = 0
@@ -664,45 +798,70 @@ async def scan_wallet(
     total_blocks = end - start + 1
     clear_scan_stop(wallet_id)  # ← clear any previous stop request
     set_scan_progress(wallet_id, 0, total_blocks, 0)
-    for height in range(start, end + 1):
-        # ── Check stop request ────────────────────────────────────────
+
+    # ── Batch size for concurrent scanning ────────────────────────────────────
+    BATCH_SIZE = 10
+
+    heights = list(range(start, end + 1))
+
+    for batch_start in range(0, len(heights), BATCH_SIZE):
         if should_stop(wallet_id):
-            logger.info(f"Scan stopped by user at block {height}")
+            logger.info(f"Scan stopped by user at block {last_scanned_height}")
             await set_last_scan_height(wallet_id, last_scanned_height)
-            set_scan_progress(
-                wallet_id, blocks_scanned, total_blocks, total_found, active=False
-            )
+            set_scan_progress(wallet_id, blocks_scanned, total_blocks, total_found, active=False)
             clear_scan_stop(wallet_id)
             break
-        try:
-            # Check spent UTXOs first
-            await mark_spent_utxos(height, oracle, wallet_id)
 
-            # Scan for new UTXOs
-            owned_utxos = await scan_block(
-                height=height,
+        batch = heights[batch_start:batch_start + BATCH_SIZE]
+
+        # ── Fetch pre-owned UTXOs for spent check (once per batch) ───────────
+        owned_rows = await db.fetchall(
+            """SELECT txid, vout FROM silnt.utxos
+               WHERE wallet_id = :wallet_id
+               AND utxo_state IN ('unspent', 'unconfirmed_spent')""",
+            {"wallet_id": wallet_id},
+        )
+        owned_utxos_lookup = {
+            f"{r['txid']}:{r['vout']}": r for r in owned_rows
+        }
+
+        # ── Concurrent scan + spent check for batch ───────────────────────────
+        scan_tasks = [
+            scan_block(
+                height=h,
                 client=oracle,
                 scan_secret_bytes=scan_secret_bytes,
                 spend_pub_bytes=spend_pub_bytes,
                 spend_secret_bytes=spend_secret_bytes,
+                labels=labels,
             )
+            for h in batch
+        ]
 
-            if owned_utxos:
-                await insert_utxos_for_wallet(wallet_id, owned_utxos)
-                total_found += len(owned_utxos)
-                logger.info(f"Block {height}: stored {len(owned_utxos)} UTXOs")
+        batch_results = await asyncio.gather(*scan_tasks, return_exceptions=True)
+
+        # Check spent UTXOs for the batch concurrently
+        await mark_spent_utxos_batch(batch, oracle, wallet_id, owned_utxos_lookup)
+
+        # ── Process results ───────────────────────────────────────────────────
+        for h, result in zip(batch, batch_results):
+            if isinstance(result, Exception):
+                logger.error(f"Error scanning block {h}: {result}")
+                continue
+
+            if result:
+                await insert_utxos_for_wallet(wallet_id, result)
+                total_found += len(result)
+                logger.info(f"Block {h}: stored {len(result)} UTXOs")
 
             blocks_scanned += 1
-            last_scanned_height = height
-            set_scan_progress(wallet_id, blocks_scanned, total_blocks, total_found)
+            last_scanned_height = h
 
-            # Save progress every 100 blocks
-            if blocks_scanned % 100 == 0:
-                await set_last_scan_height(wallet_id, last_scanned_height)
-                logger.debug(f"Progress saved at block {height}")
-        except Exception as e:
-            logger.error(f"Error scanning block {height}: {e}")
-            continue
+        set_scan_progress(wallet_id, blocks_scanned, total_blocks, total_found)
+
+        # Save progress every batch
+        await set_last_scan_height(wallet_id, last_scanned_height)
+    
 
     # ── Final update ──────────────────────────────────────────────────────────
     await set_last_scan_height(wallet_id, last_scanned_height)

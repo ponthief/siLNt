@@ -41,6 +41,7 @@ class UTXORecord(BaseModel):
     utxo_state: str
     timestamp: int
     wallet_id: str
+    label_index: Optional[int] = None  # None = main wallet, int = subaccount
 
 
 class ScanWalletRequest(BaseModel):

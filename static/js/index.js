@@ -160,7 +160,7 @@ window.app = Vue.createApp({
         'GET',
         '/siLNt/api/v1/oracle/tip',
         this.g.user.wallets[0].inkey
-      )      
+      )            
       const tip = response.data?.height ?? response.data?.block_height
       this.scanDialog.chainTip = tip
       this.scanDialog.chainTip = tip

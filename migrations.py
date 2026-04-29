@@ -32,7 +32,8 @@ async def m001_initial(db):
             pub_key TEXT NOT NULL,            
             utxo_state TEXT NOT NULL,
             timestamp INTEGER NOT NULL DEFAULT 0,           
-            wallet_id TEXT NOT NULL
+            wallet_id TEXT NOT NULL,
+            label_index INTEGER
         );
     """
     )
