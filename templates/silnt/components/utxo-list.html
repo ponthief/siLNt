@@ -117,12 +117,9 @@
 
           <!-- Timestamp -->
           <q-td key="date" :props="props">
-            <div v-text="props.row.timestamp
-              ? new Date(props.row.timestamp * 1000).toLocaleString()
-              : '-'">
-            </div>
+            <div v-if="props.row.timestamp" v-text="formatTimestamp(props.row.timestamp)"></div>
+            <div v-else class="text-grey text-caption">N/A</div>
           </q-td>
-
         </q-tr>
 
         <!-- Expanded detail row -->

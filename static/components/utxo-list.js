@@ -114,6 +114,21 @@ window.app.component('utxo-list', {
         .filter(u => u.utxo_state === 'spent')
         .reduce((t, u) => t + (u.amount || 0), 0)
     },
+    formatTimestamp: function (timestamp) {
+      if (!timestamp) return 'N/A'
+      try {
+        const date = new Date(timestamp * 1000)
+        const day = String(date.getDate()).padStart(2, '0')
+        const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+        const month = months[date.getMonth()]
+        const year = date.getFullYear()
+        const hours = String(date.getHours()).padStart(2, '0')
+        const mins = String(date.getMinutes()).padStart(2, '0')
+        return `${day} ${month} ${year} ${hours}:${mins}`
+      } catch (e) {
+        return 'Unknown'
+      }
+    },
     updateUtxoSelection: function () {
       this.utxoSelectAmount = this.payedAmount
       this.applyUtxoSelectionMode()
@@ -149,7 +164,6 @@ window.app.component('utxo-list', {
         return total
       }, 0)
     }
-  },
-
+  },  
   created: async function () {}
 })

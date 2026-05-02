@@ -556,24 +556,7 @@ class BlindBitOracleClient:
         async with self._client() as client:
             resp = await client.get(f"{self.base_url}/utxos/{height}")
             resp.raise_for_status()
-            return resp.json()["index"]
-
-    # async def get_spent_filter(self, height: int) -> Optional[dict]:
-    #     """Returns the spent outpoints GCS filter for the block."""
-    #     async with self._client() as client:
-    #         resp = await client.get(f"{self.base_url}/filter/spent/{height}")
-    #         if resp.status_code == 404:
-    #             return None
-    #         resp.raise_for_status()
-    #         return resp.json()
-
-    # async def get_spent_index(self, height: int) -> Optional[dict]:
-    #     async with self._client() as client:
-    #         resp = await client.get(f"{self.base_url}/spent-outputs/{height}")
-    #         if resp.status_code == 404:
-    #             return None
-    #         resp.raise_for_status()
-    #         return resp.json()
+            return resp.json()["index"]   
 
     async def get_spent_outputs(self, height: int) -> Optional[dict]:
         """
@@ -645,12 +628,12 @@ async def scan_block(
                         (u for u in full_utxos if u.get("pubkey", "")[:16] == short),
                         None
                     )
-                if full:
+                if full:                    
                     owned.vout = full.get("vout", owned.vout)
                     owned.amount = full.get("amount", owned.amount)
-                    owned.timestamp = full.get("timestamp", owned.timestamp)
-                    owned.utxo_state = "spent" if full.get("spent") else "unspent"
-                    owned.pub_key = bytes.fromhex(full["pubkey"])
+                    owned.timestamp = await get_block_ts(full.get("txid"))
+                    owned.utxo_state = "unspent"
+                    owned.pub_key = bytes.fromhex(full["pubkey"])                    
         return matches
 
     # Fallback: separate tweaks + utxos
@@ -800,7 +783,7 @@ async def scan_wallet(
     set_scan_progress(wallet_id, 0, total_blocks, 0)
 
     # ── Batch size for concurrent scanning ────────────────────────────────────
-    BATCH_SIZE = 10
+    BATCH_SIZE = 30
 
     heights = list(range(start, end + 1))
 
@@ -919,3 +902,15 @@ def set_scan_progress(
         "total": total,
         "found": found,
     }
+
+async def get_block_ts(txid) -> int:
+    blindbit = await get_blindbit_config()
+    mempool_base = (blindbit.mempool_url or "https://mempool.space").rstrip("/")
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(f"{mempool_base}/api/tx/{txid}")
+        if resp.status_code == 200:
+            tx_data = resp.json()
+            ts = tx_data.get("status", {}).get("block_time") or 0
+            if ts:
+                return int(ts)
+    return 0

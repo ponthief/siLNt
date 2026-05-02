@@ -1,6 +1,6 @@
 # SiLNt — Silent Payments Wallet Extension for LNbits
 
-A [LNbits](https://lnbits.com) extension for managing [Silent Payment](https://silentpayments.xyz) Bitcoin wallets, with blockchain scanning powered by a self-hosted [BlindBit Oracle](https://github.com/setavenger/blindbit-oracle).
+A [LNbits](https://lnbits.com) extension for managing [Silent Payment](https://silentpayments.xyz) Bitcoin wallets, with blockchain scanning powered by a self-hosted [BlindBit Oracle](https://github.com/ponthief/blindbit-oracle).
 
 ---
 
@@ -23,7 +23,7 @@ A [LNbits](https://lnbits.com) extension for managing [Silent Payment](https://s
 
 - LNbits instance (self-hosted)
 - Python dependencies: `embit`, `httpx`, `coincurve`, `cryptography`, `dnspython`, `ecdsa`
-- A running [blindbit-oracle](https://github.com/setavenger/blindbit-oracle) instance for blockchain scanning
+- A running [blindbit-oracle](https://github.com/ponthief/blindbit-oracle) instance for blockchain scanning
 
 ---
 
@@ -284,7 +284,7 @@ siLNt/
 - [BIP352 — Silent Payments](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki)
 - [BIP353 — DNS Payment Instructions](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki)
 - [BIP352 Light Client Specification](https://github.com/setavenger/BIP0352-light-client-specification)
-- [BlindBit Oracle](https://github.com/setavenger/blindbit-oracle)
+- [BlindBit Oracle](https://github.com/ponthief/blindbit-oracle)
 
 ---
 
