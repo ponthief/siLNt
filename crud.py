@@ -164,12 +164,16 @@ async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> None:
         await db.execute(
             """INSERT INTO silnt.utxos (txid, vout, amount, priv_key_tweak, pub_key, utxo_state, timestamp, wallet_id)
             VALUES (:txid, :vout, :amount, :priv_key_tweak, :pub_key, :utxo_state, :timestamp, :wallet_id)
-            ON CONFLICT (txid, vout) DO UPDATE SET
-                utxo_state = EXCLUDED.utxo_state,
+            ON CONFLICT (txid) DO UPDATE SET
                 amount = EXCLUDED.amount,
                 priv_key_tweak = EXCLUDED.priv_key_tweak,
-                pub_key = EXCLUDED.pub_key""",
-            utxo.to_db_row(wallet_id),
+                pub_key = EXCLUDED.pub_key,
+                utxo_state = CASE
+                    WHEN silnt.utxos.utxo_state IN ('spent', 'unconfirmed_spent')
+                    THEN silnt.utxos.utxo_state
+                    ELSE EXCLUDED.utxo_state
+                END""",
+            utxo.to_db_row(wallet_id)
         )                
 
 async def update_unconfirmed_utxo(wallet_id: str, txid: str):

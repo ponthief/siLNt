@@ -3,6 +3,7 @@ import coincurve
 import hashlib
 import httpx
 import io
+import struct
 from base64 import b64encode
 from embit import bip32, bip39, ec, finalizer, script
 from embit.networks import NETWORKS
@@ -503,35 +504,32 @@ def generate_labeled_sp_address(
 ) -> str:
     """
     Derive a BIP352 labeled Silent Payment address.
-    B_m = B_spend + hash(b_scan || m) * G
+    B_m = B_spend + TaggedHash("BIP0352/Label", b_scan || ser32(m)) * G
     m=0 is reserved for change, user labels start at m=1
-    """    
-
+    """
     scan_secret_bytes = bytes.fromhex(scan_secret_hex)
     spend_pub_bytes = bytes.fromhex(spend_pub_hex)
 
-    # hash("BIP0352/Label" || b_scan || m)
-    tag = b"BIP0352/Label"
-    tag_hash = hashlib.sha256(tag).digest()
+    # BIP352: TaggedHash("BIP0352/Label", scan_secret || ser32(m)) — big-endian
+    tag_hash = hashlib.sha256("BIP0352/Label".encode()).digest()
     label_hash = hashlib.sha256(
-        tag_hash + tag_hash + scan_secret_bytes + m.to_bytes(4, 'little')
+        tag_hash + tag_hash + scan_secret_bytes + struct.pack(">I", m)
     ).digest()
 
     # B_m = B_spend + label_hash * G
-    label_point = coincurve.PublicKey.from_secret(label_hash)
-    spend_pub = coincurve.PublicKey(spend_pub_bytes)
-    B_m = coincurve.PublicKey.combine_keys([spend_pub, label_point])
-    B_m_bytes = B_m.format(compressed=True)
+    B_m = coincurve.PublicKey.combine_keys([
+        coincurve.PublicKey(spend_pub_bytes),
+        coincurve.PublicKey.from_secret(label_hash),
+    ]).format(compressed=True)
 
-    # Encode as SP address: B_scan || B_m
+    # B_scan pubkey
     B_scan = coincurve.PublicKey.from_secret(scan_secret_bytes).format(compressed=True)
-    
-    address = bech32_encode(
+
+    return bech32_encode(
         hrp,
-        [0] + convertbits(B_scan + B_m_bytes, 8, 5),
+        [0] + convertbits(B_scan + B_m, 8, 5),
         Encoding.BECH32M
     )
-    return address
 
 
 def get_spend_pub_from_secret(spend_secret_hex: str) -> str:
