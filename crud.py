@@ -15,7 +15,6 @@ db = Database("ext_silnt")
 
 # Singleton row ID for the global blindbit config
 BLINDBIT_CONFIG_ID = "blindbit"
-SILNT_SECRET_ID = "silnt_to_rule_them_all"
 
 
 async def create_silnt_wallet(wallet: WalletAccount) -> WalletAccount:
