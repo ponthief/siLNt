@@ -134,23 +134,6 @@ async def get_spend_key(wallet_id: str) -> Optional[str]:
     return row["spend_key"] if row else None
 
 
-async def get_or_create_server_secret() -> str:
-    row = await db.fetchone(
-        "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
-        {"id": SILNT_SECRET_ID},
-    )
-    if row:
-        return json.loads(row["json_data"])["secret"]
-
-    # Generate new secret on first use
-    server_secret = secrets.token_hex(32)
-    await db.execute(
-        "INSERT INTO silnt.blindbit_config (id, json_data) VALUES (:id, :json_data)",
-        {"id": SILNT_SECRET_ID, "json_data": json.dumps({"secret": server_secret})},
-    )
-    return server_secret
-
-
 async def get_utxos_for_wallet(wallet_id: str) -> list[UTXORecord]:
     return await db.fetchall(
         "SELECT * FROM silnt.utxos WHERE wallet_id = :wallet_id ORDER BY timestamp DESC",
@@ -159,8 +142,8 @@ async def get_utxos_for_wallet(wallet_id: str) -> list[UTXORecord]:
     )
 
 
-async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> None:    
-    for utxo in utxos:        
+async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> None:
+    for utxo in utxos:
         await db.execute(
             """INSERT INTO silnt.utxos (txid, vout, amount, priv_key_tweak, pub_key, utxo_state, timestamp, wallet_id)
             VALUES (:txid, :vout, :amount, :priv_key_tweak, :pub_key, :utxo_state, :timestamp, :wallet_id)
@@ -173,20 +156,23 @@ async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> None:
                     THEN silnt.utxos.utxo_state
                     ELSE EXCLUDED.utxo_state
                 END""",
-            utxo.to_db_row(wallet_id)
-        )                
+            utxo.to_db_row(wallet_id),
+        )
+
 
 async def update_unconfirmed_utxo(wallet_id: str, txid: str):
-     await db.execute(
-            "UPDATE silnt.utxos SET utxo_state = 'unconfirmed_spent' WHERE txid = :txid AND wallet_id = :wallet_id",
-            {"txid": txid, "wallet_id": wallet_id}
-        )
+    await db.execute(
+        "UPDATE silnt.utxos SET utxo_state = 'unconfirmed_spent' WHERE txid = :txid AND wallet_id = :wallet_id",
+        {"txid": txid, "wallet_id": wallet_id},
+    )
+
 
 async def get_wallet_addresses(wallet_id: str) -> list:
     return await db.fetchall(
         "SELECT * FROM silnt.wallet_addresses WHERE wallet_id = :wallet_id ORDER BY label_index ASC",
         {"wallet_id": wallet_id},
     )
+
 
 async def count_wallet_addresses(wallet_id: str) -> int:
     row = await db.fetchone(
@@ -195,7 +181,10 @@ async def count_wallet_addresses(wallet_id: str) -> int:
     )
     return row["cnt"] if row else 0
 
-async def insert_wallet_address(wallet_id: str, sp_address: str, label_index: int, address_id) -> None:       
+
+async def insert_wallet_address(
+    wallet_id: str, sp_address: str, label_index: int, address_id
+) -> None:
     await db.execute(
         """INSERT INTO silnt.wallet_addresses (id, wallet_id, sp_address, label_index, created_at)
            VALUES (:id, :wallet_id, :sp_address, :label_index, :created_at)""",
@@ -204,23 +193,24 @@ async def insert_wallet_address(wallet_id: str, sp_address: str, label_index: in
             "wallet_id": wallet_id,
             "sp_address": sp_address,
             "label_index": label_index,
-            "created_at": int(time.time())            
-        }
+            "created_at": int(time.time()),
+        },
     )
-    
 
 
-async def delete_wallet_addresses(wallet_id: str) -> None:
+async def delete_wallet_label_addresses(wallet_id: str) -> None:
     await db.execute(
         "DELETE FROM silnt.wallet_addresses WHERE wallet_id = :wallet_id",
         {"wallet_id": wallet_id},
     )
 
-async def delete_wallet_address(address_id: str, wallet_id: str) -> None:
+
+async def delete_wallet_label_address(address_id: str, wallet_id: str) -> None:
     await db.execute(
         "DELETE FROM silnt.wallet_addresses WHERE id = :id AND wallet_id = :wallet_id",
         {"id": address_id, "wallet_id": wallet_id},
     )
+
 
 # ── Global admin-only blindbit config ───────────────────────────────────────
 

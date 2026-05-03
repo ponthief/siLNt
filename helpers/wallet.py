@@ -2,7 +2,9 @@ import base64
 import coincurve
 import hashlib
 import httpx
+import hmac
 import io
+import math
 import struct
 from base64 import b64encode
 from embit import bip32, bip39, ec, finalizer, script
@@ -11,7 +13,8 @@ from binascii import hexlify
 from .curve import bech32_encode, Encoding
 from .curve import pubkey_point_gen_from_int, int_from_bytes, Point
 from loguru import logger
-from ..crud import get_or_create_server_secret
+
+# from ..crud import get_or_create_server_secret
 from lnbits.utils.crypto import AESCipher
 from cryptography.fernet import Fernet
 from embit.transaction import (
@@ -40,20 +43,42 @@ from .curve import (
 from embit.ec import SchnorrSig
 
 
-
-def encrypt_spend_key(spend_priv_hex: str, scan_key_hex: str) -> str:
-    # Derive a 32-byte Fernet key from scan_key_hex
-    key_bytes = hashlib.sha256(scan_key_hex.encode()).digest()
-    fernet_key = base64.urlsafe_b64encode(key_bytes)
-    f = Fernet(fernet_key)
-    return f.encrypt(spend_priv_hex.encode()).decode()
+# ── New adminkey-based encryption (add after existing Fernet imports) ─────────
 
 
-def decrypt_spend_key(encrypted: str, scan_key_hex: str) -> str:
-    key_bytes = hashlib.sha256(scan_key_hex.encode()).digest()
-    fernet_key = base64.urlsafe_b64encode(key_bytes)
-    f = Fernet(fernet_key)
-    return f.decrypt(encrypted.encode()).decode()
+def derive_wallet_key(adminkey: str, wallet_id: str) -> bytes:
+    """Derive a per-wallet 32-byte key from adminkey + wallet_id via HMAC-SHA256.
+    Never stored — must be re-derived on every use from the caller's adminkey."""
+    return hmac.new(
+        adminkey.encode(), msg=wallet_id.encode(), digestmod=hashlib.sha256
+    ).digest()
+
+
+def encrypt_for_wallet(plaintext: str, adminkey: str, wallet_id: str) -> str:
+    """Fernet-encrypt a string using a key derived from adminkey + wallet_id."""
+    key = base64.urlsafe_b64encode(derive_wallet_key(adminkey, wallet_id))
+    return Fernet(key).encrypt(plaintext.encode()).decode()
+
+
+def decrypt_for_wallet(encrypted: str, adminkey: str, wallet_id: str) -> str:
+    """Fernet-decrypt a value produced by encrypt_for_wallet."""
+    key = base64.urlsafe_b64encode(derive_wallet_key(adminkey, wallet_id))
+    return Fernet(key).decrypt(encrypted.encode()).decode()
+
+
+# def encrypt_spend_key(spend_priv_hex: str, scan_key_hex: str) -> str:
+#     # Derive a 32-byte Fernet key from scan_key_hex
+#     key_bytes = hashlib.sha256(scan_key_hex.encode()).digest()
+#     fernet_key = base64.urlsafe_b64encode(key_bytes)
+#     f = Fernet(fernet_key)
+#     return f.encrypt(spend_priv_hex.encode()).decode()
+
+
+# def decrypt_spend_key(encrypted: str, scan_key_hex: str) -> str:
+#     key_bytes = hashlib.sha256(scan_key_hex.encode()).digest()
+#     fernet_key = base64.urlsafe_b64encode(key_bytes)
+#     f = Fernet(fernet_key)
+#     return f.decrypt(encrypted.encode()).decode()
 
 
 def get_seed(mnemonic) -> bytes:
@@ -104,10 +129,10 @@ async def generate_silent_wallet_address(mnemonic) -> tuple:
     # Encrypt spend private key using scan key as encryption key
     spend_priv_hex = hexlify(key_material["spend_priv_key"]).decode()
     scan_key_hex = key_material["scank"]
-    encrypted_spend_key = encrypt_spend_key(spend_priv_hex, scan_key_hex)
-    # Encrypt scan secret using server secret
-    encrypted_scan_secret = await encrypt_secret(scan_key_hex)
-    return (str(sp), encrypted_scan_secret, str(encrypted_spend_key))
+    # encrypted_spend_key = encrypt_spend_key(spend_priv_hex, scan_key_hex)
+    # # Encrypt scan secret using server secret
+    # encrypted_scan_secret = await encrypt_secret(scan_key_hex)
+    return (str(sp), scan_key_hex, spend_priv_hex)
 
 
 def parse_sp_address(sp_address: str) -> tuple:
@@ -216,7 +241,7 @@ def build_transaction(
     spend_key_hex: str,
     recipient: str,
     amount: int,
-    fee_rate: int,
+    fee_rate: float,
     utxos: list[dict],
     network: str = "Mainnet",
 ) -> dict:
@@ -281,15 +306,32 @@ def build_transaction(
     total_input = sum(u["amount"] for u in utxos)
     # Estimate vsize: 10 base + 57.5 per taproot input + 31 per output
     estimated_vsize = int(10 + (57.5 * len(utxos)) + (31 * 2))
-    fee = estimated_vsize * fee_rate
+    # Round up to nearest sat — floor would underpay, ceil ensures broadcast
+    fee = max(1, math.ceil(estimated_vsize * fee_rate))
+    # fee = estimated_vsize * fee_rate
     change_amount = total_input - amount - fee
-
     if change_amount < 0:
         raise ValueError(
             f"Insufficient funds. Need {amount + fee} sats "
             f"(including {fee} sats fee), have {total_input} sats."
         )
 
+    # If change is below dust threshold, try two strategies:
+    if 0 < change_amount < 546:
+        # Strategy 1: reduce amount to make change viable
+        reduced_amount = amount - (546 - change_amount)
+        if reduced_amount >= 546:
+            change_amount = total_input - reduced_amount - fee
+            amount = reduced_amount
+            logger.debug(
+                f"Adjusted amount to {amount} sats to avoid dust change "
+                f"— change now {change_amount} sats"
+            )
+        else:
+            # Strategy 2: add dust to fee — can't reduce amount further
+            logger.debug(f"Change {change_amount} sats below dust — adding to fee")
+            fee += change_amount
+            change_amount = 0
     # ── 5. Build inputs ───────────────────────────────────────────────────
     tx_inputs_with_keys = [
         (
@@ -312,7 +354,7 @@ def build_transaction(
     # ── 6. Build outputs ──────────────────────────────────────────────────
     tx_outputs = [TransactionOutput(amount, recipient_script)]
 
-    if change_amount > 546:
+    if change_amount >= 546:
         change_script = input_scripts_sorted[0][0]
         tx_outputs.append(TransactionOutput(change_amount, change_script))
 
@@ -375,9 +417,11 @@ def build_transaction(
         "tx_hex": tx_hex,
         "fee": fee,
         "amount": amount,
-        "change": change_amount if change_amount > 546 else 0,
+        "change": change_amount,
         "total_input": total_input,
         "recipient": recipient,
+        "fee_rate_used": fee_rate,
+        "vsize": estimated_vsize,
     }
 
 
@@ -395,22 +439,6 @@ def decrypt_mnemonic(
     if not m:
         return None
     return AESCipher(key=k).decrypt(m, urlsafe=urlsafe)
-
-
-async def encrypt_secret(value: str) -> str:
-    server_secret = await get_or_create_server_secret()
-    key_bytes = hashlib.sha256(server_secret.encode()).digest()
-    fernet_key = base64.urlsafe_b64encode(key_bytes)
-    f = Fernet(fernet_key)
-    return f.encrypt(value.encode()).decode()
-
-
-async def decrypt_secret(encrypted: str) -> str:
-    server_secret = await get_or_create_server_secret()
-    key_bytes = hashlib.sha256(server_secret.encode()).digest()
-    fernet_key = base64.urlsafe_b64encode(key_bytes)
-    f = Fernet(fernet_key)
-    return f.decrypt(encrypted.encode()).decode()
 
 
 def sha256(data: bytes) -> bytes:
@@ -432,7 +460,7 @@ def taproot_sighash(
 ) -> bytes:
     """
     Compute BIP341 taproot key-path sighash manually.
-    """    
+    """
 
     # sha_prevouts
     prevouts = b""
@@ -496,11 +524,9 @@ def taproot_sighash(
     )
     return tagged_hash("TapSighash", preimage)
 
+
 def generate_labeled_sp_address(
-    scan_secret_hex: str,
-    spend_pub_hex: str,
-    m: int,
-    hrp: str = 'sp'
+    scan_secret_hex: str, spend_pub_hex: str, m: int, hrp: str = "sp"
 ) -> str:
     """
     Derive a BIP352 labeled Silent Payment address.
@@ -517,22 +543,20 @@ def generate_labeled_sp_address(
     ).digest()
 
     # B_m = B_spend + label_hash * G
-    B_m = coincurve.PublicKey.combine_keys([
-        coincurve.PublicKey(spend_pub_bytes),
-        coincurve.PublicKey.from_secret(label_hash),
-    ]).format(compressed=True)
+    B_m = coincurve.PublicKey.combine_keys(
+        [
+            coincurve.PublicKey(spend_pub_bytes),
+            coincurve.PublicKey.from_secret(label_hash),
+        ]
+    ).format(compressed=True)
 
     # B_scan pubkey
     B_scan = coincurve.PublicKey.from_secret(scan_secret_bytes).format(compressed=True)
 
-    return bech32_encode(
-        hrp,
-        [0] + convertbits(B_scan + B_m, 8, 5),
-        Encoding.BECH32M
-    )
+    return bech32_encode(hrp, [0] + convertbits(B_scan + B_m, 8, 5), Encoding.BECH32M)
 
 
 def get_spend_pub_from_secret(spend_secret_hex: str) -> str:
-    """Derive compressed spend public key from spend private key hex."""    
+    """Derive compressed spend public key from spend private key hex."""
     pub = coincurve.PublicKey.from_secret(bytes.fromhex(spend_secret_hex))
     return pub.format(compressed=True).hex()

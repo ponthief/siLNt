@@ -6,11 +6,11 @@ import hashlib
 from .helpers.wallet import (
     generate_silent_wallet_address,
     decrypt_mnemonic,
-    decrypt_spend_key,
-    decrypt_secret,
+    encrypt_for_wallet,
+    decrypt_for_wallet,
     build_transaction,
     generate_labeled_sp_address,
-    get_spend_pub_from_secret
+    get_spend_pub_from_secret,
 )
 from .helpers.scan import scan_wallet, get_scan_progress, request_scan_stop
 from .helpers.address_resolver import bip353_resolve
@@ -40,8 +40,9 @@ from .crud import (
     update_unconfirmed_utxo,
     get_wallet_addresses,
     count_wallet_addresses,
-    insert_wallet_address,    
-    delete_wallet_address
+    insert_wallet_address,
+    delete_wallet_label_address,
+    delete_wallet_label_addresses,
 )
 
 from .models import (
@@ -50,17 +51,15 @@ from .models import (
     WalletAccount,
     BuildTxRequest,
     BroadcastTxRequest,
-    Config,    
+    Config,
     ScanWalletRequest,
     SaveAddressRequest,
-    PreviewAddressRequest
+    PreviewAddressRequest,
 )
-
 
 MAX_ADDRESSES_PER_WALLET = 10
 
 silnt_api_router = APIRouter()
-
 
 
 # ── Wallets ──────────────────────────────────────────────────────────────────
@@ -91,8 +90,9 @@ async def api_wallet_create(
     data: CreateWallet, key_info: WalletTypeInfo = Depends(require_invoice_key)
 ) -> str:
     try:
+        wallet_id = urlsafe_short_hash()
         new_wallet = WalletAccount(
-            id=urlsafe_short_hash(),
+            id=wallet_id,
             user=key_info.wallet.user,
             title=data.title,
             balance=0,
@@ -103,10 +103,14 @@ async def api_wallet_create(
             spend_key="",
             scan_secret="",
         )
-        (sp_address, scan_secret, spend_key) = await generate_silent_wallet_address(
+        (
+            sp_address,
+            scan_secret_hex,
+            spend_key_hex,
+        ) = await generate_silent_wallet_address(
             decrypt_mnemonic(data.mnemonic, str(data.last_height))
         )
-        if not all([sp_address, scan_secret, spend_key]):
+        if not all([sp_address, scan_secret_hex, spend_key_hex]):
             raise ValueError(
                 f"Wallet '{data.title}' cannot be created with given mnemonic!"
             )
@@ -142,8 +146,11 @@ async def api_wallet_create(
                     status_code=HTTPStatus.BAD_REQUEST,
                     detail=f"BIP353 resolution failed for {data.hr_address}: {str(e)}",
                 )
-        new_wallet.scan_secret = scan_secret
-        new_wallet.spend_key = spend_key
+        adminkey = key_info.wallet.adminkey
+        new_wallet.scan_secret = encrypt_for_wallet(
+            scan_secret_hex, adminkey, wallet_id
+        )
+        new_wallet.spend_key = encrypt_for_wallet(spend_key_hex, adminkey, wallet_id)
         new_wallet.sp_address = sp_address
         await create_silnt_wallet(new_wallet)
     except Exception as exc:
@@ -166,13 +173,11 @@ async def api_wallet_update(
                 status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
             )
         if data.hr_address is not None and data.hr_address != wallet.hr_address:
-            # Validate BIP353 resolves to this wallet's SP address            
+            # Validate BIP353 resolves to this wallet's SP address
             try:
                 resolved = bip353_resolve(data.hr_address)
                 result = resolved.get("result", "")
-                result = (
-                    result.replace("bitcoin:?sp=", "").replace("sp=", "").strip()
-                )
+                result = result.replace("bitcoin:?sp=", "").replace("sp=", "").strip()
                 if result.lower() != wallet.sp_address.lower():
                     raise HTTPException(
                         status_code=HTTPStatus.BAD_REQUEST,
@@ -210,18 +215,19 @@ async def api_wallet_delete(wallet_id: str):
         )
     await delete_silnt_wallet(wallet_id)
     await delete_utxos_for_wallet(wallet_id)
-    await delete_wallet_addresses(wallet_id)
+    await delete_wallet_label_addresses(wallet_id)
     return "", HTTPStatus.NO_CONTENT
 
 
 @silnt_api_router.get("/api/v1/wallet/{wallet_id}/addresses")
 async def api_get_wallet_addresses(
-    wallet_id: str,
-    key_info: WalletTypeInfo = Depends(require_invoice_key)
+    wallet_id: str, key_info: WalletTypeInfo = Depends(require_invoice_key)
 ):
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
-        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
+        )
     if wallet.user != key_info.wallet.user:
         raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
     addresses = await get_wallet_addresses(wallet_id)
@@ -232,51 +238,55 @@ async def api_get_wallet_addresses(
 async def api_preview_wallet_address(
     wallet_id: str,
     data: PreviewAddressRequest,
-    key_info: WalletTypeInfo = Depends(require_invoice_key)
+    key_info: WalletTypeInfo = Depends(require_invoice_key),
 ):
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
-        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
+        )
     if wallet.user != key_info.wallet.user:
         raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
 
-    scan_secret = await decrypt_secret(wallet.scan_secret)
-    spend_key_encrypted = await get_spend_key(wallet_id)
-    spend_key_hex = decrypt_spend_key(spend_key_encrypted, scan_secret)
+    adminkey = key_info.wallet.adminkey
+    scan_secret = decrypt_for_wallet(wallet.scan_secret, adminkey, wallet_id)
+    spend_key_hex = decrypt_for_wallet(wallet.spend_key, adminkey, wallet_id)
     spend_pub_hex = get_spend_pub_from_secret(spend_key_hex)
-    hrp = 'sp'
 
     try:
         sp_address = generate_labeled_sp_address(
             scan_secret_hex=scan_secret,
             spend_pub_hex=spend_pub_hex,
             m=data.label_index,
-            hrp=hrp
+            hrp="sp",
         )
     except Exception as e:
         raise HTTPException(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-            detail=f"Failed to generate address: {str(e)}"
+            detail=f"Failed to generate address: {str(e)}",
         )
 
     return {
         "sp_address": sp_address,
         "label_index": data.label_index,
-        "wallet_id": wallet_id
+        "wallet_id": wallet_id,
     }
+
 
 @silnt_api_router.delete("/api/v1/wallet/{wallet_id}/addresses/{address_id}")
 async def api_delete_wallet_address(
     wallet_id: str,
     address_id: str,
-    key_info: WalletTypeInfo = Depends(require_invoice_key)
+    key_info: WalletTypeInfo = Depends(require_invoice_key),
 ):
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
-        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
+        )
     if wallet.user != key_info.wallet.user:
         raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
-    await delete_wallet_address(address_id, wallet_id)
+    await delete_wallet_label_address(address_id, wallet_id)
     return "", HTTPStatus.NO_CONTENT
 
 
@@ -284,11 +294,13 @@ async def api_delete_wallet_address(
 async def api_save_generated_wallet_address(
     wallet_id: str,
     data: SaveAddressRequest,
-    key_info: WalletTypeInfo = Depends(require_invoice_key)
+    key_info: WalletTypeInfo = Depends(require_invoice_key),
 ):
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
-        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
+        )
     if wallet.user != key_info.wallet.user:
         raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
 
@@ -296,7 +308,7 @@ async def api_save_generated_wallet_address(
     if count >= MAX_ADDRESSES_PER_WALLET:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
-            detail=f"Maximum of {MAX_ADDRESSES_PER_WALLET} addresses per wallet reached."
+            detail=f"Maximum of {MAX_ADDRESSES_PER_WALLET} addresses per wallet reached.",
         )
     addr_id = urlsafe_short_hash()
     await insert_wallet_address(wallet_id, data.sp_address, data.label_index, addr_id)
@@ -304,8 +316,9 @@ async def api_save_generated_wallet_address(
         "sp_address": data.sp_address,
         "label_index": data.label_index,
         "wallet_id": wallet_id,
-        "id": addr_id
+        "id": addr_id,
     }
+
 
 @silnt_api_router.get(
     "/api/v1/oracle/tip",
@@ -392,6 +405,7 @@ async def api_scan_wallet(
     try:
         result = await scan_wallet(
             wallet_id=wallet_id,
+            adminkey=key_info.wallet.adminkey,
             from_height=data.from_height,
             to_height=data.to_height,
         )
@@ -432,48 +446,42 @@ async def api_resolve_bip353(
 
 # Transactions
 @silnt_api_router.post("/api/v1/tx/build", dependencies=[Depends(require_admin_key)])
-async def api_build_transaction(data: BuildTxRequest):
+async def api_build_transaction(
+    data: BuildTxRequest, key_info: WalletTypeInfo = Depends(require_admin_key)
+):
     try:
-        # ── Load wallet ───────────────────────────────────────────────
         wallet = await get_silnt_wallet(data.wallet_id)
         if not wallet:
             raise HTTPException(
                 status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
             )
-
-        # ── Decrypt keys ──────────────────────────────────────────────
-        spend_key_encrypted = await get_spend_key(data.wallet_id)
-        if not spend_key_encrypted:
+        if wallet.user != key_info.wallet.user:
             raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST,
-                detail="No spend key found for this wallet.",
+                status_code=HTTPStatus.FORBIDDEN, detail="Access denied."
             )
 
-        scan_secret = await decrypt_secret(wallet.scan_secret)
-        if not scan_secret:
+        adminkey = key_info.wallet.adminkey
+        scan_secret = decrypt_for_wallet(wallet.scan_secret, adminkey, data.wallet_id)
+        spend_key_hex = decrypt_for_wallet(wallet.spend_key, adminkey, data.wallet_id)
+
+        if not scan_secret or not spend_key_hex:
             raise HTTPException(
                 status_code=HTTPStatus.BAD_REQUEST,
-                detail="Failed to decrypt scan secret.",
+                detail="Failed to decrypt wallet keys.",
             )
 
-        spend_key_hex = decrypt_spend_key(spend_key_encrypted, scan_secret)
-        if not spend_key_hex:
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST,
-                detail="Failed to decrypt spend key.",
-            )
         if "@" in data.recipient:
             user, domain = data.recipient.strip().split("@")
-            if user is not None and domain is not None:
+            if user and domain:
                 resolved = bip353_resolve(data.recipient)
                 result = resolved["result"].replace("bitcoin:?sp=", "")
                 if not result.startswith("sp1"):
                     raise HTTPException(
                         status_code=HTTPStatus.BAD_REQUEST,
-                        detail="Address must resolve to SilenPayment address (sp1).",
+                        detail="Address must resolve to Silent Payment address (sp1).",
                     )
                 data.recipient = result
-        # ── Build transaction ─────────────────────────────────────────
+
         result = build_transaction(
             spend_key_hex=spend_key_hex,
             recipient=data.recipient,
@@ -483,7 +491,6 @@ async def api_build_transaction(data: BuildTxRequest):
             network=wallet.network,
         )
         return result
-
     except HTTPException:
         raise
     except Exception as exc:
@@ -497,11 +504,11 @@ async def api_build_transaction(data: BuildTxRequest):
 @silnt_api_router.post(
     "/api/v1/tx/broadcast", dependencies=[Depends(require_admin_key)]
 )
-async def api_broadcast_transaction(data: BroadcastTxRequest):    
+async def api_broadcast_transaction(data: BroadcastTxRequest):
     try:
         blindbit = await get_blindbit_config()
         config = Config()
-        base = (blindbit.mempool_url or "https://mempool.space" ).rstrip("/")
+        base = (blindbit.mempool_url or "https://mempool.space").rstrip("/")
         mempool_url = f"{base}/api/tx"
 
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -515,9 +522,11 @@ async def api_broadcast_transaction(data: BroadcastTxRequest):
                 )
             txid = resp.text.strip()
             if data.spent_txids and data.wallet_id:
-               for spent_txid in data.spent_txids:
-                   await update_unconfirmed_utxo(data.wallet_id, spent_txid)            
-               logger.info(f"Marked {len(data.spent_txids)} UTXOs as unconfirmed_spent after broadcast of {txid}")
+                for spent_txid in data.spent_txids:
+                    await update_unconfirmed_utxo(data.wallet_id, spent_txid)
+                logger.info(
+                    f"Marked {len(data.spent_txids)} UTXOs as unconfirmed_spent after broadcast of {txid}"
+                )
             return {"txid": txid}
 
     except HTTPException:
@@ -540,7 +549,7 @@ async def api_get_config(
     blindbit = await get_blindbit_config()
     config = Config()
     return {
-        "mempool_endpoint": blindbit.mempool_url or  "https://mempool.space",
+        "mempool_endpoint": blindbit.mempool_url or "https://mempool.space",
         "sats_denominated": config.sats_denominated,
         "network": config.network,
     }

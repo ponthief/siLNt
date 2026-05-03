@@ -51,6 +51,7 @@ async def m001_initial(db):
         """
     )
 
+
 async def m002_subaccounts(db):
     await db.execute("""
     CREATE TABLE IF NOT EXISTS silnt.wallet_addresses (

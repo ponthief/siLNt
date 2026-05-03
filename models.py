@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 class BlindbitConfig(BaseModel):
     blindbit_url: str = ""
-    mempool_url: str = "https://mempool.space" 
+    mempool_url: str = "https://mempool.space"
 
 
 class CreateWallet(BaseModel):
@@ -53,7 +53,7 @@ class BuildTxRequest(BaseModel):
     wallet_id: str
     recipient: str
     amount: int
-    fee_rate: int = 1
+    fee_rate: float = 1
     memo: str = ""
     utxos: list[dict] = []  # each: {txid, amount, vout}
 
@@ -64,9 +64,10 @@ class BroadcastTxRequest(BaseModel):
     spent_txids: list[str] = []
 
 
-class Config(BaseModel):    
+class Config(BaseModel):
     sats_denominated: bool = True
     network: str = "mainnet"
+
 
 class WalletAddress(BaseModel):
     id: str
@@ -75,8 +76,10 @@ class WalletAddress(BaseModel):
     label_index: int
     created_at: int = 0
 
+
 class PreviewAddressRequest(BaseModel):
     label_index: int
+
 
 class SaveAddressRequest(BaseModel):
     sp_address: str

@@ -32,6 +32,8 @@ window.app = Vue.createApp({
       },
       showBroadcastConfirm: false,
       sendTxFee: 0,
+      sendTxAmount: 0,
+      sendTxVsize: 0,
       ...tables,
       ...tableData,
       walletAccounts: [],            
@@ -44,13 +46,13 @@ window.app = Vue.createApp({
       sendForm: {
         recipient: '',
         amount: 0,
-        feeRate: 1,
+        feeRate: 1.0,
         memo: '',
         useAllUtxos: false
       },
       sendLoading: false,
       broadcastLoading: false,
-      sendTxResult: null         
+      sendTxResult: null      
     }
   },
   computed: {
@@ -310,6 +312,8 @@ window.app = Vue.createApp({
     openSendDialog: function (wallet) {
       this.sendWallet = wallet
       this.sendTxResult = null
+      this.sendTxAmount = 0
+      this.sendTxVsize = 0
       this.sendForm = {
         recipient: '',
         amount: 0,
@@ -346,7 +350,7 @@ window.app = Vue.createApp({
             wallet_id: this.sendWallet.id,
             recipient: this.sendForm.recipient,
             amount: this.sendForm.useAllUtxos ? this.sendSelectedTotal : this.sendForm.amount,
-            fee_rate: this.sendForm.feeRate,
+            fee_rate: Math.max(0.1, parseFloat(this.sendForm.feeRate)) || 0.1,
             memo: this.sendForm.memo,
             utxos: selectedUtxos.map(u => ({
               txid: u.txid,
@@ -359,7 +363,9 @@ window.app = Vue.createApp({
           }
         )        
         this.sendTxResult = data.psbt || data.tx_hex || JSON.stringify(data)
-        this.sendTxFee = data.fee 
+        this.sendTxFee = data.fee
+        this.sendTxAmount = data.amount      // ← store actual amount from backend
+        this.sendTxVsize = data.vsize        // ← store vsize for display
         this.$q.notify({
           type: 'positive',
           message: 'Transaction built successfully.',

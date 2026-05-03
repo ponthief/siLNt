@@ -102,11 +102,6 @@ def bytes_from_point(P: Point) -> bytes:
     return bytes_from_int(x(P))
 
 
-# Get bytes from a hex
-# def bytes_from_hex(a: str) -> bytes:
-#     return unhexlify(a)
-
-
 def convertbits(
     data: bytes, frombits: int, tobits: int, pad: bool = True
 ) -> Optional[list[int]]:
