@@ -80,27 +80,30 @@ window.app.component('wallet-list', {
     }
   },  
   watch: {
-  scannedUtxos: {
-    deep: true,
-    handler(result) {      
-      if (!result || !result.utxos || !result.utxos.length) return
+      scannedUtxos: {
+        deep: true,
+        handler(result) {
+          if (!result || !result.utxos || !result.utxos.length) return
 
-      const newBalance = result.utxos
-          .filter(u => u.utxo_state === 'unspent')         
-          .reduce((sum, u) => sum + (u.amount || 0), 0)      
-      this.walletAccounts.forEach(async wallet => {        
-        // Only update if balance actually changed
-        if (newBalance === wallet.balance) return
+          // Get wallet_id from the UTXOs themselves
+          const walletId = result.utxos[0]?.wallet_id
+          if (!walletId) return
 
-        // Update backend first
-        await this.updateWalletBalance(wallet.id, newBalance)
+          // Only update the specific wallet — not all wallets
+          const wallet = this.walletAccounts.find(w => w.id === walletId)
+          if (!wallet) return
 
-        // Then update local state reactively
-        wallet.balance = newBalance
-      })
-    }
-  }
-},
+          const newBalance = result.utxos
+            .filter(u => u.utxo_state === 'unspent')
+            .reduce((sum, u) => sum + (u.amount || 0), 0)
+
+          if (newBalance === wallet.balance) return
+
+          this.updateWalletBalance(wallet.id, newBalance)
+          wallet.balance = newBalance
+        }
+      }
+  },
   methods: {
     satBtc(val, showUnit = true) {
       return satOrBtc(val, showUnit, this.satsDenominated)
