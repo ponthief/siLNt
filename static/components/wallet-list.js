@@ -21,7 +21,8 @@ window.app.component('wallet-list', {
         data: {
           title: '',          
           hr_address: '',
-          last_height: ''          
+          last_height: '',
+          network: 'mainnet'          
         }
       },
       updateDialog: {
@@ -111,7 +112,7 @@ window.app.component('wallet-list', {
     addWalletAccount: async function () {
       this.showCreating = true
       const data = _.omit(this.formDialog.data, 'wallet')
-      data.network = this.network
+      data.network = this.formDialog.data.network || this.network
       // Validate BIP353 hr_address if provided
       if (data.hr_address && data.hr_address.trim() !== '') {
         const valid = await this.validateBip353(data.hr_address)
@@ -407,7 +408,8 @@ window.app.component('wallet-list', {
       this.formDialog.data = {               
         hr_address: '',     // ← empty string not null
         last_height: '',
-        mnemonic: '',     
+        mnemonic: '',
+        network: 'mainnet',     
         is_unique: false
       }
     },
@@ -424,7 +426,8 @@ window.app.component('wallet-list', {
       this.formDialog.data = {      
       hr_address: '',
       last_height: '',
-      mnemonic: ''
+      mnemonic: '',
+      network: 'mainnet'
     }
       this.formDialog.show = true      
     },

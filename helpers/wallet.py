@@ -2,7 +2,6 @@ import base64
 import coincurve
 import hashlib
 import httpx
-import hmac
 import io
 import math
 import struct
@@ -13,8 +12,6 @@ from binascii import hexlify
 from .curve import bech32_encode, Encoding
 from .curve import pubkey_point_gen_from_int, int_from_bytes, Point
 from loguru import logger
-
-# from ..crud import get_or_create_server_secret
 from lnbits.utils.crypto import AESCipher
 from cryptography.fernet import Fernet
 from embit.transaction import (
@@ -43,44 +40,6 @@ from .curve import (
 from embit.ec import SchnorrSig
 
 
-# ── New adminkey-based encryption (add after existing Fernet imports) ─────────
-
-
-def derive_wallet_key(adminkey: str, wallet_id: str) -> bytes:
-    """Derive a per-wallet 32-byte key from adminkey + wallet_id via HMAC-SHA256.
-    Never stored — must be re-derived on every use from the caller's adminkey."""
-    return hmac.new(
-        adminkey.encode(), msg=wallet_id.encode(), digestmod=hashlib.sha256
-    ).digest()
-
-
-def encrypt_for_wallet(plaintext: str, adminkey: str, wallet_id: str) -> str:
-    """Fernet-encrypt a string using a key derived from adminkey + wallet_id."""
-    key = base64.urlsafe_b64encode(derive_wallet_key(adminkey, wallet_id))
-    return Fernet(key).encrypt(plaintext.encode()).decode()
-
-
-def decrypt_for_wallet(encrypted: str, adminkey: str, wallet_id: str) -> str:
-    """Fernet-decrypt a value produced by encrypt_for_wallet."""
-    key = base64.urlsafe_b64encode(derive_wallet_key(adminkey, wallet_id))
-    return Fernet(key).decrypt(encrypted.encode()).decode()
-
-
-# def encrypt_spend_key(spend_priv_hex: str, scan_key_hex: str) -> str:
-#     # Derive a 32-byte Fernet key from scan_key_hex
-#     key_bytes = hashlib.sha256(scan_key_hex.encode()).digest()
-#     fernet_key = base64.urlsafe_b64encode(key_bytes)
-#     f = Fernet(fernet_key)
-#     return f.encrypt(spend_priv_hex.encode()).decode()
-
-
-# def decrypt_spend_key(encrypted: str, scan_key_hex: str) -> str:
-#     key_bytes = hashlib.sha256(scan_key_hex.encode()).digest()
-#     fernet_key = base64.urlsafe_b64encode(key_bytes)
-#     f = Fernet(fernet_key)
-#     return f.decrypt(encrypted.encode()).decode()
-
-
 def get_seed(mnemonic) -> bytes:
     """
     Re‑creates the BIP‑39 seed from the hard‑coded mnemonic.
@@ -90,20 +49,27 @@ def get_seed(mnemonic) -> bytes:
     return seed
 
 
-def generate_hardened_keys(seed) -> dict:
-    root = bip32.HDKey.from_seed(seed, version=NETWORKS["main"]["xprv"])
-    scan_private_key = root.derive("m/352h/0h/0h/1h/0").key.secret
-    spend_private_key = root.derive("m/352h/0h/0h/0h/0").key.secret
-    scank = root.derive("m/352h/0h/0h/1h/0").key.secret
-    spendk = root.derive("m/352h/0h/0h/0h/0")
-    # Store the keys in a dictionary
-    key_material = {
-        "scan_priv_key": scan_private_key,
+def generate_hardened_keys(seed, network: str = 'mainnet') -> dict:
+    # BIP352: coin_type 0 = mainnet, 1 = testnet/signet
+    coin_type = 0 if network == 'mainnet' else 1
+    xprv_version = NETWORKS["main"]["xprv"] if network == 'mainnet' else NETWORKS["test"]["xprv"]
+
+    root = bip32.HDKey.from_seed(seed, version=xprv_version)
+
+    scan_path  = f"m/352h/{coin_type}h/0h/1h/0"
+    spend_path = f"m/352h/{coin_type}h/0h/0h/0"
+
+    scan_private_key  = root.derive(scan_path).key.secret
+    spend_private_key = root.derive(spend_path).key.secret
+    scank  = root.derive(scan_path).key.secret
+    spendk = root.derive(spend_path)
+
+    return {
+        "scan_priv_key":  scan_private_key,
         "spend_priv_key": spend_private_key,
-        "scank": hexlify(scank).decode(),
+        "scank":  hexlify(scank).decode(),
         "spendk": spendk.get_public_key(),
     }
-    return key_material
 
 
 def encode_silent_payment_address(
@@ -119,19 +85,20 @@ def encode_silent_payment_address(
     return ret
 
 
-async def generate_silent_wallet_address(mnemonic) -> tuple:
+async def generate_silent_wallet_address(mnemonic, network: str = 'mainnet') -> tuple:
     seed = get_seed(mnemonic)
-    key_material = generate_hardened_keys(seed)
-    # Receiver's scan and spend public key
-    B_scan = pubkey_point_gen_from_int(int_from_bytes(key_material["scan_priv_key"]))
+    key_material = generate_hardened_keys(seed, network)
+
+    B_scan  = pubkey_point_gen_from_int(int_from_bytes(key_material["scan_priv_key"]))
     B_spend = pubkey_point_gen_from_int(int_from_bytes(key_material["spend_priv_key"]))
-    sp = encode_silent_payment_address(B_scan, B_spend, "sp", 0)
-    # Encrypt spend private key using scan key as encryption key
+
+    # mainnet → 'sp', signet/testnet → 'tsp'
+    hrp = 'sp' if network == 'mainnet' else 'tsp'
+    sp = encode_silent_payment_address(B_scan, B_spend, hrp, 0)
+
     spend_priv_hex = hexlify(key_material["spend_priv_key"]).decode()
-    scan_key_hex = key_material["scank"]
-    # encrypted_spend_key = encrypt_spend_key(spend_priv_hex, scan_key_hex)
-    # # Encrypt scan secret using server secret
-    # encrypted_scan_secret = await encrypt_secret(scan_key_hex)
+    scan_key_hex   = key_material["scank"]
+
     return (str(sp), scan_key_hex, spend_priv_hex)
 
 
@@ -292,7 +259,7 @@ def build_transaction(
         input_scripts.append((actual_script, actual_x_only))
 
     # ── 3. Recipient scriptpubkey ─────────────────────────────────────
-    if recipient.startswith("sp1"):
+    if recipient.startswith("sp1") or recipient.startswith("tsp1"):
         recipient_script = Script(
             derive_sp_scriptpubkey(recipient, spend_key.secret, utxos)
         )

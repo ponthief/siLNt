@@ -5,9 +5,7 @@ import httpx
 import hashlib
 from .helpers.wallet import (
     generate_silent_wallet_address,
-    decrypt_mnemonic,
-    encrypt_for_wallet,
-    decrypt_for_wallet,
+    decrypt_mnemonic,    
     build_transaction,
     generate_labeled_sp_address,
     get_spend_pub_from_secret,
@@ -19,6 +17,7 @@ from lnbits.core.models import WalletTypeInfo
 from lnbits.decorators import require_admin_key, require_invoice_key
 from lnbits.helpers import urlsafe_short_hash
 from loguru import logger
+from typing import Optional
 
 from .crud import (
     get_silnt_wallets,
@@ -33,8 +32,7 @@ from .crud import (
     update_balance,
     get_silnt_wallet,
     get_blindbit_config,
-    update_blindbit_config,
-    get_spend_key,
+    update_blindbit_config,    
     get_utxos_for_wallet,
     insert_utxos_for_wallet,
     update_unconfirmed_utxo,
@@ -67,7 +65,7 @@ silnt_api_router = APIRouter()
 
 @silnt_api_router.get("/api/v1/wallet", status_code=HTTPStatus.OK)
 async def api_wallets_retrieve(
-    network: str = Query("mainnet"),
+    network: Optional[str] = Query(None),
     key_info: WalletTypeInfo = Depends(require_invoice_key),
 ) -> list[WalletAccount]:
     return await get_silnt_wallets(key_info.wallet.user, network)
@@ -102,13 +100,13 @@ async def api_wallet_create(
             sp_address="",
             spend_key="",
             scan_secret="",
-        )
+        )        
         (
             sp_address,
             scan_secret_hex,
             spend_key_hex,
         ) = await generate_silent_wallet_address(
-            decrypt_mnemonic(data.mnemonic, str(data.last_height))
+            decrypt_mnemonic(data.mnemonic, str(data.last_height)), network=data.network
         )
         if not all([sp_address, scan_secret_hex, spend_key_hex]):
             raise ValueError(
@@ -116,18 +114,10 @@ async def api_wallet_create(
             )
 
         wallets = await get_silnt_wallets(key_info.wallet.user, data.network)
-        existing_wallet = next(
-            (
-                ew
-                for ew in wallets
-                if ew.sp_address == sp_address and ew.network == new_wallet.network
-            ),
-            None,
-        )
-        if existing_wallet:
+        if any(w.sp_address == sp_address for w in wallets):
             raise HTTPException(
                 status_code=HTTPStatus.BAD_REQUEST,
-                detail=f"Silent Payment Wallet already exists!",
+                detail="Silent Payment Wallet already exists!",
             )
         if data.hr_address:
             try:
@@ -146,18 +136,23 @@ async def api_wallet_create(
                     status_code=HTTPStatus.BAD_REQUEST,
                     detail=f"BIP353 resolution failed for {data.hr_address}: {str(e)}",
                 )
-        adminkey = key_info.wallet.adminkey
-        new_wallet.scan_secret = encrypt_for_wallet(
-            scan_secret_hex, adminkey, wallet_id
-        )
-        new_wallet.spend_key = encrypt_for_wallet(spend_key_hex, adminkey, wallet_id)
+        # adminkey = key_info.wallet.adminkey
+        # new_wallet.scan_secret = encrypt_for_wallet(
+            # scan_secret_hex, adminkey, wallet_id
+        # )
+        # new_wallet.spend_key = encrypt_for_wallet(spend_key_hex, adminkey, wallet_id)
         new_wallet.sp_address = sp_address
         await create_silnt_wallet(new_wallet)
     except Exception as exc:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST, detail=str(exc)
         ) from exc
-    return ""
+    return {
+        "wallet_id":    wallet_id,
+        "sp_address":   sp_address,
+        "scan_secret":  scan_secret_hex,   # client must store this securely
+        "spend_key":    spend_key_hex,     # client must store this securely
+    }
 
 
 @silnt_api_router.put("/api/v1/wallet/{wallet_id}", status_code=HTTPStatus.OK)
@@ -248,17 +243,15 @@ async def api_preview_wallet_address(
     if wallet.user != key_info.wallet.user:
         raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
 
-    adminkey = key_info.wallet.adminkey
-    scan_secret = decrypt_for_wallet(wallet.scan_secret, adminkey, wallet_id)
-    spend_key_hex = decrypt_for_wallet(wallet.spend_key, adminkey, wallet_id)
-    spend_pub_hex = get_spend_pub_from_secret(spend_key_hex)
+    spend_pub_hex = get_spend_pub_from_secret(data.spend_key)
+    hrp = 'sp' if wallet.network == 'mainnet' else 'tsp'
 
     try:
         sp_address = generate_labeled_sp_address(
-            scan_secret_hex=scan_secret,
+            scan_secret_hex=data.scan_secret,
             spend_pub_hex=spend_pub_hex,
             m=data.label_index,
-            hrp="sp",
+            hrp = hrp
         )
     except Exception as e:
         raise HTTPException(
@@ -405,7 +398,8 @@ async def api_scan_wallet(
     try:
         result = await scan_wallet(
             wallet_id=wallet_id,
-            adminkey=key_info.wallet.adminkey,
+            scan_secret_hex=data.scan_secret,     # from client request
+            spend_secret_hex=data.spend_key,
             from_height=data.from_height,
             to_height=data.to_height,
         )
@@ -460,15 +454,9 @@ async def api_build_transaction(
                 status_code=HTTPStatus.FORBIDDEN, detail="Access denied."
             )
 
-        adminkey = key_info.wallet.adminkey
-        scan_secret = decrypt_for_wallet(wallet.scan_secret, adminkey, data.wallet_id)
-        spend_key_hex = decrypt_for_wallet(wallet.spend_key, adminkey, data.wallet_id)
-
-        if not scan_secret or not spend_key_hex:
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST,
-                detail="Failed to decrypt wallet keys.",
-            )
+        if not data.spend_key:
+            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                detail="spend_key is required.")        
 
         if "@" in data.recipient:
             user, domain = data.recipient.strip().split("@")
@@ -483,7 +471,7 @@ async def api_build_transaction(
                 data.recipient = result
 
         result = build_transaction(
-            spend_key_hex=spend_key_hex,
+            spend_key_hex=data.spend_key,
             recipient=data.recipient,
             amount=data.amount,
             fee_rate=data.fee_rate,

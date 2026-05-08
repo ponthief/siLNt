@@ -18,7 +18,6 @@ from ..crud import (
     insert_utxos_for_wallet,
     update_balance,
 )
-from .wallet import decrypt_for_wallet
 
 _scan_progress: dict[str, dict] = {}
 _scan_stop: dict[str, bool] = {}
@@ -508,7 +507,8 @@ def set_scan_progress(wallet_id, current, total, found, active=True):
 
 async def scan_wallet(
     wallet_id: str,
-    adminkey: str,
+    scan_secret_hex: str,      # passed from client, never stored
+    spend_secret_hex: str,
     from_height: Optional[int] = None,
     to_height: Optional[int] = None,
 ) -> dict:
@@ -518,9 +518,7 @@ async def scan_wallet(
     blindbit = await get_blindbit_config()
     if not blindbit.blindbit_url:
         raise ValueError("BlindBit Oracle URL not configured")
-
-    scan_secret_hex = decrypt_for_wallet(wallet.scan_secret, adminkey, wallet_id)
-    spend_secret_hex = decrypt_for_wallet(wallet.spend_key, adminkey, wallet_id)
+    
     scan_secret_bytes = bytes.fromhex(scan_secret_hex)
     spend_secret_bytes = bytes.fromhex(spend_secret_hex)
     spend_pub_bytes = coincurve.PublicKey.from_secret(spend_secret_bytes).format(

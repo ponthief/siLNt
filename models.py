@@ -23,9 +23,7 @@ class WalletAccount(BaseModel):
     user: str
     title: str
     balance: int
-    network: str = "mainnet"
-    scan_secret: str
-    spend_key: str
+    network: str = "mainnet"    
     sp_address: str
     hr_address: str
     last_height: int
@@ -47,6 +45,8 @@ class UTXORecord(BaseModel):
 class ScanWalletRequest(BaseModel):
     from_height: Optional[int] = None
     to_height: Optional[int] = None
+    scan_secret:  str
+    spend_key:    str
 
 
 class BuildTxRequest(BaseModel):
@@ -55,7 +55,8 @@ class BuildTxRequest(BaseModel):
     amount: int
     fee_rate: float = 1
     memo: str = ""
-    utxos: list[dict] = []  # each: {txid, amount, vout}
+    utxos: list[dict] = []
+    spend_key:  str
 
 
 class BroadcastTxRequest(BaseModel):
@@ -79,7 +80,8 @@ class WalletAddress(BaseModel):
 
 class PreviewAddressRequest(BaseModel):
     label_index: int
-
+    scan_secret:  str
+    spend_key:    str
 
 class SaveAddressRequest(BaseModel):
     sp_address: str

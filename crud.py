@@ -30,13 +30,16 @@ async def get_silnt_wallet(wallet_id: str) -> Optional[WalletAccount]:
     )
 
 
-async def get_silnt_wallets(user: str, network: str) -> list[WalletAccount]:
+async def get_silnt_wallets(user: str, network: Optional[str] = None) -> list[WalletAccount]:
+    if network:
+        return await db.fetchall(
+            'SELECT * FROM silnt.wallets WHERE "user" = :user AND network = :network ORDER BY network, title',
+            {"user": user, "network": network},
+            WalletAccount,
+        )
     return await db.fetchall(
-        """
-        SELECT * FROM silnt.wallets
-        WHERE "user" = :user AND network = :network
-        """,
-        {"user": user, "network": network},
+        'SELECT * FROM silnt.wallets WHERE "user" = :user ORDER BY network, title',
+        {"user": user},
         WalletAccount,
     )
 
@@ -123,14 +126,6 @@ async def update_title(wallet_id: str, title: str) -> Optional[WalletAccount]:
         {"wid": wallet_id},
         WalletAccount,
     )
-
-
-async def get_spend_key(wallet_id: str) -> Optional[str]:
-    row = await db.fetchone(
-        "SELECT spend_key FROM silnt.wallets WHERE id = :id",
-        {"id": wallet_id},
-    )
-    return row["spend_key"] if row else None
 
 
 async def get_utxos_for_wallet(wallet_id: str) -> list[UTXORecord]:

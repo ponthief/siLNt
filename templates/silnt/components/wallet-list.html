@@ -69,13 +69,6 @@
               class="row items-center no-wrap q-mt-xs"
               style="border-left: 2px solid #9c27b0; padding-left: 6px"
             >
-            <q-badge
-                v-if="!addr.id"
-                color="warning"
-                text-color="dark"
-                class="q-mr-xs"
-                style="font-size:9px"
-              >unsaved</q-badge>
               <span class="col text-orange" style="font-family:monospace;font-size:10px;cursor:pointer">
                 <span v-text="addr.sp_address ? addr.sp_address.slice(0, 14) + '...' : ''"></span>
                 <q-tooltip v-text="addr.sp_address"></q-tooltip>
@@ -293,6 +286,19 @@
             Email format - see BIP353
       </q-tooltip>
     </q-input>
+      <div>
+        <div class="text-caption text-grey q-mb-xs">Network</div>
+        <q-btn-toggle
+          v-model="formDialog.data.network"
+          toggle-color="primary"
+          color="white"
+          text-color="primary"
+          :options="[
+            {label: 'Mainnet', value: 'mainnet'},
+            {label: 'Signet',  value: 'signet'}
+          ]"
+        ></q-btn-toggle>
+      </div>
       <div class="row q-mt-lg">
         <q-btn
           unelevated
