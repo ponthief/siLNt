@@ -86,7 +86,7 @@ async def api_wallet_retrieve(wallet_id: str) -> WalletAccount:
 @silnt_api_router.post("/api/v1/wallet", status_code=HTTPStatus.OK)
 async def api_wallet_create(
     data: CreateWallet, key_info: WalletTypeInfo = Depends(require_invoice_key)
-) -> str:
+) -> dict:
     try:
         wallet_id = urlsafe_short_hash()
         new_wallet = WalletAccount(
@@ -135,12 +135,7 @@ async def api_wallet_create(
                 raise HTTPException(
                     status_code=HTTPStatus.BAD_REQUEST,
                     detail=f"BIP353 resolution failed for {data.hr_address}: {str(e)}",
-                )
-        # adminkey = key_info.wallet.adminkey
-        # new_wallet.scan_secret = encrypt_for_wallet(
-            # scan_secret_hex, adminkey, wallet_id
-        # )
-        # new_wallet.spend_key = encrypt_for_wallet(spend_key_hex, adminkey, wallet_id)
+                )        
         new_wallet.sp_address = sp_address
         await create_silnt_wallet(new_wallet)
     except Exception as exc:
@@ -160,7 +155,7 @@ async def api_wallet_update(
     wallet_id: str,
     data: CreateWallet,
     key_info: WalletTypeInfo = Depends(require_invoice_key),
-) -> str:
+) -> dict:
     try:
         wallet = await get_silnt_wallet(wallet_id)
         if not wallet:
@@ -196,7 +191,7 @@ async def api_wallet_update(
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST, detail=str(exc)
         ) from exc
-    return ""
+    return {}
 
 
 @silnt_api_router.delete(
