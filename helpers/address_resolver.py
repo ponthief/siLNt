@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from loguru import logger
 
 # DNSSEC-validating resolvers — both validate the full chain and set AD flag
-DNSSEC_RESOLVERS = ['1.1.1.1', '8.8.8.8', '9.9.9.9']
+DNSSEC_RESOLVERS = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
 
 # Authentic Data flag (RFC 4035) — set by resolver when DNSSEC validation passed
 AD_FLAG = 0x0020
@@ -104,10 +104,10 @@ def bip353_resolve(address: str) -> dict:
 
         logger.info(f"BIP353 resolved {address} → {result} (DNSSEC validated)")
         return {
-            "address":    address,
+            "address": address,
             "dns_domain": dns_domain,
-            "result":     result,
-            "dnssec":     True,
+            "result": result,
+            "dnssec": True,
         }
 
     except HTTPException:

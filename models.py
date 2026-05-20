@@ -23,7 +23,7 @@ class WalletAccount(BaseModel):
     user: str
     title: str
     balance: int
-    network: str = "mainnet"    
+    network: str = "mainnet"
     sp_address: str
     hr_address: str
     last_height: int
@@ -45,8 +45,8 @@ class UTXORecord(BaseModel):
 class ScanWalletRequest(BaseModel):
     from_height: Optional[int] = None
     to_height: Optional[int] = None
-    scan_secret:  str
-    spend_key:    str
+    scan_secret: str
+    spend_key: str
 
 
 class BuildTxRequest(BaseModel):
@@ -56,7 +56,7 @@ class BuildTxRequest(BaseModel):
     fee_rate: float = 1
     memo: str = ""
     utxos: list[dict] = []
-    spend_key:  str
+    spend_key: str
 
 
 class BroadcastTxRequest(BaseModel):
@@ -80,9 +80,21 @@ class WalletAddress(BaseModel):
 
 class PreviewAddressRequest(BaseModel):
     label_index: int
-    scan_secret:  str
-    spend_key:    str
+    scan_secret: str
+    spend_key: str
+
 
 class SaveAddressRequest(BaseModel):
     sp_address: str
     label_index: int
+
+
+class CloudflareConfig(BaseModel):
+    api_token: str = ""
+    zone_id: str = ""
+    domain: str = ""
+
+
+class SetupBip353Request(BaseModel):
+    username: str  # e.g. "alice" → alice@yourdomain.com
+    ttl: int = 300  # DNS TTL in seconds

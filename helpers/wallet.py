@@ -49,25 +49,27 @@ def get_seed(mnemonic) -> bytes:
     return seed
 
 
-def generate_hardened_keys(seed, network: str = 'mainnet') -> dict:
+def generate_hardened_keys(seed, network: str = "mainnet") -> dict:
     # BIP352: coin_type 0 = mainnet, 1 = testnet/signet
-    coin_type = 0 if network == 'mainnet' else 1
-    xprv_version = NETWORKS["main"]["xprv"] if network == 'mainnet' else NETWORKS["test"]["xprv"]
+    coin_type = 0 if network == "mainnet" else 1
+    xprv_version = (
+        NETWORKS["main"]["xprv"] if network == "mainnet" else NETWORKS["test"]["xprv"]
+    )
 
     root = bip32.HDKey.from_seed(seed, version=xprv_version)
 
-    scan_path  = f"m/352h/{coin_type}h/0h/1h/0"
+    scan_path = f"m/352h/{coin_type}h/0h/1h/0"
     spend_path = f"m/352h/{coin_type}h/0h/0h/0"
 
-    scan_private_key  = root.derive(scan_path).key.secret
+    scan_private_key = root.derive(scan_path).key.secret
     spend_private_key = root.derive(spend_path).key.secret
-    scank  = root.derive(scan_path).key.secret
+    scank = root.derive(scan_path).key.secret
     spendk = root.derive(spend_path)
 
     return {
-        "scan_priv_key":  scan_private_key,
+        "scan_priv_key": scan_private_key,
         "spend_priv_key": spend_private_key,
-        "scank":  hexlify(scank).decode(),
+        "scank": hexlify(scank).decode(),
         "spendk": spendk.get_public_key(),
     }
 
@@ -85,19 +87,19 @@ def encode_silent_payment_address(
     return ret
 
 
-async def generate_silent_wallet_address(mnemonic, network: str = 'mainnet') -> tuple:
+async def generate_silent_wallet_address(mnemonic, network: str = "mainnet") -> tuple:
     seed = get_seed(mnemonic)
     key_material = generate_hardened_keys(seed, network)
 
-    B_scan  = pubkey_point_gen_from_int(int_from_bytes(key_material["scan_priv_key"]))
+    B_scan = pubkey_point_gen_from_int(int_from_bytes(key_material["scan_priv_key"]))
     B_spend = pubkey_point_gen_from_int(int_from_bytes(key_material["spend_priv_key"]))
 
     # mainnet → 'sp', signet/testnet → 'tsp'
-    hrp = 'sp' if network == 'mainnet' else 'tsp'
+    hrp = "sp" if network == "mainnet" else "tsp"
     sp = encode_silent_payment_address(B_scan, B_spend, hrp, 0)
 
     spend_priv_hex = hexlify(key_material["spend_priv_key"]).decode()
-    scan_key_hex   = key_material["scank"]
+    scan_key_hex = key_material["scank"]
 
     return (str(sp), scan_key_hex, spend_priv_hex)
 

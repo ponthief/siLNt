@@ -3,9 +3,10 @@ from http import HTTPStatus
 from base64 import b64encode
 import httpx
 import hashlib
+import re
 from .helpers.wallet import (
     generate_silent_wallet_address,
-    decrypt_mnemonic,    
+    decrypt_mnemonic,
     build_transaction,
     generate_labeled_sp_address,
     get_spend_pub_from_secret,
@@ -18,6 +19,12 @@ from lnbits.decorators import require_admin_key, require_invoice_key
 from lnbits.helpers import urlsafe_short_hash
 from loguru import logger
 from typing import Optional
+from .helpers.bip353_cloudflare import (
+    create_bip353_record,
+    get_zone_domain,
+    delete_bip353_record,
+    CloudflareError,
+)
 
 from .crud import (
     get_silnt_wallets,
@@ -32,7 +39,7 @@ from .crud import (
     update_balance,
     get_silnt_wallet,
     get_blindbit_config,
-    update_blindbit_config,    
+    update_blindbit_config,
     get_utxos_for_wallet,
     insert_utxos_for_wallet,
     update_unconfirmed_utxo,
@@ -41,6 +48,8 @@ from .crud import (
     insert_wallet_address,
     delete_wallet_label_address,
     delete_wallet_label_addresses,
+    get_cloudflare_config,
+    update_cloudflare_config,
 )
 
 from .models import (
@@ -53,6 +62,8 @@ from .models import (
     ScanWalletRequest,
     SaveAddressRequest,
     PreviewAddressRequest,
+    CloudflareConfig,
+    SetupBip353Request,
 )
 
 MAX_ADDRESSES_PER_WALLET = 10
@@ -100,7 +111,7 @@ async def api_wallet_create(
             sp_address="",
             spend_key="",
             scan_secret="",
-        )        
+        )
         (
             sp_address,
             scan_secret_hex,
@@ -135,7 +146,7 @@ async def api_wallet_create(
                 raise HTTPException(
                     status_code=HTTPStatus.BAD_REQUEST,
                     detail=f"BIP353 resolution failed for {data.hr_address}: {str(e)}",
-                )        
+                )
         new_wallet.sp_address = sp_address
         await create_silnt_wallet(new_wallet)
     except Exception as exc:
@@ -143,10 +154,10 @@ async def api_wallet_create(
             status_code=HTTPStatus.BAD_REQUEST, detail=str(exc)
         ) from exc
     return {
-        "wallet_id":    wallet_id,
-        "sp_address":   sp_address,
-        "scan_secret":  scan_secret_hex,   # client must store this securely
-        "spend_key":    spend_key_hex,     # client must store this securely
+        "wallet_id": wallet_id,
+        "sp_address": sp_address,
+        "scan_secret": scan_secret_hex,  # client must store this securely
+        "spend_key": spend_key_hex,  # client must store this securely
     }
 
 
@@ -239,14 +250,14 @@ async def api_preview_wallet_address(
         raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
 
     spend_pub_hex = get_spend_pub_from_secret(data.spend_key)
-    hrp = 'sp' if wallet.network == 'mainnet' else 'tsp'
+    hrp = "sp" if wallet.network == "mainnet" else "tsp"
 
     try:
         sp_address = generate_labeled_sp_address(
             scan_secret_hex=data.scan_secret,
             spend_pub_hex=spend_pub_hex,
             m=data.label_index,
-            hrp = hrp
+            hrp=hrp,
         )
     except Exception as e:
         raise HTTPException(
@@ -393,7 +404,7 @@ async def api_scan_wallet(
     try:
         result = await scan_wallet(
             wallet_id=wallet_id,
-            scan_secret_hex=data.scan_secret,     # from client request
+            scan_secret_hex=data.scan_secret,  # from client request
             spend_secret_hex=data.spend_key,
             from_height=data.from_height,
             to_height=data.to_height,
@@ -450,8 +461,9 @@ async def api_build_transaction(
             )
 
         if not data.spend_key:
-            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
-                detail="spend_key is required.")        
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST, detail="spend_key is required."
+            )
 
         if "@" in data.recipient:
             user, domain = data.recipient.strip().split("@")
@@ -544,3 +556,136 @@ async def api_get_config(
 )
 async def api_scan_progress(wallet_id: str):
     return get_scan_progress(wallet_id)
+
+
+# ── GET Cloudflare config (admin only) ───────────────────────────────────────
+@silnt_api_router.get("/api/v1/cloudflare/config")
+async def api_get_cloudflare_config(
+    key_info: WalletTypeInfo = Depends(require_admin_key),
+) -> CloudflareConfig:
+    cf = await get_cloudflare_config()
+    # Backfill domain if credentials are present but domain is missing
+    # (e.g. config saved before the domain field existed)
+    if cf.api_token and cf.zone_id and not cf.domain:
+        try:
+            cf.domain = await get_zone_domain(cf.api_token, cf.zone_id)
+            await update_cloudflare_config(cf)
+        except Exception:
+            pass
+    return cf
+
+
+# ── PUT Cloudflare config (admin only) ───────────────────────────────────────
+@silnt_api_router.put("/api/v1/cloudflare/config")
+async def api_update_cloudflare_config(
+    data: CloudflareConfig,
+    key_info: WalletTypeInfo = Depends(require_admin_key),
+) -> CloudflareConfig:
+    # Verify token + zone by fetching domain — also auto-populates data.domain
+    if data.api_token and data.zone_id:
+        try:
+            data.domain = await get_zone_domain(data.api_token, data.zone_id)
+        except Exception as e:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail=f"Could not verify Cloudflare zone: {str(e)}",
+            )
+    else:
+        data.domain = ""
+    return await update_cloudflare_config(data)
+
+
+# ── POST setup BIP-353 for a wallet via Cloudflare ───────────────────────────
+@silnt_api_router.post("/api/v1/wallet/{wallet_id}/bip353/setup")
+async def api_setup_bip353(
+    wallet_id: str,
+    data: SetupBip353Request,
+    key_info: WalletTypeInfo = Depends(require_invoice_key),
+):
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
+        )
+    if wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+
+    # Reject if wallet already has BIP-353 — users must remove first, then create
+    if wallet.hr_address:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"Wallet already has BIP-353 address: {wallet.hr_address}. "
+            "Remove it first before creating a new one.",
+        )
+    # Validate username format
+    if not re.match(r"^[a-zA-Z0-9._-]+$", data.username):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Username must contain only letters, numbers, dots, hyphens, underscores.",
+        )
+
+    cf = await get_cloudflare_config()
+    if not cf.api_token or not cf.zone_id:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Cloudflare API not configured. Ask your administrator to set it up.",
+        )
+
+    try:
+        result = await create_bip353_record(
+            api_token=cf.api_token,
+            zone_id=cf.zone_id,
+            username=data.username.lower(),
+            sp_address=wallet.sp_address,
+            ttl=data.ttl,
+        )
+    except CloudflareError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_GATEWAY, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail=str(e))
+
+    # Update wallet hr_address
+    await update_hr_address(wallet_id, result["hr_address"])
+
+    return {
+        "hr_address": result["hr_address"],
+        "record_name": result["record_name"],
+        "action": result["action"],
+        "sp_address": wallet.sp_address,
+    }
+
+
+# ── DELETE BIP-353 record for a wallet ───────────────────────────────────────
+@silnt_api_router.delete("/api/v1/wallet/{wallet_id}/bip353")
+async def api_delete_bip353(
+    wallet_id: str,
+    key_info: WalletTypeInfo = Depends(require_invoice_key),
+):
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
+        )
+    if wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+    if not wallet.hr_address:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST, detail="No BIP-353 address set."
+        )
+
+    cf = await get_cloudflare_config()
+    if not cf.api_token or not cf.zone_id:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST, detail="Cloudflare API not configured."
+        )
+
+    try:
+        username = wallet.hr_address.split("@")[0]
+        deleted = await delete_bip353_record(cf.api_token, cf.zone_id, username)
+    except CloudflareError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_GATEWAY, detail=str(e))
+
+    # Clear hr_address from wallet
+    await update_hr_address(wallet_id, "")
+
+    return {"deleted": deleted, "was": wallet.hr_address}

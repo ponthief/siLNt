@@ -4,7 +4,14 @@ from typing import Optional, Tuple
 import secrets
 from lnbits.db import Database
 from lnbits.helpers import urlsafe_short_hash
-from .models import Config, BlindbitConfig, WalletAccount, UTXORecord, WalletAddress
+from .models import (
+    Config,
+    BlindbitConfig,
+    WalletAccount,
+    UTXORecord,
+    WalletAddress,
+    CloudflareConfig,
+)
 
 from embit.descriptor import Descriptor, Key
 from embit.descriptor.arguments import AllowedDerivation
@@ -15,6 +22,7 @@ db = Database("ext_silnt")
 
 # Singleton row ID for the global blindbit config
 BLINDBIT_CONFIG_ID = "blindbit"
+CF_CONFIG_ID = "cloudflare_config"
 
 
 async def create_silnt_wallet(wallet: WalletAccount) -> WalletAccount:
@@ -30,7 +38,9 @@ async def get_silnt_wallet(wallet_id: str) -> Optional[WalletAccount]:
     )
 
 
-async def get_silnt_wallets(user: str, network: Optional[str] = None) -> list[WalletAccount]:
+async def get_silnt_wallets(
+    user: str, network: Optional[str] = None
+) -> list[WalletAccount]:
     if network:
         return await db.fetchall(
             'SELECT * FROM silnt.wallets WHERE "user" = :user AND network = :network ORDER BY network, title',
@@ -234,5 +244,34 @@ async def update_blindbit_config(config: BlindbitConfig) -> BlindbitConfig:
         await db.execute(
             "INSERT INTO silnt.blindbit_config (id, json_data) VALUES (:id, :json_data)",
             {"id": BLINDBIT_CONFIG_ID, "json_data": json_data},
+        )
+    return config
+
+
+async def get_cloudflare_config() -> CloudflareConfig:
+    row = await db.fetchone(
+        "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
+        {"id": CF_CONFIG_ID},
+    )
+    if not row:
+        return CloudflareConfig()
+    return CloudflareConfig(**json.loads(row["json_data"]))
+
+
+async def update_cloudflare_config(config: CloudflareConfig) -> CloudflareConfig:
+    json_data = config.json()
+    existing = await db.fetchone(
+        "SELECT id FROM silnt.blindbit_config WHERE id = :id",
+        {"id": CF_CONFIG_ID},
+    )
+    if existing:
+        await db.execute(
+            "UPDATE silnt.blindbit_config SET json_data = :json_data WHERE id = :id",
+            {"json_data": json_data, "id": CF_CONFIG_ID},
+        )
+    else:
+        await db.execute(
+            "INSERT INTO silnt.blindbit_config (id, json_data) VALUES (:id, :json_data)",
+            {"id": CF_CONFIG_ID, "json_data": json_data},
         )
     return config
