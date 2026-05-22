@@ -65,6 +65,10 @@ class BroadcastTxRequest(BaseModel):
     spent_txids: list[str] = []
 
 
+class RecoverKeysRequest(BaseModel):
+    mnemonic:    str          # encrypted (AES-encrypted with last_height as key)
+    last_height: int          # encryption key + birth height
+    
 class Config(BaseModel):
     sats_denominated: bool = True
     network: str = "mainnet"

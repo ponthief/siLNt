@@ -64,6 +64,7 @@ from .models import (
     PreviewAddressRequest,
     CloudflareConfig,
     SetupBip353Request,
+    RecoverKeysRequest
 )
 
 MAX_ADDRESSES_PER_WALLET = 10
@@ -536,6 +537,53 @@ async def api_broadcast_transaction(data: BroadcastTxRequest):
             status_code=HTTPStatus.GATEWAY_TIMEOUT, detail="mempool.space timed out"
         )
 
+
+@silnt_api_router.post("/api/v1/wallet/{wallet_id}/recover-keys")
+async def api_recover_wallet_keys(
+    wallet_id: str,
+    data: RecoverKeysRequest,
+    key_info: WalletTypeInfo = Depends(require_invoice_key),
+):
+    """
+    Re-derive scan_secret and spend_key from mnemonic for an existing wallet.
+    Verifies the derived sp_address matches the stored one — protects against
+    re-importing the wrong mnemonic.
+    Keys are NEVER stored on the server, only returned transiently.
+    """
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
+    if wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+
+    try:
+        mnemonic_plain = decrypt_mnemonic(data.mnemonic, str(data.last_height))
+        sp_address, scan_secret_hex, spend_key_hex = await generate_silent_wallet_address(
+            mnemonic_plain,
+            network=wallet.network,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"Could not derive keys from mnemonic: {str(e)}",
+        )
+
+    # Verify derived address matches the stored one — wrong mnemonic = rejection
+    if sp_address.lower() != wallet.sp_address.lower():
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=(
+                "The mnemonic you entered does not match this wallet. "
+                "Derived SP address differs from the stored one."
+            ),
+        )
+
+    # Return keys transiently — they are not stored anywhere on the server
+    return {
+        "wallet_id":   wallet_id,
+        "scan_secret": scan_secret_hex,
+        "spend_key":   spend_key_hex,
+    }
 
 @silnt_api_router.get("/api/v1/config")
 async def api_get_config(
