@@ -7,7 +7,8 @@ from pydantic import BaseModel
 class BlindbitConfig(BaseModel):
     blindbit_url: str = ""
     mempool_url: str = "https://mempool.space"
-
+    min_scan_height:  int = 0   # 0 = no minimum; e.g. 840000 = no scans before block 840000
+    max_wallets_per_user: int = 0   # 0 = unlimited
 
 class CreateWallet(BaseModel):
     mnemonic: str = None
@@ -102,3 +103,6 @@ class CloudflareConfig(BaseModel):
 class SetupBip353Request(BaseModel):
     username: str  # e.g. "alice" → alice@yourdomain.com
     ttl: int = 300  # DNS TTL in seconds
+
+class ForgotPasswordRequest(BaseModel):
+    email: str

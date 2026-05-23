@@ -275,3 +275,16 @@ async def update_cloudflare_config(config: CloudflareConfig) -> CloudflareConfig
             {"id": CF_CONFIG_ID, "json_data": json_data},
         )
     return config
+
+async def count_silnt_wallets(user: str, network: Optional[str] = None) -> int:
+    if network:
+        row = await db.fetchone(
+            'SELECT COUNT(*) AS c FROM silnt.wallets WHERE "user" = :user AND network = :network',
+            {"user": user, "network": network},
+        )
+    else:
+        row = await db.fetchone(
+            'SELECT COUNT(*) AS c FROM silnt.wallets WHERE "user" = :user',
+            {"user": user},
+        )
+    return row["c"] if row else 0

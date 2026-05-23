@@ -26,6 +26,12 @@ from .helpers.bip353_cloudflare import (
     CloudflareError,
 )
 
+from .helpers.email_verification import (
+    RegistrationRequest, VerifyRegistrationRequest,
+    start_registration, complete_registration,
+)
+from .helpers.scan_rate_limiter import check_scan_allowed, mark_scan_finished
+from .helpers.forgot_password import request_password_reset
 from .crud import (
     get_silnt_wallets,
     create_silnt_wallet,
@@ -50,6 +56,7 @@ from .crud import (
     delete_wallet_label_addresses,
     get_cloudflare_config,
     update_cloudflare_config,
+    count_silnt_wallets
 )
 
 from .models import (
@@ -64,7 +71,8 @@ from .models import (
     PreviewAddressRequest,
     CloudflareConfig,
     SetupBip353Request,
-    RecoverKeysRequest
+    RecoverKeysRequest,
+    ForgotPasswordRequest
 )
 
 MAX_ADDRESSES_PER_WALLET = 10
@@ -113,6 +121,18 @@ async def api_wallet_create(
             spend_key="",
             scan_secret="",
         )
+        # Clamp "Born at Height" to the configured minimum to prevent users
+        # from creating wallets that would force expensive deep scans.
+        blindbit_cfg = await get_blindbit_config()
+        min_height   = blindbit_cfg.min_scan_height or 0
+        if min_height > 0 and int(data.last_height) < min_height:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail=(
+                    f"Wallet birth height must be at least {min_height} on this server. "
+                    f"You entered {data.last_height}."
+                ),
+            )
         (
             sp_address,
             scan_secret_hex,
@@ -131,6 +151,19 @@ async def api_wallet_create(
                 status_code=HTTPStatus.BAD_REQUEST,
                 detail="Silent Payment Wallet already exists!",
             )
+        blindbit_cfg = await get_blindbit_config()
+        max_wallets  = blindbit_cfg.max_wallets_per_user or 0
+        if max_wallets > 0:
+            current_count = await count_silnt_wallets(key_info.wallet.user)
+            if current_count >= max_wallets:
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_REQUEST,
+                    detail=(
+                        f"Wallet limit reached. You can have at most {max_wallets} wallet"
+                        f"{'s' if max_wallets != 1 else ''} on this server. "
+                        f"You currently have {current_count}."
+                    ),
+                )    
         if data.hr_address:
             try:
                 resolved = bip353_resolve(data.hr_address)
@@ -396,16 +429,46 @@ async def api_scan_wallet(
 ):
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
-        raise HTTPException(
-            status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
-        )
-    # Ownership guard: users may only scan wallets that belong to them.
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
     if wallet.user != key_info.wallet.user:
         raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+
+    # Enforce min scan height
+    blindbit = await get_blindbit_config()
+    min_height = blindbit.min_scan_height or 0
+
+    requested_from = data.from_height if data.from_height is not None else wallet.last_height
+    if min_height > 0 and requested_from < min_height:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=(
+                f"Scanning below block {min_height} is disabled on this server. "
+                f"Requested start height was {requested_from}."
+            ),
+        )
+
+    # Estimate block count for budget check
+    # Use chain tip as fallback if to_height not given
+    to_height_est = data.to_height
+    if to_height_est is None:
+        from .helpers.scan import BlindBitOracleClient
+        oracle = BlindBitOracleClient(base_url=blindbit.blindbit_url)
+        to_height_est = await oracle.get_chain_tip()
+    estimated_blocks = max(1, to_height_est - requested_from)
+
+    client_ip = request.client.host if request.client else "unknown"
+
+    # Rate limit check (raises 429 if any limit exceeded)
+    check_scan_allowed(
+        user_id=key_info.wallet.user,
+        wallet_id=wallet_id,
+        ip=client_ip,
+        estimated_blocks=estimated_blocks,
+    )
     try:
         result = await scan_wallet(
             wallet_id=wallet_id,
-            scan_secret_hex=data.scan_secret,  # from client request
+            scan_secret_hex=data.scan_secret,
             spend_secret_hex=data.spend_key,
             from_height=data.from_height,
             to_height=data.to_height,
@@ -417,6 +480,9 @@ async def api_scan_wallet(
         logger.error(f"Scan failed: {e}")
         raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail=str(e))
 
+    finally:
+        # ALWAYS release the concurrent-scan slot, even on error/exception
+        mark_scan_finished(key_info.wallet.user, wallet_id)
 
 @silnt_api_router.post("/api/v1/wallet/{wallet_id}/scan/stop")
 async def api_stop_scan(
@@ -431,6 +497,7 @@ async def api_stop_scan(
     if wallet.user != key_info.wallet.user:
         raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
     request_scan_stop(wallet_id)
+    mark_scan_finished(key_info.wallet.user, wallet_id)
     return {"status": "stop requested"}
 
 
@@ -591,12 +658,14 @@ async def api_get_config(
 ) -> dict:
     blindbit = await get_blindbit_config()
     config = Config()
+    current  = await count_silnt_wallets(key_info.wallet.user)
     return {
         "mempool_endpoint": blindbit.mempool_url or "https://mempool.space",
         "sats_denominated": config.sats_denominated,
         "network": config.network,
+        "min_scan_height":   blindbit.min_scan_height or 0,
+        "wallet_count":         current
     }
-
 
 @silnt_api_router.get(
     "/api/v1/wallet/{wallet_id}/scan/progress",
@@ -737,3 +806,25 @@ async def api_delete_bip353(
     await update_hr_address(wallet_id, "")
 
     return {"deleted": deleted, "was": wallet.hr_address}
+
+@silnt_api_router.post("/api/v1/auth/register-start")
+async def api_register_start(data: RegistrationRequest, request: Request) -> dict:
+    return await start_registration(data, request)
+
+@silnt_api_router.post("/api/v1/auth/register-verify")
+async def api_register_verify(data: VerifyRegistrationRequest) -> dict:
+    return await complete_registration(data.token)
+
+@silnt_api_router.post("/api/v1/auth/forgot-password")
+async def api_forgot_password(data: ForgotPasswordRequest, request: Request) -> dict:
+    """
+    User requests a password reset link by email.
+    The link is emailed to them and contains a signed reset_key that can be
+    submitted to LNbits's PUT /api/v1/auth/reset endpoint.
+    """
+    if not data.email or "@" not in data.email:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Valid email address required.",
+        )
+    return await request_password_reset(data.email.strip().lower(), request)
