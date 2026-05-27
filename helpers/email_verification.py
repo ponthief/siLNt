@@ -1,14 +1,17 @@
 """
-Forgot-password flow for the siLNt extension.
+Email-verified registration for the siLNt extension.
 
-Email-verified registration:
-  1. Validate the inputs and hash the password
-  2. Build a signed token containing username, email, password_hash, timestamp
-  3. Email the user a link with the token
-  4. When the user clicks the link, decode the token, verify it's not expired,
-     and create the LNbits account at that moment
-  5. Enable default extensions on the new account (since we bypass LNbits's
-     native register endpoint that normally does this)
+Flow:
+  1. User submits registration → validate inputs, hash password
+  2. Generate a signed token containing {username, email, password_hash, ts}
+     and email it as a clickable link — NO account is created yet
+  3. User clicks the link → decode/validate token (incl. 1-hour TTL)
+  4. Create LNbits Account with a fresh uuid4 id + bcrypt password hash
+  5. Enable LNBITS_USER_DEFAULT_EXTENSIONS on the new account, marking paid
+     extensions as already-paid so they bypass the payment requirement
+
+This guarantees the account is only created after email ownership is proven,
+and that siLNt is fully active on first login (paid or not).
 """
 
 import base64
@@ -27,9 +30,13 @@ from lnbits.core.crud import (
     create_account,
     get_account_by_username_or_email,
 )
-from lnbits.core.crud.extensions import update_user_extension
-from lnbits.core.models.extensions import UserExtension
+from lnbits.core.crud.extensions import (
+    create_user_extension,
+    update_user_extension,
+    get_user_extension,
+)
 from lnbits.core.models import Account
+from lnbits.core.models.extensions import UserExtension, UserExtensionInfo
 from lnbits.core.services.notifications import send_email_notification
 from lnbits.helpers import encrypt_internal_message, decrypt_internal_message
 from lnbits.settings import settings, AuthMethods
@@ -48,6 +55,8 @@ class RegistrationRequest(BaseModel):
 class VerifyRegistrationRequest(BaseModel):
     token: str
 
+
+# ── Token helpers ─────────────────────────────────────────────────────────────
 
 def _generate_verification_token(
     username: str, email: str, password_hash: str
@@ -68,7 +77,7 @@ def _generate_verification_token(
 
 
 def _decode_verification_token(token: str) -> Optional[dict]:
-    """Decode and validate a verification token."""
+    """Decode and validate a verification token. Returns None if invalid/expired."""
     if not token.startswith("verify_"):
         return None
     try:
@@ -92,6 +101,8 @@ def _decode_verification_token(token: str) -> Optional[dict]:
 
     return payload
 
+
+# ── Start registration: send email ────────────────────────────────────────────
 
 async def start_registration(
     data: RegistrationRequest, request: Request
@@ -133,6 +144,7 @@ async def start_registration(
         logger.error(f"Token generation failed: {exc}")
         raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not start registration.")
 
+    # Resolve frontend origin so the link points at the Thrilla domain
     origin = request.headers.get("origin") or request.headers.get("referer") or ""
     if not origin:
         origin = f"https://{request.headers.get('host', '')}"
@@ -188,11 +200,13 @@ async def start_registration(
     }
 
 
+# ── Complete registration: create account + enable extensions ─────────────────
+
 async def complete_registration(token: str) -> dict:
     """
     Decode the verification token and create the LNbits account.
-    Also enables LNBITS_USER_DEFAULT_EXTENSIONS on the new account (since we
-    bypass LNbits's native /register endpoint that normally does this).
+    Enables LNBITS_USER_DEFAULT_EXTENSIONS on the new account, marking paid
+    extensions as already-paid (so e.g. siLNt activates without payment).
     """
     payload = _decode_verification_token(token)
     if not payload:
@@ -214,7 +228,7 @@ async def complete_registration(token: str) -> dict:
         )
 
     try:
-        # LNbits Account requires an id — generate a uuid4 hex like LNbits internals do
+        # LNbits Account requires an id field — generate a uuid4 hex
         account_id = uuid4().hex
         account = Account(
             id            = account_id,
@@ -225,19 +239,28 @@ async def complete_registration(token: str) -> dict:
         await create_account(account=account)
         logger.info(f"Email-verified account created: {username} ({email}) id={account_id}")
 
-        # ── Enable LNBITS_USER_DEFAULT_EXTENSIONS on the new account ──────────
-        # LNbits's native register endpoint does this; we have to mirror it.
+        # Enable LNBITS_USER_DEFAULT_EXTENSIONS — paid bypass for paid extensions
         try:
             default_exts = settings.lnbits_user_default_extensions or []
             for ext_id in default_exts:
-                # Build UserExtension model — field names match LNbits internals
                 user_ext = UserExtension(
                     user=account_id,
                     extension=ext_id,
                     active=True,
+                    extra=UserExtensionInfo(
+                        paid_to_enable=True,
+                        payment_hash_to_enable="default_enabled",
+                    ),
                 )
-                await update_user_extension(user_extension=user_ext)
-                logger.info(f"Enabled default extension '{ext_id}' for {account_id}")
+                # INSERT new row — update_user_extension only modifies existing rows
+                # so we must use create_user_extension for new accounts.
+                # If a row already exists for some reason, fall through to update.
+                existing = await get_user_extension(account_id, ext_id)
+                if existing:
+                    await update_user_extension(user_extension=user_ext)
+                else:
+                    await create_user_extension(user_extension=user_ext)
+                logger.info(f"Enabled default extension '{ext_id}' for {account_id} (paid bypass)")
         except Exception as exc:
             logger.warning(f"Could not enable default extensions for {account_id}: {exc}")
 
@@ -249,6 +272,38 @@ async def complete_registration(token: str) -> dict:
             HTTPStatus.INTERNAL_SERVER_ERROR,
             "Failed to create account. Please try again.",
         )
+
+    # ── Send welcome email — non-fatal if it fails ────────────────────────────
+    try:
+        welcome_subject = "Welcome to Thrilla"
+        welcome_body = (
+            f"Hi {username},\n\n"
+            f"Your Thrilla account is now active. You can sign in any time at the "
+            f"URL below using your username and password.\n\n"
+            f"What you can do with Thrilla:\n"
+            f"  • Create Silent Payment (BIP-352) wallets — private by default\n"
+            f"  • Scan the chain for incoming payments via your BlindBit oracle\n"
+            f"  • Send to sp1… / bc1q… / BIP-353 (alice@domain) recipients\n"
+            f"  • Register a BIP-353 human-readable address for your wallet\n\n"
+            f"Wallet keys are stored ONLY on your device — never on the server. "
+            f"Keep your mnemonic safe; without it your funds can't be recovered.\n\n"
+            f"If you ever need to reset your password, use the 'Forgot password' "
+            f"link on the sign-in screen.\n\n"
+            f"— Thrilla"
+        )
+        if settings.lnbits_email_notifications_enabled:
+            res = await send_email_notification(
+                to_emails=[email],
+                message=welcome_body,
+                subject=welcome_subject,
+            )
+            if res.get("status") == "ok":
+                logger.info(f"Welcome email sent to {email}")
+            else:
+                logger.warning(f"Welcome email send returned: {res.get('message')}")
+    except Exception as exc:
+        # Welcome email failure must not block account activation
+        logger.warning(f"Could not send welcome email to {email}: {exc}")
 
     return {
         "success":  True,

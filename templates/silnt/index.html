@@ -177,12 +177,25 @@
             <q-item-section>
               <q-item-label>
                 <span class="text-orange" v-text="utxo.amount + ' sats'"></span>
-              </q-item-label>              
-            </q-item-section>            
+              </q-item-label>
+            </q-item-section>
+            <q-item-section side v-if="utxo.label">
+              <q-chip dense color="deep-purple" text-color="white" size="sm">
+                <span v-text="utxo.label"></span>
+              </q-chip>
+            </q-item-section>
           </q-item>
         </q-list>
       </div>
-
+       <q-banner
+          v-if="selectedUtxoLabels.length > 1"
+          dense
+          class="text-white bg-negative q-mb-sm"
+          icon="warning"
+        >
+          Warning: selected UTXOs have different labels (<span v-text="selectedUtxoLabels.join(', ')"></span>).
+          Mixing labeled UTXOs may reduce privacy.
+      </q-banner>
       <!-- Selected total -->
       <div v-if="sendSelectedTotal > 0" class="q-mb-md text-caption">
         Selected total:

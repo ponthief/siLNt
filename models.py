@@ -1,5 +1,4 @@
-from typing import Optional
-
+from typing import Optional, List
 from fastapi import Query
 from pydantic import BaseModel
 
@@ -9,6 +8,7 @@ class BlindbitConfig(BaseModel):
     mempool_url: str = "https://mempool.space"
     min_scan_height:  int = 0   # 0 = no minimum; e.g. 840000 = no scans before block 840000
     max_wallets_per_user: int = 0   # 0 = unlimited
+    dust_threshold_sats:    int = 5000
 
 class CreateWallet(BaseModel):
     mnemonic: str = None
@@ -40,7 +40,11 @@ class UTXORecord(BaseModel):
     utxo_state: str
     timestamp: int
     wallet_id: str
+    label: Optional[str] = None # individual utxo user created label
     label_index: Optional[int] = None  # None = main wallet, int = subaccount
+    frozen: bool = False
+    freeze_reason: Optional[str]
+    suspected_dust: bool = False
 
 
 class ScanWalletRequest(BaseModel):
@@ -50,20 +54,30 @@ class ScanWalletRequest(BaseModel):
     spend_key: str
 
 
+class UtxoForTx(BaseModel):
+    txid: str
+    vout: int = 0
+    amount: int
+    priv_key_tweak: str
+    pub_key: str
+    label: Optional[str] = None
+
 class BuildTxRequest(BaseModel):
     wallet_id: str
     recipient: str
     amount: int
     fee_rate: float = 1
     memo: str = ""
-    utxos: list[dict] = []
+    utxos: list[dict]
     spend_key: str
+    scan_secret:  str 
 
 
 class BroadcastTxRequest(BaseModel):
     tx_hex: str
     wallet_id: Optional[str] = None
     spent_txids: list[str] = []
+    spent_outpoints: list[tuple[str, int]] = []   # list of [txid, vout]
 
 
 class RecoverKeysRequest(BaseModel):
@@ -83,15 +97,16 @@ class WalletAddress(BaseModel):
     created_at: int = 0
 
 
-class PreviewAddressRequest(BaseModel):
-    label_index: int
+class PreviewAddressRequest(BaseModel):    
     scan_secret: str
     spend_key: str
+    label_index: Optional[int] = None   # auto-picked if None
 
 
 class SaveAddressRequest(BaseModel):
     sp_address: str
-    label_index: int
+    label: Optional[str] = None
+    label_index: Optional[int] = None
 
 
 class CloudflareConfig(BaseModel):
@@ -106,3 +121,39 @@ class SetupBip353Request(BaseModel):
 
 class ForgotPasswordRequest(BaseModel):
     email: str
+
+class UpdateUtxoLabel(BaseModel):
+    label: str = ''
+
+class UpdateUtxoFrozenRequest(BaseModel):
+    frozen: bool
+
+class UpdateAddressLabelRequest(BaseModel):
+    label: Optional[str] = None
+
+class TrustedDevice(BaseModel):
+    id:            str
+    user_id:       str
+    device_id:     str
+    user_agent:    Optional[str] = None
+    ip:            Optional[str] = None
+    label:         Optional[str] = None
+    confirmed_at:  int
+    last_seen_at:  int
+
+
+class DeviceCheckResponse(BaseModel):
+    status:        str             # 'trusted' | 'pending'
+    device_count:  int
+    cap:           int
+
+
+class DeviceConfirmResponse(BaseModel):
+    confirmed:    bool
+    device_count: int
+    cap:          int
+
+class DeviceListResponse(BaseModel):
+    devices:        List[TrustedDevice]
+    current_device: Optional[str] = None
+    cap:            int

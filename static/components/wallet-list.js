@@ -14,6 +14,7 @@ window.app.component('wallet-list', {
   emits: ['accounts-update', 'fetch-utxos', 'scan-wallet', 'clear-utxos', 'open-bip353', 'send-wallet'],
   data: function () {
     return {
+      thrillaUrl: 'https://signet.thrilla.me',   // or pull from server config
       walletAccounts: [],
       address: {},      
       formDialog: {
@@ -150,17 +151,53 @@ window.app.component('wallet-list', {
           this.inkey,
           data
         )        
-        this.walletAccounts.push(mapWalletAccount(response.data))
-        this.formDialog.show = false
+        const r = response.data || {}
 
-        await this.refreshWalletAccounts()
-        Quasar.Notify.create({
-            type: 'positive',
-            message: 'Silent Payment Wallet Added.'
-      })
-      } catch (error) {
-        LNbits.utils.notifyApiError(error)
-      }                
+      this.formDialog.show = false
+      await this.refreshWalletAccounts()
+
+      // If keys were returned, show a one-time copy dialog
+      if (r.scan_secret && r.spend_key) {
+        const keysJson = JSON.stringify({
+          wallet_id:   r.wallet_id,
+          scan_secret: r.scan_secret,
+          spend_key:   r.spend_key,
+        }, null, 2)
+
+        Quasar.Dialog.create({
+          title: 'Wallet Keys — Save These Now',
+          message:
+            'Your wallet has been created. The keys below are shown ONCE and ' +
+            'will NOT be stored on the server.\\n\\n' +
+            'To use this wallet, open the Thrilla app, recover the wallet ' +
+            'with your mnemonic, or paste these keys directly.\\n\\n' +
+            'If you lose them, you\'ll need to re-import from the mnemonic.',
+          html: false,
+          message: `<pre style="background:#f5f5f5;padding:10px;border-radius:4px;
+                          font-family:monospace;font-size:11px;overflow:auto">${keysJson}</pre>`,
+          ok: {
+            label: 'I have saved them',
+            color: 'positive',
+          },
+          persistent: true,
+        })
+
+        Quasar.copyToClipboard(keysJson)
+        this.$q.notify({
+          type: 'positive',
+          message: 'Wallet keys copied to clipboard. Save them somewhere safe.',
+          timeout: 10000,
+        })
+      } else {
+        this.$q.notify({
+          type: 'positive',
+          message: 'Silent Payment Wallet created.',
+          timeout: 5000,
+        })
+      }
+    } catch (error) {
+      LNbits.utils.notifyApiError(error)
+    }        
     },
     updateWalletDialog(walletAccountId) {
       var wallet = _.findWhere(this.walletAccounts, {id: walletAccountId})
@@ -328,37 +365,17 @@ window.app.component('wallet-list', {
     }
   },
     generateAddress: async function (wallet) {
-      const rw = this.walletAccounts.find(w => w.id === wallet.id)
-      if (!rw) return
-
-      if ((rw.addresses || []).length >= 10) {
-        this.$q.notify({ type: 'warning', message: 'Maximum of 10 labeled addresses per wallet reached.', timeout: 5000 })
-        return
-      }
-
-      const currentAddresses = rw.addresses || []
-      const existingMax = currentAddresses.reduce((max, a) => Math.max(max, a.label_index || 0), 0)
-      const nextIndex = existingMax + 1
-
-      try {
-        const {data} = await LNbits.api.request(
-          'POST',
-          `/siLNt/api/v1/wallet/${rw.id}/addresses/preview`,
-          this.inkey,
-          { label_index: nextIndex }
-        )
-        rw.addresses = [...currentAddresses, {
-          _tempId: Date.now(),
-          id: null,
-          wallet_id: rw.id,
-          sp_address: data.sp_address,
-          label_index: nextIndex,
-          saved: false
-        }]
-        this.$emit('addresses-changed')
-      } catch (error) {
-        LNbits.utils.notifyApiError(error)
-      }
+       this.$q.notify({
+        type: 'info',
+        message: 'Open this wallet in the Thrilla app to generate a labeled address.',
+        caption: 'LNbits doesn\'t store wallet keys for security reasons.',
+        timeout: 7000,
+        actions: [{
+          label: 'Open Thrilla',
+          color: 'white',
+          handler: () => window.open(this.thrillaUrl, '_blank'),
+        }],
+      })
     },
 
     saveAddress: async function (wallet, addr) {

@@ -1,6 +1,6 @@
 import json
 import time
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import secrets
 from lnbits.db import Database
 from lnbits.helpers import urlsafe_short_hash
@@ -11,6 +11,8 @@ from .models import (
     UTXORecord,
     WalletAddress,
     CloudflareConfig,
+    UpdateUtxoLabel,
+    TrustedDevice
 )
 
 from embit.descriptor import Descriptor, Key
@@ -23,7 +25,7 @@ db = Database("ext_silnt")
 # Singleton row ID for the global blindbit config
 BLINDBIT_CONFIG_ID = "blindbit"
 CF_CONFIG_ID = "cloudflare_config"
-
+BIP352_CHANGE_LABEL_INDEX = 1
 
 async def create_silnt_wallet(wallet: WalletAccount) -> WalletAccount:
     await db.insert("silnt.wallets", wallet)
@@ -149,8 +151,8 @@ async def get_utxos_for_wallet(wallet_id: str) -> list[UTXORecord]:
 async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> None:
     for utxo in utxos:
         await db.execute(
-            """INSERT INTO silnt.utxos (txid, vout, amount, priv_key_tweak, pub_key, utxo_state, timestamp, wallet_id)
-            VALUES (:txid, :vout, :amount, :priv_key_tweak, :pub_key, :utxo_state, :timestamp, :wallet_id)
+            """INSERT INTO silnt.utxos (txid, vout, amount, priv_key_tweak, pub_key, utxo_state, timestamp, wallet_id, label)
+            VALUES (:txid, :vout, :amount, :priv_key_tweak, :pub_key, :utxo_state, :timestamp, :wallet_id, :label)
             ON CONFLICT (txid) DO UPDATE SET
                 amount = EXCLUDED.amount,
                 priv_key_tweak = EXCLUDED.priv_key_tweak,
@@ -159,7 +161,9 @@ async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> None:
                     WHEN silnt.utxos.utxo_state IN ('spent', 'unconfirmed_spent')
                     THEN silnt.utxos.utxo_state
                     ELSE EXCLUDED.utxo_state
-                END""",
+                END,
+                label = COALESCE(silnt.utxos.label, EXCLUDED.label)
+            """,
             utxo.to_db_row(wallet_id),
         )
 
@@ -177,7 +181,13 @@ async def get_wallet_addresses(wallet_id: str) -> list:
         {"wallet_id": wallet_id},
     )
 
-
+async def get_wallet_address(id: str) -> Optional[WalletAddress]:
+    return await db.fetchone(
+        "SELECT * FROM silnt.wallet_addresses WHERE id = :id",
+        {"id": id},
+        WalletAddress
+    )
+    
 async def count_wallet_addresses(wallet_id: str) -> int:
     row = await db.fetchone(
         "SELECT COUNT(*) as cnt FROM silnt.wallet_addresses WHERE wallet_id = :wallet_id",
@@ -288,3 +298,472 @@ async def count_silnt_wallets(user: str, network: Optional[str] = None) -> int:
             {"user": user},
         )
     return row["c"] if row else 0
+
+async def update_utxo_label_by_txid(
+    txid: str, label: Optional[str], wallet_id: Optional[str] = None
+) -> int:
+    """
+    Set or clear the label on UTXO(s) matching the given txid.
+    Returns the number of rows updated. Empty string label is treated as NULL.
+    Optionally scoped to a specific wallet_id for safety.
+    """
+    label_value = (label or "").strip() or None
+    if wallet_id:
+        result = await db.execute(
+            """UPDATE silnt.utxos SET label = :label
+               WHERE txid = :txid AND wallet_id = :wallet_id""",
+            {"label": label_value, "txid": txid, "wallet_id": wallet_id},
+        )
+    else:
+        result = await db.execute(
+            "UPDATE silnt.utxos SET label = :label WHERE txid = :txid",
+            {"label": label_value, "txid": txid},
+        )
+    return getattr(result, "rowcount", 0) or 0
+
+
+async def get_utxos_by_txid(txid: str) -> list:
+    """Return all UTXO rows for a given txid (may have multiple vouts)."""
+    rows = await db.fetchall(
+        "SELECT * FROM silnt.utxos WHERE txid = :txid", {"txid": txid}
+    )
+    return [UTXORecord(**dict(r)) for r in rows]
+
+async def get_next_label_index(wallet_id: str) -> int:
+    row = await db.fetchone(
+        """SELECT COALESCE(MAX(label_index), 0) AS max_idx
+           FROM silnt.wallet_addresses
+           WHERE wallet_id = :wid""",
+        {"wid": wallet_id},
+    )
+    next_idx = int((row["max_idx"] or 0)) + 1
+    # Skip the BIP-352 change label
+    if next_idx <= BIP352_CHANGE_LABEL_INDEX:
+        next_idx = BIP352_CHANGE_LABEL_INDEX + 1   # → 2
+    return next_idx
+
+
+async def address_exists(wallet_id: str, sp_address: str) -> bool:
+    row = await db.fetchone(
+        """SELECT 1 FROM silnt.wallet_addresses
+           WHERE wallet_id = :wid AND sp_address = :addr""",
+        {"wid": wallet_id, "addr": sp_address},
+    )
+    return row is not None
+
+async def label_index_taken(wallet_id: str, label_index: int) -> bool:
+    row = await db.fetchone(
+        """SELECT 1 FROM silnt.wallet_addresses
+           WHERE wallet_id = :wid AND label_index = :idx""",
+        {"wid": wallet_id, "idx": label_index},
+    )
+    return row is not None
+
+async def save_wallet_address(
+    wallet_id: str,
+    sp_address: str,
+    label: Optional[str],
+    label_index: int,
+) -> dict:
+    addr_id = secrets.token_urlsafe(16)
+    now     = int(time.time())
+    await db.execute(
+        """INSERT INTO silnt.wallet_addresses
+              (id, wallet_id, sp_address, label, label_index, created_at)
+           VALUES (:id, :wid, :addr, :label, :idx, :ts)""",
+        {
+            "id":    addr_id,
+            "wid":   wallet_id,
+            "addr":  sp_address,
+            "label": (label or "").strip() or None,
+            "idx":   label_index,
+            "ts":    now,
+        },
+    )
+    return {
+        "id":          addr_id,
+        "wallet_id":   wallet_id,
+        "sp_address":  sp_address,
+        "label":       label,
+        "label_index": label_index,
+        "created_at":  now,
+    }
+
+async def get_unspent_dust_check(wallet_id: str) -> list[dict]:
+    rows = await db.fetchall(
+        """SELECT txid, vout, amount, suspected_dust FROM silnt.utxos
+           WHERE wallet_id = :wid AND utxo_state = 'unspent'""",
+        {"wid": wallet_id}        
+    )
+    return [dict(r) for r in rows]
+
+async def update_utxo_dust_flag(txid: str, vout: int, flag: bool) -> None:
+    await db.execute(
+        """UPDATE silnt.utxos SET suspected_dust = :flag
+           WHERE txid = :txid AND vout = :vout""",
+        {"flag": flag, "txid": txid, "vout": vout},
+    )
+
+
+async def update_utxo_frozen(txid: str, vout: int, frozen: bool) -> None:
+    await db.execute(
+        """UPDATE silnt.utxos SET frozen = :frozen
+           WHERE txid = :txid AND vout = :vout""",
+        {"frozen": frozen, "txid": txid, "vout": vout},
+    )
+
+async def owner_check_dust(txid: str, vout: int):
+    return await db.fetchone(
+        "SELECT wallet_id FROM silnt.utxos WHERE txid = :txid AND vout = :vout",
+        {"txid": txid, "vout": vout},
+    )
+
+async def get_eligible_utxos(
+    wallet_id: str,
+    txid_vout_pairs: list[tuple[str, int]],
+) -> list[dict]:
+    """
+    Return rows from silnt.utxos that are:
+      - belong to wallet_id
+      - state = 'unspent'
+      - NOT frozen
+      - match one of the (txid, vout) pairs supplied
+    """
+    if not txid_vout_pairs:
+        return []
+
+    # Build a parameterized IN-clause using row tuples
+    placeholders = []
+    params = {"wid": wallet_id}
+    for i, (txid, vout) in enumerate(txid_vout_pairs):
+        placeholders.append(f"(:t{i}, :v{i})")
+        params[f"t{i}"] = txid
+        params[f"v{i}"] = vout
+
+    sql = f"""
+        SELECT txid, vout, amount FROM silnt.utxos
+        WHERE wallet_id = :wid
+          AND utxo_state = 'unspent'
+          AND COALESCE(frozen, FALSE) = FALSE
+          AND (txid, vout) IN ({", ".join(placeholders)})
+    """
+    rows = await db.fetchall(sql, params)
+    return [dict(r) for r in rows]
+
+async def update_address_label(addr_id: str, label: Optional[str]) -> int:
+    """
+    Update only the label string on a labeled address. Returns rows affected.
+    Empty string is stored as NULL.
+    """
+    label_value = (label or "").strip() or None
+    result = await db.execute(
+        "UPDATE silnt.wallet_addresses SET label = :label WHERE id = :id",
+        {"label": label_value, "id": addr_id},
+    )
+    return getattr(result, "rowcount", 0) or 0
+
+async def get_wallet_unspent_utxos_for_dust_check(wallet_id: str) -> list[dict]:
+    rows = await db.fetchall(
+        """SELECT txid, vout, amount, suspected_dust
+           FROM silnt.utxos
+           WHERE wallet_id = :wid AND utxo_state = 'unspent'""",
+        {"wid": wallet_id},
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_wallet_owned_txids(wallet_id: str) -> set[str]:
+    rows = await db.fetchall(
+        "SELECT txid FROM silnt.utxos WHERE wallet_id = :wid",
+        {"wid": wallet_id},
+    )
+    return {r["txid"] for r in rows}
+
+
+async def mark_utxos_spent_by_tx(
+    wallet_id:       str,
+    input_outpoints: list[tuple[str, int]],
+    spending_txid:   str,
+) -> int:
+    """Mark UTXOs as spent by a tx we broadcast — also records spent_at timestamp."""
+    if not input_outpoints:
+        return 0    
+    now = int(time.time())
+
+    placeholders = []
+    params = {
+        "wid":           wallet_id,
+        "spending_txid": spending_txid,
+        "spent_at":      now,
+    }
+    for i, (in_txid, in_vout) in enumerate(input_outpoints):
+        placeholders.append(f"(:t{i}, :v{i})")
+        params[f"t{i}"] = in_txid
+        params[f"v{i}"] = in_vout
+
+    sql = f"""
+        UPDATE silnt.utxos
+        SET utxo_state    = 'unconfirmed_spent',
+            spent_in_txid = :spending_txid,
+            spent_at      = :spent_at
+        WHERE wallet_id = :wid
+          AND (txid, vout) IN ({", ".join(placeholders)})
+    """
+    result = await db.execute(sql, params)
+    return getattr(result, "rowcount", 0) or 0
+
+
+async def is_own_sent_tx(wallet_id: str, txid: str) -> bool:
+    """
+    Check if this wallet has broadcast a transaction with this txid.
+    A row exists with spent_in_txid = txid iff we broadcast it.
+    """
+    row = await db.fetchone(
+        """SELECT 1 FROM silnt.utxos
+           WHERE wallet_id = :wid AND spent_in_txid = :txid
+           LIMIT 1""",
+        {"wid": wallet_id, "txid": txid},
+    )
+    return row is not None
+
+async def get_wallet_owned_outpoints(wallet_id: str) -> set[tuple[str, int]]:
+    """
+    All (txid, vout) outpoints this wallet has ever owned, regardless of state.
+    Used to classify funding-tx inputs as self-send vs external.
+    """
+    rows = await db.fetchall(
+        "SELECT txid, vout FROM silnt.utxos WHERE wallet_id = :wid",
+        {"wid": wallet_id},
+    )
+    return {(r["txid"], int(r["vout"])) for r in rows}
+
+async def get_utxo_freeze_reason(txid: str, vout: int) -> Optional[str]:
+    """Return current freeze_reason ('auto'|'manual'|None) for a UTXO."""
+    row = await db.fetchone(
+        "SELECT freeze_reason FROM silnt.utxos WHERE txid = :txid AND vout = :vout",
+        {"txid": txid, "vout": vout},
+    )
+    return row["freeze_reason"] if row else None
+
+async def set_utxo_freeze_auto(txid: str, vout: int) -> None:
+    """Mark a UTXO as auto-frozen (dust eval owns this lock)."""
+    await db.execute(
+        """UPDATE silnt.utxos
+           SET frozen = TRUE, freeze_reason = 'auto'
+           WHERE txid = :txid AND vout = :vout
+           AND (freeze_reason IS NULL OR freeze_reason = 'auto')
+        """,
+
+        {"txid": txid, "vout": vout},
+    )
+
+
+async def set_utxo_freeze_manual(txid: str, vout: int) -> None:
+    """Mark a UTXO as manually frozen (user owns this lock)."""
+    await db.execute(
+        """UPDATE silnt.utxos
+           SET frozen = TRUE, freeze_reason = 'manual'
+           WHERE txid = :txid AND vout = :vout""",
+        {"txid": txid, "vout": vout},
+    )
+
+
+async def clear_utxo_freeze_auto(txid: str, vout: int) -> None:
+    """
+    Clear an auto-freeze. NO-OP if the UTXO was manually frozen — only the
+    user (via the unfreeze endpoint) can clear those.
+    """
+    await db.execute(
+        """UPDATE silnt.utxos
+           SET frozen = FALSE, freeze_reason = NULL
+           WHERE txid = :txid AND vout = :vout AND freeze_reason = 'auto'""",
+        {"txid": txid, "vout": vout},
+    )
+
+
+async def clear_utxo_freeze_manual(txid: str, vout: int) -> None:
+    """User-initiated unfreeze — clears regardless of who set it."""
+    await db.execute(
+        """UPDATE silnt.utxos
+           SET frozen = FALSE, freeze_reason = NULL
+           WHERE txid = :txid AND vout = :vout""",
+        {"txid": txid, "vout": vout},
+    )
+
+async def get_wallet_receives(wallet_id: str) -> list[dict]:
+    """
+    Group all owned UTXOs by funding txid. Each row = one tx where we received.
+    Returns: [{txid, timestamp, output_sum, output_count, labels[]}, ...]
+    """
+    rows = await db.fetchall(
+        """
+        SELECT
+            txid,
+            MIN(timestamp)             AS timestamp,
+            SUM(amount)                AS output_sum,
+            COUNT(*)                   AS output_count,
+            ARRAY_REMOVE(ARRAY_AGG(DISTINCT label), NULL) AS labels
+        FROM silnt.utxos
+        WHERE wallet_id = :wid
+        GROUP BY txid
+        """,
+        {"wid": wallet_id},
+    )
+    return [
+        {
+            "txid":         r["txid"],
+            "timestamp":    int(r["timestamp"] or 0),
+            "output_sum":   int(r["output_sum"] or 0),
+            "output_count": int(r["output_count"] or 0),
+            "labels":       list(r["labels"] or []),
+        }
+        for r in rows
+    ]
+
+
+async def get_wallet_sends(wallet_id: str) -> list[dict]:
+    """
+    Group all UTXOs we've spent by spent_in_txid. Each row = one tx we sent.
+    Returns: [{txid, spent_at, input_sum, input_count}, ...]
+    """
+    rows = await db.fetchall(
+        """
+        SELECT
+            spent_in_txid              AS txid,
+            MIN(spent_at)              AS spent_at,
+            SUM(amount)                AS input_sum,
+            COUNT(*)                   AS input_count
+        FROM silnt.utxos
+        WHERE wallet_id = :wid AND spent_in_txid IS NOT NULL
+        GROUP BY spent_in_txid
+        """,
+        {"wid": wallet_id},
+    )
+    return [
+        {
+            "txid":        r["txid"],
+            "spent_at":    int(r["spent_at"] or 0),
+            "input_sum":   int(r["input_sum"] or 0),
+            "input_count": int(r["input_count"] or 0),
+        }
+        for r in rows
+    ]
+
+
+async def get_utxos_for_txid(wallet_id: str, txid: str) -> list[dict]:
+    """All UTXOs we own at a given funding txid (for the detail view)."""
+    rows = await db.fetchall(
+        """SELECT txid, vout, amount, label, label_index, utxo_state, timestamp
+           FROM silnt.utxos
+           WHERE wallet_id = :wid AND txid = :txid
+           ORDER BY vout""",
+        {"wid": wallet_id, "txid": txid},
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_utxos_spent_in_tx(wallet_id: str, txid: str) -> list[dict]:
+    """All UTXOs we spent in a given tx (for the detail view's input list)."""
+    rows = await db.fetchall(
+        """SELECT txid, vout, amount, label, label_index, utxo_state, timestamp, spent_at
+           FROM silnt.utxos
+           WHERE wallet_id = :wid AND spent_in_txid = :txid
+           ORDER BY timestamp""",
+        {"wid": wallet_id, "txid": txid},
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_owned_pubkeys(wallet_id: str) -> set[str]:
+    """All x-only output pubkeys this wallet has ever owned — used to filter
+    out own change from a send tx's outputs (anything not in this set is
+    treated as a recipient)."""
+    rows = await db.fetchall(
+        "SELECT pub_key FROM silnt.utxos WHERE wallet_id = :wid",
+        {"wid": wallet_id},
+    )
+    return {r["pub_key"] for r in rows if r["pub_key"]}
+
+async def add_trusted_device(
+    user_id:    str,
+    device_id:  str,
+    user_agent: Optional[str],
+    ip:         Optional[str],
+    label:      Optional[str] = None,
+) -> dict:
+    now = int(time.time())
+    row_id = secrets.token_urlsafe(16)
+    await db.execute(
+        """INSERT INTO silnt.trusted_devices
+              (id, user_id, device_id, user_agent, ip, label, confirmed_at, last_seen_at)
+           VALUES (:id, :uid, :did, :ua, :ip, :label, :ts, :ts)
+           ON CONFLICT (user_id, device_id) DO UPDATE
+              SET last_seen_at = EXCLUDED.last_seen_at,
+                  user_agent   = EXCLUDED.user_agent,
+                  ip           = EXCLUDED.ip""",
+        {
+            "id":    row_id,
+            "uid":   user_id,
+            "did":   device_id,
+            "ua":    (user_agent or "")[:512],
+            "ip":    (ip or "")[:64],
+            "label": label,
+            "ts":    now,
+        },
+    )
+    return {"id": row_id, "device_id": device_id, "confirmed_at": now}
+
+
+async def get_trusted_device(user_id: str, device_id: str) -> Optional[TrustedDevice]:
+    row = await db.fetchone(
+        """SELECT * FROM silnt.trusted_devices
+           WHERE user_id = :uid AND device_id = :did""",
+        {"uid": user_id, "did": device_id},
+    )
+    return TrustedDevice(**dict(row)) if row else None
+
+
+async def list_trusted_devices(user_id: str) -> List[TrustedDevice]:
+    rows = await db.fetchall(
+        """SELECT * FROM silnt.trusted_devices
+           WHERE user_id = :uid
+           ORDER BY confirmed_at DESC""",
+        {"uid": user_id},
+    )
+    return [TrustedDevice(**dict(r)) for r in rows]
+
+
+async def count_trusted_devices(user_id: str) -> int:
+    row = await db.fetchone(
+        "SELECT COUNT(*) AS c FROM silnt.trusted_devices WHERE user_id = :uid",
+        {"uid": user_id},
+    )
+    return int(row["c"] or 0)
+
+
+async def revoke_trusted_device(user_id: str, device_row_id: str) -> int:
+    result = await db.execute(
+        """DELETE FROM silnt.trusted_devices
+           WHERE user_id = :uid AND id = :id""",
+        {"uid": user_id, "id": device_row_id},
+    )
+    return getattr(result, "rowcount", 0) or 0
+
+
+async def revoke_all_other_devices(user_id: str, keep_device_id: str) -> int:
+    result = await db.execute(
+        """DELETE FROM silnt.trusted_devices
+           WHERE user_id = :uid AND device_id != :keep""",
+        {"uid": user_id, "keep": keep_device_id},
+    )
+    return getattr(result, "rowcount", 0) or 0
+
+
+async def touch_trusted_device(user_id: str, device_id: str) -> None:
+    """Update last_seen_at when the device makes a request."""
+    await db.execute(
+        """UPDATE silnt.trusted_devices
+           SET last_seen_at = :ts
+           WHERE user_id = :uid AND device_id = :did""",
+        {"uid": user_id, "did": device_id, "ts": int(time.time())},
+    )

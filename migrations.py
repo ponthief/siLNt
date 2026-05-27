@@ -31,6 +31,11 @@ async def m001_initial(db):
             utxo_state TEXT NOT NULL,
             timestamp INTEGER NOT NULL DEFAULT 0,           
             wallet_id TEXT NOT NULL,
+            label TEXT DEFAULT NULL,
+            frozen BOOLEAN DEFAULT FALSE,
+            freeze_reason TEXT DEFAULT NULL,
+            suspected_dust BOOLEAN DEFAULT FALSE,
+            spent_in_txid TEXT DEFAULT NULL,
             label_index INTEGER
         );
     """
@@ -55,8 +60,46 @@ async def m002_subaccounts(db):
     CREATE TABLE IF NOT EXISTS silnt.wallet_addresses (
         sp_address TEXT PRIMARY KEY,
         id TEXT NOT NULL,
-        wallet_id TEXT NOT NULL,        
+        wallet_id TEXT NOT NULL,
+        label TEXT DEFAULT NULL,       
         label_index INTEGER NOT NULL,
         created_at INTEGER NOT NULL DEFAULT 0        
     )
     """)
+
+
+async def m003_add_spent_in_txid(db):    
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS utxos_spent_in_txid ON silnt.utxos(spent_in_txid)"
+    )
+
+async def m004_add_spent_at(db):
+    await db.execute(
+        "ALTER TABLE silnt.utxos ADD COLUMN IF NOT EXISTS spent_at INTEGER DEFAULT NULL"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS utxos_spent_at ON silnt.utxos(spent_at)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS utxos_wallet_timestamp ON silnt.utxos(wallet_id, timestamp)"
+    )
+
+async def m005_trusted_devices(db):
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS silnt.trusted_devices (
+            id              TEXT PRIMARY KEY,
+            user_id         TEXT NOT NULL,
+            device_id       TEXT NOT NULL,
+            user_agent      TEXT,
+            ip              TEXT,
+            label           TEXT,
+            confirmed_at    INTEGER NOT NULL,
+            last_seen_at    INTEGER NOT NULL,
+            UNIQUE(user_id, device_id)
+        )
+        """
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS trusted_devices_user ON silnt.trusted_devices(user_id)"
+    )

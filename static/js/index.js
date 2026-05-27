@@ -82,7 +82,18 @@ window.app = Vue.createApp({
         } catch (e) {
             return 'https://mempool.space'
           }        
-    }    
+    },
+    selectedUtxoLabels: function () {
+      if (!this.sendUtxos || !this.sendUtxos.length) return []
+      const labels = [
+        ...new Set(
+          this.sendUtxos
+            .filter(u => u.selected && u.label)
+            .map(u => u.label)
+        )
+      ]
+    return labels
+},   
   },
 
   methods: {
@@ -104,7 +115,9 @@ window.app = Vue.createApp({
           label: u.label,
           priv_key_tweak: u.priv_key_tweak,
           pub_key: u.pub_key,
-          wallet: wallet.id
+          wallet: wallet.id,
+          editingLabel: false,            // ← UI state
+          labelDraft: ''                  // ← UI state
         }))
 
         this.utxos.data = mappedUtxos
@@ -324,7 +337,7 @@ window.app = Vue.createApp({
       // Load unspent UTXOs for this wallet
       this.sendUtxos = (this.utxos.data || [])
         .filter(u => u.utxo_state === 'unspent' && u.wallet === wallet.id)
-        .map(u => ({ ...u, selected: false }))
+        .map(u => ({ ...u, selected: false, label: u.label || '' }))
       this.showSendDialog = true
     },
 

@@ -4,6 +4,8 @@ from base64 import b64encode
 import httpx
 import hashlib
 import re
+import secrets
+import time
 from .helpers.wallet import (
     generate_silent_wallet_address,
     decrypt_mnemonic,
@@ -13,10 +15,11 @@ from .helpers.wallet import (
 )
 from .helpers.scan import scan_wallet, get_scan_progress, request_scan_stop
 from .helpers.address_resolver import bip353_resolve
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, Cookie
 from lnbits.core.models import WalletTypeInfo
 from lnbits.decorators import require_admin_key, require_invoice_key
 from lnbits.helpers import urlsafe_short_hash
+from lnbits.settings import settings as lnbits_settings
 from loguru import logger
 from typing import Optional
 from .helpers.bip353_cloudflare import (
@@ -32,6 +35,19 @@ from .helpers.email_verification import (
 )
 from .helpers.scan_rate_limiter import check_scan_allowed, mark_scan_finished
 from .helpers.forgot_password import request_password_reset
+from .helpers.transactions import get_wallet_transaction_detail, list_wallet_transactions
+from lnbits.core.crud import get_account
+from lnbits.core.services.notifications import send_email_notification
+from .helpers.device_auth import (
+    require_trusted_device,
+    require_trusted_device_admin,    
+    make_device_confirm_token,
+    verify_device_confirm_token,
+    set_device_cookie,
+    get_client_ip,
+    DEVICE_COOKIE_NAME,
+    MAX_TRUSTED_DEVICES_PER_USER
+)
 from .crud import (
     get_silnt_wallets,
     create_silnt_wallet,
@@ -49,6 +65,7 @@ from .crud import (
     get_utxos_for_wallet,
     insert_utxos_for_wallet,
     update_unconfirmed_utxo,
+    save_wallet_address,
     get_wallet_addresses,
     count_wallet_addresses,
     insert_wallet_address,
@@ -56,7 +73,27 @@ from .crud import (
     delete_wallet_label_addresses,
     get_cloudflare_config,
     update_cloudflare_config,
-    count_silnt_wallets
+    count_silnt_wallets,
+    address_exists,
+    update_utxo_label_by_txid,
+    get_utxos_by_txid,
+    get_next_label_index,
+    label_index_taken,
+    owner_check_dust,
+    update_utxo_frozen,
+    get_eligible_utxos,
+    update_address_label,
+    get_wallet_address,
+    mark_utxos_spent_by_tx,
+    set_utxo_freeze_manual,
+    clear_utxo_freeze_manual,
+    count_trusted_devices,
+    list_trusted_devices,
+    add_trusted_device,
+    get_trusted_device,
+    touch_trusted_device,
+    revoke_trusted_device,
+    revoke_all_other_devices
 )
 
 from .models import (
@@ -72,11 +109,18 @@ from .models import (
     CloudflareConfig,
     SetupBip353Request,
     RecoverKeysRequest,
-    ForgotPasswordRequest
+    ForgotPasswordRequest,
+    UpdateUtxoLabel,
+    UpdateUtxoFrozenRequest,
+    UpdateAddressLabelRequest,
+    TrustedDevice,
+    DeviceCheckResponse,
+    DeviceConfirmResponse,
+    DeviceListResponse
 )
 
 MAX_ADDRESSES_PER_WALLET = 10
-
+BIP352_CHANGE_LABEL_INDEX = 1
 silnt_api_router = APIRouter()
 
 
@@ -86,13 +130,13 @@ silnt_api_router = APIRouter()
 @silnt_api_router.get("/api/v1/wallet", status_code=HTTPStatus.OK)
 async def api_wallets_retrieve(
     network: Optional[str] = Query(None),
-    key_info: WalletTypeInfo = Depends(require_invoice_key),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
 ) -> list[WalletAccount]:
     return await get_silnt_wallets(key_info.wallet.user, network)
 
 
 @silnt_api_router.get(
-    "/api/v1/wallet/{wallet_id}", dependencies=[Depends(require_invoice_key)]
+    "/api/v1/wallet/{wallet_id}", dependencies=[Depends(require_trusted_device)]
 )
 async def api_wallet_retrieve(wallet_id: str) -> WalletAccount:
     silnt_wallet = await get_silnt_wallet(wallet_id)
@@ -105,7 +149,7 @@ async def api_wallet_retrieve(wallet_id: str) -> WalletAccount:
 
 @silnt_api_router.post("/api/v1/wallet", status_code=HTTPStatus.OK)
 async def api_wallet_create(
-    data: CreateWallet, key_info: WalletTypeInfo = Depends(require_invoice_key)
+    data: CreateWallet, key_info: WalletTypeInfo = Depends(require_trusted_device)
 ) -> dict:
     try:
         wallet_id = urlsafe_short_hash()
@@ -199,7 +243,7 @@ async def api_wallet_create(
 async def api_wallet_update(
     wallet_id: str,
     data: CreateWallet,
-    key_info: WalletTypeInfo = Depends(require_invoice_key),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
 ) -> dict:
     try:
         wallet = await get_silnt_wallet(wallet_id)
@@ -240,7 +284,7 @@ async def api_wallet_update(
 
 
 @silnt_api_router.delete(
-    "/api/v1/wallet/{wallet_id}", dependencies=[Depends(require_invoice_key)]
+    "/api/v1/wallet/{wallet_id}", dependencies=[Depends(require_trusted_device)]
 )
 async def api_wallet_delete(wallet_id: str):
     wallet = await get_silnt_wallet(wallet_id)
@@ -256,7 +300,7 @@ async def api_wallet_delete(wallet_id: str):
 
 @silnt_api_router.get("/api/v1/wallet/{wallet_id}/addresses")
 async def api_get_wallet_addresses(
-    wallet_id: str, key_info: WalletTypeInfo = Depends(require_invoice_key)
+    wallet_id: str, key_info: WalletTypeInfo = Depends(require_trusted_device)
 ):
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
@@ -273,7 +317,7 @@ async def api_get_wallet_addresses(
 async def api_preview_wallet_address(
     wallet_id: str,
     data: PreviewAddressRequest,
-    key_info: WalletTypeInfo = Depends(require_invoice_key),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
@@ -283,6 +327,14 @@ async def api_preview_wallet_address(
     if wallet.user != key_info.wallet.user:
         raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
 
+    label_index = data.label_index
+    if label_index is None or label_index <= 0:
+        label_index = await get_next_label_index(wallet_id)
+    elif label_index == BIP352_CHANGE_LABEL_INDEX:
+        # m=1 is reserved per BIP-352 — silently bump to next free
+        label_index = await get_next_label_index(wallet_id)
+    elif await label_index_taken(wallet_id, label_index):
+        label_index = await get_next_label_index(wallet_id)
     spend_pub_hex = get_spend_pub_from_secret(data.spend_key)
     hrp = "sp" if wallet.network == "mainnet" else "tsp"
 
@@ -290,7 +342,7 @@ async def api_preview_wallet_address(
         sp_address = generate_labeled_sp_address(
             scan_secret_hex=data.scan_secret,
             spend_pub_hex=spend_pub_hex,
-            m=data.label_index,
+            m=label_index,
             hrp=hrp,
         )
     except Exception as e:
@@ -298,11 +350,9 @@ async def api_preview_wallet_address(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate address: {str(e)}",
         )
-
     return {
-        "sp_address": sp_address,
-        "label_index": data.label_index,
-        "wallet_id": wallet_id,
+        "sp_address":  sp_address,
+        "label_index": label_index,
     }
 
 
@@ -310,7 +360,7 @@ async def api_preview_wallet_address(
 async def api_delete_wallet_address(
     wallet_id: str,
     address_id: str,
-    key_info: WalletTypeInfo = Depends(require_invoice_key),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
@@ -327,7 +377,7 @@ async def api_delete_wallet_address(
 async def api_save_generated_wallet_address(
     wallet_id: str,
     data: SaveAddressRequest,
-    key_info: WalletTypeInfo = Depends(require_invoice_key),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
@@ -343,19 +393,40 @@ async def api_save_generated_wallet_address(
             status_code=HTTPStatus.BAD_REQUEST,
             detail=f"Maximum of {MAX_ADDRESSES_PER_WALLET} addresses per wallet reached.",
         )
-    addr_id = urlsafe_short_hash()
-    await insert_wallet_address(wallet_id, data.sp_address, data.label_index, addr_id)
-    return {
-        "sp_address": data.sp_address,
-        "label_index": data.label_index,
-        "wallet_id": wallet_id,
-        "id": addr_id,
-    }
+    if await address_exists(wallet_id, data.sp_address):
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail="This address is already saved on this wallet. Generate a new one.",
+        )
+    # Determine the label_index — trust server, not stale client state
+    label_index = data.label_index
+    if label_index is None or label_index <= 0:
+        label_index = await get_next_label_index(wallet_id)
+    elif await label_index_taken(wallet_id, label_index):
+        # Bump to next free instead of erroring
+        label_index = await get_next_label_index(wallet_id)
+    if label_index == BIP352_CHANGE_LABEL_INDEX:
+      # m=1 is reserved for change — bump to next free
+      label_index = await get_next_label_index(wallet_id)
+
+    try:
+        return await save_wallet_address(
+            wallet_id   = wallet_id,
+            sp_address  = data.sp_address,
+            label       = data.label,
+            label_index = label_index,
+        )
+    except Exception as e:
+        logger.error(f"save_wallet_address failed: {e}")
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail="Could not save labeled address. Please contact your administrator.",
+        )    
 
 
 @silnt_api_router.get(
     "/api/v1/oracle/tip",
-    dependencies=[Depends(require_invoice_key)],
+    dependencies=[Depends(require_trusted_device)],
 )
 async def api_get_chain_tip():
     blindbit = await get_blindbit_config()
@@ -384,7 +455,7 @@ async def api_get_chain_tip():
 
 @silnt_api_router.get("/api/v1/blindbit/config")
 async def api_get_blindbit_config(
-    key_info: WalletTypeInfo = Depends(require_invoice_key),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
 ) -> BlindbitConfig:
     """Any authenticated user can read the blindbit endpoint (needed to trigger scan).
     Credentials (user/pass) are included so the scan proxy can use them server-side."""
@@ -393,7 +464,7 @@ async def api_get_blindbit_config(
 
 @silnt_api_router.put("/api/v1/blindbit/config")
 async def api_update_blindbit_config(
-    data: BlindbitConfig, key_info: WalletTypeInfo = Depends(require_admin_key)
+    data: BlindbitConfig, key_info: WalletTypeInfo = Depends(require_trusted_device_admin)
 ) -> BlindbitConfig:
     """Only admin can write blindbit connection settings."""
     return await update_blindbit_config(data)
@@ -405,10 +476,10 @@ async def api_update_blindbit_config(
 @silnt_api_router.get(
     "/api/v1/utxos",
     description="Fetch UTXOs from blindbit",
-    dependencies=[Depends(require_invoice_key)],
+    dependencies=[Depends(require_trusted_device)],
 )
 async def api_get_utxos(
-    wallet_id: str = Query(...), key_info: WalletTypeInfo = Depends(require_invoice_key)
+    wallet_id: str = Query(...), key_info: WalletTypeInfo = Depends(require_trusted_device)
 ):
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
@@ -425,7 +496,8 @@ async def api_get_utxos(
 async def api_scan_wallet(
     wallet_id: str,
     data: ScanWalletRequest,
-    key_info: WalletTypeInfo = Depends(require_invoice_key),
+    request: Request,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
@@ -476,9 +548,22 @@ async def api_scan_wallet(
         return result
     except ValueError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+    except RuntimeError as e:
+        # Our scan code raises RuntimeError with user-friendly messages —
+        # surface those without leaking implementation details
+        logger.error(f"Scan runtime error for {wallet_id}: {e}")
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
     except Exception as e:
-        logger.error(f"Scan failed: {e}")
-        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail=str(e))
+        # Catch-all for unexpected errors — generic message to the user,
+        # full traceback in server logs
+        logger.error(f"Scan unexpected error for {wallet_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred during scanning. Please contact your administrator.",
+        )
 
     finally:
         # ALWAYS release the concurrent-scan slot, even on error/exception
@@ -486,7 +571,7 @@ async def api_scan_wallet(
 
 @silnt_api_router.post("/api/v1/wallet/{wallet_id}/scan/stop")
 async def api_stop_scan(
-    wallet_id: str, key_info: WalletTypeInfo = Depends(require_invoice_key)
+    wallet_id: str, key_info: WalletTypeInfo = Depends(require_trusted_device)
 ):
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
@@ -507,15 +592,15 @@ async def api_resolve_bip353(
     address: str = Query(
         ..., description="BIP353 address in email format, e.g. alice@domain.com"
     ),
-    key_info: WalletTypeInfo = Depends(require_invoice_key),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
 ) -> dict:
     return bip353_resolve(address=address)
 
 
 # Transactions
-@silnt_api_router.post("/api/v1/tx/build", dependencies=[Depends(require_admin_key)])
+@silnt_api_router.post("/api/v1/tx/build", dependencies=[Depends(require_trusted_device_admin)])
 async def api_build_transaction(
-    data: BuildTxRequest, key_info: WalletTypeInfo = Depends(require_admin_key)
+    data: BuildTxRequest, key_info: WalletTypeInfo = Depends(require_trusted_device_admin)
 ):
     try:
         wallet = await get_silnt_wallet(data.wallet_id)
@@ -532,7 +617,49 @@ async def api_build_transaction(
             raise HTTPException(
                 status_code=HTTPStatus.BAD_REQUEST, detail="spend_key is required."
             )
+        if not data.scan_secret:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail="scan_secret is required (used to derive change address).",
+            )
+        # ── Validate UTXOs against the DB: refuse frozen, refuse non-owned ──
+        if not data.utxos:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail="No UTXOs provided for the transaction.",
+            )
 
+        def _txid_of(u):
+            return u["txid"] if isinstance(u, dict) else u.txid
+
+        def _vout_of(u):
+            if isinstance(u, dict):
+                return int(u.get("vout", 0))
+            return int(getattr(u, "vout", 0) or 0)
+        
+        passed_txids_vouts = [(_txid_of(u), _vout_of(u)) for u in data.utxos]
+        eligible_rows = await get_eligible_utxos(
+            wallet_id=data.wallet_id,
+            txid_vout_pairs=passed_txids_vouts,
+        )
+        eligible_set = {(r["txid"], r["vout"]) for r in eligible_rows}
+
+        # Anything passed but not in eligible_set is either frozen, not unspent,
+        # or doesn't belong to this wallet
+        rejected = [
+            (_txid_of(u), _vout_of(u)) for u in data.utxos
+            if (_txid_of(u), _vout_of(u)) not in eligible_set
+        ]
+        if rejected:
+            rejected_str = ", ".join(f"{t[:12]}…:{v}" for t, v in rejected)
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail=(
+                    f"Cannot spend these UTXOs ({rejected_str}). "
+                    f"They are either frozen, already spent, or don't belong "
+                    f"to this wallet. Unfreeze them or remove from selection."
+                ),
+            )
         if "@" in data.recipient:
             user, domain = data.recipient.strip().split("@")
             if user and domain:
@@ -544,9 +671,10 @@ async def api_build_transaction(
                         detail="Address must resolve to Silent Payment address (sp1).",
                     )
                 data.recipient = result
-
+        
         result = build_transaction(
             spend_key_hex=data.spend_key,
+            scan_secret_hex = data.scan_secret,
             recipient=data.recipient,
             amount=data.amount,
             fee_rate=data.fee_rate,
@@ -565,7 +693,7 @@ async def api_build_transaction(
 
 
 @silnt_api_router.post(
-    "/api/v1/tx/broadcast", dependencies=[Depends(require_admin_key)]
+    "/api/v1/tx/broadcast", dependencies=[Depends(require_trusted_device_admin)]
 )
 async def api_broadcast_transaction(data: BroadcastTxRequest):
     try:
@@ -590,6 +718,12 @@ async def api_broadcast_transaction(data: BroadcastTxRequest):
                 logger.info(
                     f"Marked {len(data.spent_txids)} UTXOs as unconfirmed_spent after broadcast of {txid}"
                 )
+                input_outpoints = [(u_txid, u_vout) for u_txid, u_vout in data.spent_outpoints]
+                await mark_utxos_spent_by_tx(
+                    wallet_id=data.wallet_id,
+                    input_outpoints=input_outpoints,
+                    spending_txid=txid,
+                )
             return {"txid": txid}
 
     except HTTPException:
@@ -609,7 +743,7 @@ async def api_broadcast_transaction(data: BroadcastTxRequest):
 async def api_recover_wallet_keys(
     wallet_id: str,
     data: RecoverKeysRequest,
-    key_info: WalletTypeInfo = Depends(require_invoice_key),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
     """
     Re-derive scan_secret and spend_key from mnemonic for an existing wallet.
@@ -654,7 +788,7 @@ async def api_recover_wallet_keys(
 
 @silnt_api_router.get("/api/v1/config")
 async def api_get_config(
-    key_info: WalletTypeInfo = Depends(require_invoice_key),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
 ) -> dict:
     blindbit = await get_blindbit_config()
     config = Config()
@@ -664,12 +798,13 @@ async def api_get_config(
         "sats_denominated": config.sats_denominated,
         "network": config.network,
         "min_scan_height":   blindbit.min_scan_height or 0,
-        "wallet_count":         current
+        "wallet_count":         current,
+        "dust_threshold_sats": blindbit.dust_threshold_sats or 5000
     }
 
 @silnt_api_router.get(
     "/api/v1/wallet/{wallet_id}/scan/progress",
-    dependencies=[Depends(require_invoice_key)],
+    dependencies=[Depends(require_trusted_device)],
 )
 async def api_scan_progress(wallet_id: str):
     return get_scan_progress(wallet_id)
@@ -678,7 +813,7 @@ async def api_scan_progress(wallet_id: str):
 # ── GET Cloudflare config (admin only) ───────────────────────────────────────
 @silnt_api_router.get("/api/v1/cloudflare/config")
 async def api_get_cloudflare_config(
-    key_info: WalletTypeInfo = Depends(require_admin_key),
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
 ) -> CloudflareConfig:
     cf = await get_cloudflare_config()
     # Backfill domain if credentials are present but domain is missing
@@ -696,7 +831,7 @@ async def api_get_cloudflare_config(
 @silnt_api_router.put("/api/v1/cloudflare/config")
 async def api_update_cloudflare_config(
     data: CloudflareConfig,
-    key_info: WalletTypeInfo = Depends(require_admin_key),
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
 ) -> CloudflareConfig:
     # Verify token + zone by fetching domain — also auto-populates data.domain
     if data.api_token and data.zone_id:
@@ -717,7 +852,7 @@ async def api_update_cloudflare_config(
 async def api_setup_bip353(
     wallet_id: str,
     data: SetupBip353Request,
-    key_info: WalletTypeInfo = Depends(require_invoice_key),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
@@ -776,7 +911,7 @@ async def api_setup_bip353(
 @silnt_api_router.delete("/api/v1/wallet/{wallet_id}/bip353")
 async def api_delete_bip353(
     wallet_id: str,
-    key_info: WalletTypeInfo = Depends(require_invoice_key),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
@@ -828,3 +963,309 @@ async def api_forgot_password(data: ForgotPasswordRequest, request: Request) -> 
             detail="Valid email address required.",
         )
     return await request_password_reset(data.email.strip().lower(), request)
+
+# UTXO Labels
+@silnt_api_router.put("/api/v1/utxos/{txid}/label")
+async def api_update_utxo_label(
+    txid: str,
+    data: UpdateUtxoLabel,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    utxos = await get_utxos_by_txid(txid)
+     # Find the UTXO(s) by txid and verify ownership via their parent wallet
+    utxos = await get_utxos_by_txid(txid)
+    if not utxos:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="UTXO not found.")
+
+    # All matching UTXOs should belong to a wallet the caller owns
+    for utxo in utxos:
+        wallet = await get_silnt_wallet(utxo.wallet_id)
+        if not wallet or wallet.user != key_info.wallet.user:
+            raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+
+    updated = await update_utxo_label_by_txid(txid, data.label)
+    return {"txid": txid, "label": data.label, "updated": updated}
+
+@silnt_api_router.put("/api/v1/wallet/{wallet_id}/addresses/{addr_id}/label")
+async def api_update_address_label(
+    wallet_id: str,
+    addr_id: str,
+    data: UpdateAddressLabelRequest,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
+    if wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+
+    # Lookup the address to verify it belongs to this wallet AND grab its old label
+    addr = await get_wallet_address(addr_id)
+    if not addr:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Labeled address not found.")
+    if addr.wallet_id != wallet_id:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Address does not belong to this wallet.")
+
+    new_label = (data.label or "").strip() or None
+
+    await update_address_label(addr_id, new_label)
+
+    return {
+        "id":          addr_id,
+        "label":       new_label,
+        "label_index": addr.label_index,
+        "sp_address":  addr.sp_address,
+    }
+
+@silnt_api_router.put("/api/v1/utxos/{txid}/{vout}/frozen")
+async def api_set_utxo_frozen(
+    txid: str,
+    vout: int,
+    data: UpdateUtxoFrozenRequest,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    utxos = await get_utxos_by_txid(txid)
+    if not utxos:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="UTXO not found.")
+    matching = next((u for u in utxos if u.vout == vout), None)
+    if not matching:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="UTXO not found at that vout.")
+
+    wallet = await get_silnt_wallet(matching.wallet_id)
+    if not wallet or wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+
+    if data.frozen:
+        await set_utxo_freeze_manual(txid, vout)
+    else:
+        await clear_utxo_freeze_manual(txid, vout)
+
+    return {"txid": txid, "vout": vout, "frozen": data.frozen}
+
+@silnt_api_router.get("/api/v1/wallet/{wallet_id}/transactions")
+async def api_list_wallet_transactions(
+    wallet_id: str,
+    limit:     int = 50,
+    offset:    int = 0,
+    key_info:  WalletTypeInfo = Depends(require_trusted_device),
+):
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
+    if wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+
+    txs = await list_wallet_transactions(wallet_id, limit=limit, offset=offset)
+    return {"transactions": txs}
+
+
+@silnt_api_router.get("/api/v1/wallet/{wallet_id}/transactions/{txid}")
+async def api_get_wallet_transaction(
+    wallet_id: str,
+    txid:      str,
+    key_info:  WalletTypeInfo = Depends(require_trusted_device),
+):
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
+    if wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+
+    return await get_wallet_transaction_detail(wallet_id, txid)
+
+@silnt_api_router.post("/api/v1/auth/device-check")
+async def api_device_check(
+    request:  Request,
+    response: Response,
+    key_info: WalletTypeInfo = Depends(require_invoice_key),
+):
+    """
+    Called by Thrilla after a successful login. If the device cookie is missing
+    or unknown, send a confirmation email and return 'pending'. Otherwise
+    refresh the cookie and return 'trusted'.
+    """
+    user_id  = key_info.wallet.user
+    cookie   = request.cookies.get(DEVICE_COOKIE_NAME)
+    ua       = request.headers.get("user-agent", "")[:512]
+    ip       = get_client_ip(request)
+
+    # Check if a cookie exists AND is in trusted set
+    if cookie:
+        existing = await get_trusted_device(user_id, cookie)
+        if existing:
+            # Already trusted — touch + return
+            await touch_trusted_device(user_id, cookie)
+            # Refresh cookie expiry
+            set_device_cookie(response, cookie)
+            return DeviceCheckResponse(
+                status       = "trusted",
+                device_count = await count_trusted_devices(user_id),
+                cap          = MAX_TRUSTED_DEVICES_PER_USER,
+            )
+
+    # New device — generate a fresh device_id (server-issued)
+    new_device_id = secrets.token_urlsafe(24)
+
+    # Check the cap
+    current_count = await count_trusted_devices(user_id)
+    if current_count >= MAX_TRUSTED_DEVICES_PER_USER:
+        # Still send email — but the confirmation step will reject
+        # Better UX: tell the user up front
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=(
+                f"This account already has {MAX_TRUSTED_DEVICES_PER_USER} "
+                f"trusted devices (the maximum). Sign in from a trusted device "
+                f"and revoke one in Settings → Devices before continuing."
+            ),
+        )
+
+    # Look up the user's email
+    account = await get_account(user_id)
+    if not account or not account.email:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="This account has no email address. Cannot send confirmation.",
+        )
+
+    # Build + send the confirmation email
+    token = make_device_confirm_token(user_id, new_device_id, ua, ip)
+    # NOTE: configure base URL appropriately for your deployment
+    base_url = "https://signet.thrilla.me"
+    confirm_url = f"{base_url.rstrip('/')}/confirm-device?token={token}"
+
+    subject = "Confirm a new device on your wallet"
+    body = (
+        f"Hi {account.username or 'there'},\n\n"
+        f"A new device tried to sign in to your wallet:\n\n"
+        f"  Browser: {ua or 'unknown'}\n"
+        f"  IP:      {ip or 'unknown'}\n"
+        f"  Time:    {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}\n\n"
+        f"If this was you, confirm the device here:\n\n"
+        f"  {confirm_url}\n\n"
+        f"This link expires in 1 hour.\n\n"
+        f"If this WASN'T you, change your password immediately and ignore this email."
+    )
+
+    res = await send_email_notification(
+        to_emails = [account.email],
+        message   = body,
+        subject   = subject,
+    )
+    if res.get("status") != "ok":
+        logger.warning(f"Device confirmation email failed: {res}")
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail="Could not send confirmation email. Please contact your administrator.",
+        )
+
+    # Set the cookie now — but the device won't be trusted until confirmed.
+    # Future requests will carry the cookie; the confirm endpoint reads it
+    # from the URL token (more reliable than relying on the cookie at click-time).
+    set_device_cookie(response, new_device_id)
+
+    return DeviceCheckResponse(
+        status       = "pending",
+        device_count = current_count,
+        cap          = MAX_TRUSTED_DEVICES_PER_USER,
+    )
+
+
+@silnt_api_router.get("/api/v1/auth/device-confirm")
+async def api_device_confirm(
+    request:  Request,
+    response: Response,
+    token:    str,
+):
+    """
+    Called when the user clicks the link in the confirmation email.
+    Validates the token + cap, then writes the device into trusted_devices.
+    Also sets the cookie (in case the user opened the link in a different
+    tab/window without the cookie present).
+    """
+    payload = verify_device_confirm_token(token)
+    if not payload:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Invalid or expired confirmation token.",
+        )
+
+    user_id   = payload["user_id"]
+    device_id = payload["device_id"]
+    ua        = payload.get("ua", "")
+    ip        = payload.get("ip", "")
+
+    # Hard cap re-check at confirm time (cap may have changed since email)
+    current_count = await count_trusted_devices(user_id)
+    if current_count >= MAX_TRUSTED_DEVICES_PER_USER:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=(
+                f"This account already has {MAX_TRUSTED_DEVICES_PER_USER} "
+                f"trusted devices. Revoke one before adding another."
+            ),
+        )
+
+    await add_trusted_device(
+        user_id    = user_id,
+        device_id  = device_id,
+        user_agent = ua,
+        ip         = ip,
+    )
+
+    # Ensure the cookie matches (in case user opened link in different browser)
+    set_device_cookie(response, device_id)
+
+    return DeviceConfirmResponse(
+        confirmed    = True,
+        device_count = current_count + 1,
+        cap          = MAX_TRUSTED_DEVICES_PER_USER,
+    )
+
+
+@silnt_api_router.get("/api/v1/devices")
+async def api_list_devices(
+    request:  Request,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+    silnt_device_id: Optional[str] = Cookie(default=None),
+):
+    devices = await list_trusted_devices(key_info.wallet.user)
+    return DeviceListResponse(
+        devices        = devices,
+        current_device = silnt_device_id,
+        cap            = MAX_TRUSTED_DEVICES_PER_USER,
+    )
+
+
+@silnt_api_router.delete("/api/v1/devices/{device_row_id}")
+async def api_revoke_device(
+    device_row_id: str,
+    request:  Request,
+    response: Response,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+    silnt_device_id: Optional[str] = Cookie(default=None),
+):
+    devices = await list_trusted_devices(key_info.wallet.user)
+    target  = next((d for d in devices if d.id == device_row_id), None)
+    if not target:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Device not found.")
+
+    deleted = await revoke_trusted_device(key_info.wallet.user, device_row_id)
+
+    # If user revoked the CURRENT device, clear the cookie too
+    if target.device_id == silnt_device_id:
+        response.delete_cookie(DEVICE_COOKIE_NAME, path="/")
+
+    return {"deleted": bool(deleted), "device_row_id": device_row_id}
+
+
+@silnt_api_router.post("/api/v1/devices/sign-out-others")
+async def api_sign_out_others(
+    request:  Request,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+    silnt_device_id: Optional[str] = Cookie(default=None),
+):
+    if not silnt_device_id:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="No active device.")
+    removed = await revoke_all_other_devices(key_info.wallet.user, silnt_device_id)
+    return {"removed_count": removed}

@@ -120,6 +120,41 @@
             <div v-if="props.row.timestamp" v-text="formatTimestamp(props.row.timestamp)"></div>
             <div v-else class="text-grey text-caption">N/A</div>
           </q-td>
+          <q-td key="label" :props="props">
+            <q-chip
+              v-if="props.row.label && !props.row.editingLabel"
+              dense
+              color="deep-purple"
+              text-color="white"
+              style="font-size:11px"
+              @click="startEditLabel(props.row)"
+              clickable
+            >
+              <span v-text="props.row.label"></span>
+              <q-tooltip>Click to edit label</q-tooltip>
+            </q-chip>
+            <q-btn
+              v-else-if="!props.row.editingLabel"
+              flat dense size="xs"
+              icon="label_outline"
+              color="grey"
+              @click="startEditLabel(props.row)"
+            >
+              <q-tooltip>Add label</q-tooltip>
+            </q-btn>
+            <div v-if="props.row.editingLabel" class="row no-wrap items-center">
+              <q-input
+                v-model="props.row.labelDraft"
+                dense
+                autofocus
+                style="width:120px;font-size:12px"
+                @keyup.enter="saveLabel(props.row)"
+                @keyup.escape="cancelEditLabel(props.row)"
+              ></q-input>
+              <q-btn flat dense size="xs" icon="check" color="positive" @click="saveLabel(props.row)"></q-btn>
+              <q-btn flat dense size="xs" icon="close" color="grey" @click="cancelEditLabel(props.row)"></q-btn>
+            </div>
+          </q-td>
         </q-tr>
 
         <!-- Expanded detail row -->

@@ -1,5 +1,23 @@
 <q-card>
   <q-card-section>
+    <q-banner class="bg-warning text-dark q-mb-md" rounded>
+        <template v-slot:avatar>
+          <q-icon name="info" />
+        </template>
+        Wallet operations (scan, send, generate labeled addresses) are available
+        in the <strong>Thrilla</strong> mobile/web app, where keys are stored
+        securely on your device.
+        <template v-slot:action>
+          <q-btn
+            flat
+            dense
+            :href="thrillaUrl"
+            target="_blank"
+            label="Open Thrilla"
+            icon-right="open_in_new"
+          />
+        </template>
+    </q-banner>
     <div class="row items-center no-wrap q-mb-md justify-between">
       <div class="col-auto">
         <q-btn-dropdown
@@ -108,15 +126,10 @@
             <div v-text="props.row.balance"></div>
           </q-td>          
           <q-td auto-width style="vertical-align: top">
-            <q-btn
-              flat
-              dense
-              size="xs"
-              @click="$emit('send-wallet', props.row)"
-              icon="send"
-              color="green"
-            >
-              <q-tooltip>Send</q-tooltip>
+            <q-btn flat dense disable size="xs" color="grey" icon="send" label="Send">
+              <q-tooltip>
+                Sending requires client-side keys. Use the Thrilla app on this wallet.
+              </q-tooltip>
             </q-btn>
             <q-btn
               flat
@@ -128,15 +141,10 @@
             >
               <q-tooltip>Load UTXOs from DB</q-tooltip>
             </q-btn>
-            <q-btn
-              flat
-              dense
-              size="xs"
-              @click="$emit('scan-wallet', props.row)"
-              icon="radar"
-              color="green"
-            >                  
-              <q-tooltip>Scan Blockchain</q-tooltip>
+            <q-btn flat dense disable size="xs" color="grey" icon="search" label="Scan">
+              <q-tooltip>
+                Scanning requires client-side keys. Use the Thrilla app on this wallet.
+              </q-tooltip>
             </q-btn>
             <q-btn
               flat
@@ -170,15 +178,10 @@
                 >Deleting wallet will also delete all UTXOs</q-tooltip
               >
             </q-btn>
-            <q-btn
-              flat
-              dense
-              size="xs"
-              @click="generateAddress(props.row)"
-              icon="add_circle_outline"
-              color="deep-purple"
-            >
-              <q-tooltip>Generate SP Address</q-tooltip>
+            <q-btn flat dense disable size="xs" color="grey" icon="add" label="Add Labeled Address">
+              <q-tooltip>
+                Address generation requires client-side keys. Use the Thrilla app.
+              </q-tooltip>
             </q-btn>
           </q-td>
         </q-tr>

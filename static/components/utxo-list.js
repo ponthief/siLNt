@@ -49,7 +49,14 @@ window.app.component('utxo-list', {
             field: 'timestamp',
             sortable: true,
             sort: (a, b) => a - b
-          }
+          },
+          {
+            name: 'label',
+            align: 'left',
+            label: 'Label',
+            field: 'label',
+            sortable: false
+          },
         ],
         pagination: {
           rowsPerPage: 10
@@ -133,6 +140,35 @@ window.app.component('utxo-list', {
       this.utxoSelectAmount = this.payedAmount
       this.applyUtxoSelectionMode()
     },
+    startEditLabel: function (utxo) {
+        utxo.editingLabel = true
+        utxo.labelDraft = utxo.label || ''
+      },
+
+      cancelEditLabel: function (utxo) {
+        utxo.editingLabel = false
+        utxo.labelDraft = ''
+      },
+
+      saveLabel: async function (utxo) {
+        try {
+          await LNbits.api.request(
+            'PUT',
+            `/siLNt/api/v1/utxos/${utxo.txid}/label`,
+            this.g.user.wallets[0].inkey,
+            { label: utxo.labelDraft || '' }
+          )
+          utxo.label = utxo.labelDraft || ''
+          utxo.editingLabel = false
+          Quasar.Notify.create({
+            type: 'positive',
+            message: utxo.label ? `Label set: ${utxo.label}` : 'Label cleared.',
+            timeout: 3000
+          })
+        } catch (error) {
+          LNbits.utils.notifyApiError(error)
+        }
+      },
     applyUtxoSelectionMode: function () {
       const mode = this.utxoSelectionMode
       const isSelectAll = mode === 'Select All'

@@ -18,11 +18,11 @@ from ..crud import (
     insert_utxos_for_wallet,
     update_balance,
 )
-
+from .dust_check import evaluate_dust_for_wallet
 _scan_progress: dict[str, dict] = {}
 _scan_stop: dict[str, bool] = {}
 SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-
+BIP352_CHANGE_LABEL_INDEX = 1
 
 @dataclass
 class Label:
@@ -49,6 +49,7 @@ class OwnedUTXO:
     utxo_state: str
     timestamp: int = 0
     label: Optional[Label] = None
+    label_text: Optional[str] = None
 
     def to_db_row(self, wallet_id: str) -> dict:
         return {
@@ -60,6 +61,7 @@ class OwnedUTXO:
             "utxo_state": self.utxo_state,
             "timestamp": self.timestamp,
             "wallet_id": wallet_id,
+            "label": self.label_text
         }
 
 
@@ -141,7 +143,8 @@ def create_label(scan_key: bytes, m: int) -> Label:
 
 
 def create_labels(scan_key: bytes, indices: list[int]) -> list[Label]:
-    return [create_label(scan_key, m) for m in sorted(set([0] + indices))]
+    all_indices = sorted(set([0, BIP352_CHANGE_LABEL_INDEX] + list(indices)))
+    return [create_label(scan_key, m) for m in all_indices]
 
 
 def match_labels(
@@ -534,7 +537,11 @@ async def scan_wallet(
     labels = create_labels(
         scan_secret_bytes, indices=[a.label_index for a in saved_addresses]
     )
-
+    addr_label_map: dict[int, str] = {
+        a.label_index: a.label
+        for a in saved_addresses
+        if getattr(a, "label", None)
+    }
     total_found = 0
     blocks_scanned = 0
     last_scanned_height = start
@@ -585,9 +592,25 @@ async def scan_wallet(
                 logger.error(f"Block {h} error: {result}")
                 continue
             if result:
-                await insert_utxos_for_wallet(wallet_id, result)
-                total_found += len(result)
-                logger.info(f"Block {h}: {len(result)} UTXOs")
+                # Inherit address labels onto matching UTXOs (added earlier)
+                for owned in result:
+                    if owned.label and owned.label.m in addr_label_map:
+                        owned.label_text = addr_label_map[owned.label.m]
+                try:
+                    await insert_utxos_for_wallet(wallet_id, result)
+                    total_found += len(result)
+                    logger.info(f"Block {h}: {len(result)} UTXOs")
+                except Exception as ins_err:
+                    # Log full DB error server-side for the admin to investigate,
+                    # but don't crash the whole scan — just skip this block's results
+                    logger.error(
+                        f"Block {h}: found {len(result)} UTXO(s) but DB insert failed: {ins_err}"
+                    )
+                    # Bubble up a clean signal to the caller
+                    raise RuntimeError(
+                        f"Found UTXO(s) at block {h} but they could not be saved. "
+                        f"Please contact your administrator. (Internal error: insert failed)"
+                    )
             blocks_scanned += 1
             last_scanned_height = h
 
@@ -605,6 +628,12 @@ async def scan_wallet(
     )
     balance = sum(r["amount"] for r in unspent)
     await update_balance(wallet_id, balance)
+    try:        
+        newly_flagged = await evaluate_dust_for_wallet(wallet_id)
+        if newly_flagged > 0:
+            logger.info(f"Wallet {wallet_id}: flagged {newly_flagged} new dust UTXO(s)")
+    except Exception as e:
+        logger.warning(f"Dust evaluation failed for {wallet_id}: {e}")
     logger.info(
         f"Scan done: {blocks_scanned} blocks, {total_found} UTXOs, balance={balance}"
     )
