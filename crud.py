@@ -12,7 +12,9 @@ from .models import (
     WalletAddress,
     CloudflareConfig,
     UpdateUtxoLabel,
-    TrustedDevice
+    TrustedDevice,
+    UserPrefs,
+    Bip353Request
 )
 
 from embit.descriptor import Descriptor, Key
@@ -151,18 +153,20 @@ async def get_utxos_for_wallet(wallet_id: str) -> list[UTXORecord]:
 async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> None:
     for utxo in utxos:
         await db.execute(
-            """INSERT INTO silnt.utxos (txid, vout, amount, priv_key_tweak, pub_key, utxo_state, timestamp, wallet_id, label)
-            VALUES (:txid, :vout, :amount, :priv_key_tweak, :pub_key, :utxo_state, :timestamp, :wallet_id, :label)
-            ON CONFLICT (txid) DO UPDATE SET
-                amount = EXCLUDED.amount,
-                priv_key_tweak = EXCLUDED.priv_key_tweak,
-                pub_key = EXCLUDED.pub_key,
-                utxo_state = CASE
-                    WHEN silnt.utxos.utxo_state IN ('spent', 'unconfirmed_spent')
-                    THEN silnt.utxos.utxo_state
-                    ELSE EXCLUDED.utxo_state
-                END,
-                label = COALESCE(silnt.utxos.label, EXCLUDED.label)
+            """INSERT INTO silnt.utxos
+                 (txid, vout, amount, priv_key_tweak, pub_key, utxo_state, timestamp, wallet_id, label)
+               VALUES
+                 (:txid, :vout, :amount, :priv_key_tweak, :pub_key, :utxo_state, :timestamp, :wallet_id, :label)
+               ON CONFLICT (txid, vout, wallet_id) DO UPDATE SET
+                 amount         = EXCLUDED.amount,
+                 priv_key_tweak = EXCLUDED.priv_key_tweak,
+                 pub_key        = EXCLUDED.pub_key,
+                 utxo_state     = CASE
+                     WHEN silnt.utxos.utxo_state IN ('spent', 'unconfirmed_spent')
+                     THEN silnt.utxos.utxo_state
+                     ELSE EXCLUDED.utxo_state
+                 END,
+                 label = COALESCE(silnt.utxos.label, EXCLUDED.label)
             """,
             utxo.to_db_row(wallet_id),
         )
@@ -300,7 +304,7 @@ async def count_silnt_wallets(user: str, network: Optional[str] = None) -> int:
     return row["c"] if row else 0
 
 async def update_utxo_label_by_txid(
-    txid: str, label: Optional[str], wallet_id: Optional[str] = None
+    txid: str, label: Optional[str], wallet_id: Optional[str]
 ) -> int:
     """
     Set or clear the label on UTXO(s) matching the given txid.
@@ -512,6 +516,30 @@ async def mark_utxos_spent_by_tx(
     result = await db.execute(sql, params)
     return getattr(result, "rowcount", 0) or 0
 
+async def mark_utxos_spent_by_outpoints(
+    wallet_id:     str,
+    outpoints:     list[tuple[str, int]],   # [(txid, vout), ...]
+    spending_txid: str,
+) -> int:
+    if not outpoints:
+        return 0
+    now = int(time.time())
+    affected = 0
+    for (in_txid, in_vout) in outpoints:
+        result = await db.execute(
+            """UPDATE silnt.utxos
+                  SET utxo_state    = 'unconfirmed_spent',
+                      spent_in_txid = :stxid,
+                      spent_at      = :ts
+                WHERE wallet_id = :wid
+                  AND txid      = :txid
+                  AND vout      = :vout
+                  AND utxo_state IN ('unspent', 'unconfirmed')""",
+            {"wid": wallet_id, "txid": in_txid, "vout": int(in_vout),
+             "stxid": spending_txid, "ts": now},
+        )
+        affected += getattr(result, "rowcount", 0) or 0
+    return affected
 
 async def is_own_sent_tx(wallet_id: str, txid: str) -> bool:
     """
@@ -767,3 +795,181 @@ async def touch_trusted_device(user_id: str, device_id: str) -> None:
            WHERE user_id = :uid AND device_id = :did""",
         {"uid": user_id, "did": device_id, "ts": int(time.time())},
     )
+
+async def get_user_prefs(user_id: str) -> Optional[UserPrefs]:
+    row = await db.fetchone(
+        "SELECT * FROM silnt.user_prefs WHERE user_id = :uid",
+        {"uid": user_id},
+    )
+    return UserPrefs(**dict(row)) if row else None
+
+
+async def upsert_user_prefs(
+    user_id:             str,
+    dust_threshold_sats: Optional[int],
+) -> UserPrefs:
+    now = int(time.time())
+    await db.execute(
+        """INSERT INTO silnt.user_prefs (user_id, dust_threshold_sats, updated_at)
+           VALUES (:uid, :dts, :ts)
+           ON CONFLICT (user_id) DO UPDATE
+             SET dust_threshold_sats = EXCLUDED.dust_threshold_sats,
+                 updated_at          = EXCLUDED.updated_at""",
+        {"uid": user_id, "dts": dust_threshold_sats, "ts": now},
+    )
+    return UserPrefs(
+        user_id             = user_id,
+        dust_threshold_sats = dust_threshold_sats,
+        updated_at          = now,
+    )
+
+
+async def get_effective_dust_threshold(user_id: str) -> int:
+    """
+    Resolve the dust threshold for a user.
+    Priority:
+      1. User's own prefs.dust_threshold_sats (if non-NULL and > 0)
+      2. Admin's BlindbitConfig.dust_threshold_sats (if non-zero)
+      3. Hard fallback: 5000 sats
+    """
+    prefs = await get_user_prefs(user_id)
+    if prefs and prefs.dust_threshold_sats and prefs.dust_threshold_sats > 0:
+        return int(prefs.dust_threshold_sats)
+    blindbit = await get_blindbit_config()
+    return int(blindbit.dust_threshold_sats or 5000)
+
+async def create_bip353_request(
+    user_id:            str,
+    wallet_id:          str,
+    sp_address:         str,
+    requested_username: str,
+    message:            Optional[str],
+) -> Bip353Request:
+    row_id = secrets.token_urlsafe(16)
+    now    = int(time.time())
+    await db.execute(
+        """INSERT INTO silnt.bip353_requests
+              (id, user_id, wallet_id, sp_address, requested_username, message,
+               status, created_at)
+           VALUES (:id, :uid, :wid, :sp, :uname, :msg, 'pending', :ts)""",
+        {
+            "id":    row_id,
+            "uid":   user_id,
+            "wid":   wallet_id,
+            "sp":    sp_address,
+            "uname": requested_username,
+            "msg":   message,
+            "ts":    now,
+        },
+    )
+    return Bip353Request(
+        id=row_id, user_id=user_id, wallet_id=wallet_id, sp_address=sp_address,
+        requested_username=requested_username, message=message, status="pending",
+        created_at=now,
+    )
+
+
+async def get_bip353_request(req_id: str) -> Optional[Bip353Request]:
+    row = await db.fetchone(
+        "SELECT * FROM silnt.bip353_requests WHERE id = :id",
+        {"id": req_id},
+    )
+    return Bip353Request(**dict(row)) if row else None
+
+
+async def list_user_bip353_requests(user_id: str) -> List[Bip353Request]:
+    rows = await db.fetchall(
+        """SELECT * FROM silnt.bip353_requests
+           WHERE user_id = :uid
+           ORDER BY created_at DESC""",
+        {"uid": user_id},
+    )
+    return [Bip353Request(**dict(r)) for r in rows]
+
+
+async def list_pending_bip353_requests() -> List[Bip353Request]:
+    rows = await db.fetchall(
+        """SELECT * FROM silnt.bip353_requests
+           WHERE status = 'pending'
+           ORDER BY created_at ASC"""
+    )
+    return [Bip353Request(**dict(r)) for r in rows]
+
+
+async def is_username_taken(username: str) -> bool:
+    """Check if username is already approved + active for someone."""
+    row = await db.fetchone(
+        """SELECT 1 FROM silnt.bip353_requests
+           WHERE LOWER(final_username) = LOWER(:uname)
+             AND status = 'approved'""",
+        {"uname": username},
+    )
+    if row:
+        return True
+    # Also check the existing wallets.hr_address column (legacy addresses)
+    row = await db.fetchone(
+        """SELECT 1 FROM silnt.wallets
+           WHERE LOWER(hr_address) LIKE LOWER(:pat)""",
+        {"pat": f"{username}@%"},
+    )
+    return row is not None
+
+
+async def update_bip353_request_status(
+    req_id:        str,
+    status:        str,
+    processed_by:  str,
+    final_username: Optional[str] = None,
+    reject_reason:  Optional[str] = None,
+) -> int:
+    now = int(time.time())
+    result = await db.execute(
+        """UPDATE silnt.bip353_requests
+           SET status         = :status,
+               final_username = :final_username,
+               reject_reason  = :reject_reason,
+               processed_at   = :ts,
+               processed_by   = :by
+           WHERE id = :id""",
+        {
+            "id":             req_id,
+            "status":         status,
+            "final_username": final_username,
+            "reject_reason":  reject_reason,
+            "ts":             now,
+            "by":             processed_by,
+        },
+    )
+    return getattr(result, "rowcount", 0) or 0
+
+
+async def cancel_user_request(req_id: str, user_id: str) -> int:
+    """User cancels their own pending request."""
+    result = await db.execute(
+        """UPDATE silnt.bip353_requests
+           SET status = 'cancelled', processed_at = :ts
+           WHERE id = :id AND user_id = :uid AND status = 'pending'""",
+        {"id": req_id, "uid": user_id, "ts": int(time.time())},
+    )
+    return getattr(result, "rowcount", 0) or 0
+
+async def get_wallet_active_request(wallet_id: str) -> Optional[Bip353Request]:
+    """Return the currently pending request for THIS wallet, if any."""
+    row = await db.fetchone(
+        """SELECT * FROM silnt.bip353_requests
+           WHERE wallet_id = :wid AND status = 'pending'
+           ORDER BY created_at DESC LIMIT 1""",
+        {"wid": wallet_id},
+    )
+    return Bip353Request(**dict(row)) if row else None
+
+
+async def get_wallet_last_rejected_request(wallet_id: str) -> Optional[Bip353Request]:
+    """Last rejection for THIS wallet — used for per-wallet cooldown."""
+    row = await db.fetchone(
+        """SELECT * FROM silnt.bip353_requests
+           WHERE wallet_id = :wid AND status = 'rejected'
+           ORDER BY processed_at DESC LIMIT 1""",
+        {"wid": wallet_id},
+    )
+    return Bip353Request(**dict(row)) if row else None

@@ -26,13 +26,14 @@ from .helpers.bip353_cloudflare import (
     create_bip353_record,
     get_zone_domain,
     delete_bip353_record,
-    CloudflareError,
+    CloudflareError    
 )
 
 from .helpers.email_verification import (
     RegistrationRequest, VerifyRegistrationRequest,
     start_registration, complete_registration,
 )
+from mnemonic import Mnemonic
 from .helpers.scan_rate_limiter import check_scan_allowed, mark_scan_finished
 from .helpers.forgot_password import request_password_reset
 from .helpers.transactions import get_wallet_transaction_detail, list_wallet_transactions
@@ -45,9 +46,11 @@ from .helpers.device_auth import (
     verify_device_confirm_token,
     set_device_cookie,
     get_client_ip,
-    DEVICE_COOKIE_NAME,
+    cookie_name_for_user,    
     MAX_TRUSTED_DEVICES_PER_USER
 )
+from .helpers.user import is_lnbits_admin, require_admin
+from .helpers.scan import BlindBitOracleClient
 from .crud import (
     get_silnt_wallets,
     create_silnt_wallet,
@@ -93,7 +96,19 @@ from .crud import (
     get_trusted_device,
     touch_trusted_device,
     revoke_trusted_device,
-    revoke_all_other_devices
+    revoke_all_other_devices,
+    get_user_prefs,
+    upsert_user_prefs,
+    get_effective_dust_threshold,
+    get_wallet_active_request,
+    get_wallet_last_rejected_request,
+    create_bip353_request,
+    get_bip353_request,
+    list_user_bip353_requests,
+    list_pending_bip353_requests,
+    is_username_taken,
+    update_bip353_request_status,
+    cancel_user_request
 )
 
 from .models import (
@@ -116,14 +131,23 @@ from .models import (
     TrustedDevice,
     DeviceCheckResponse,
     DeviceConfirmResponse,
-    DeviceListResponse
+    DeviceListResponse,
+    WhoamiResponse,
+    UserPrefs,
+    UpdateUserPrefsRequest,
+    CreateBip353Request,
+    ApproveBip353Request,
+    RejectBip353Request,
+    USERNAME_PATTERN,
+    RESERVED_USERNAMES,
+    RECENT_REJECT_COOLDOWN,
 )
 
 MAX_ADDRESSES_PER_WALLET = 10
 BIP352_CHANGE_LABEL_INDEX = 1
 silnt_api_router = APIRouter()
 
-
+_BITMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # ── Wallets ──────────────────────────────────────────────────────────────────
 
 
@@ -153,36 +177,80 @@ async def api_wallet_create(
 ) -> dict:
     try:
         wallet_id = urlsafe_short_hash()
+
+        blindbit_cfg = await get_blindbit_config()
+        min_height   = blindbit_cfg.min_scan_height or 0
+
+        # ★ 1. Default last_height to oracle tip if not supplied
+        last_height = data.last_height
+        if last_height is None:
+            try:
+                oracle = BlindBitOracleClient(base_url=blindbit_cfg.blindbit_url)
+                tip = await oracle.get_chain_tip()   # ← your existing tip helper
+                last_height = int(tip) if tip else 0
+            except Exception as e:
+                logger.warning(f"Could not fetch oracle tip; defaulting to 0: {e}")
+                last_height = 0
+        else:
+            last_height = int(data.last_height)
+
+        # Clamp to configured minimum
+        if min_height > 0 and last_height < min_height:
+            # If the user explicitly entered a too-low height, error.
+            # If we auto-defaulted to tip, tip is always >= min so no error.
+            if data.last_height is not None:
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_REQUEST,
+                    detail=(
+                        f"Wallet birth height must be at least {min_height} on this server. "
+                        f"You entered {data.last_height}."
+                    ),
+                )
+            last_height = min_height
+
+        # ★ 2. Generate or import + ★ 3. checksum validation
+        #    data.mnemonic is encrypted (as before) when importing. Decrypt first,
+        #    then validate/generate. If no mnemonic supplied → generate fresh.
+        mn = Mnemonic("english")
+        if data.mnemonic:                      # ← only decrypt when present
+            mnemonic_plain = decrypt_mnemonic(data.mnemonic, str(last_height))
+            words = mnemonic_plain.strip().lower().split()
+            if len(words) != 12:
+                raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                    detail=f"Mnemonic must be exactly 12 words (got {len(words)}).")
+            mnemonic_plain = " ".join(words)
+            if not mn.check(mnemonic_plain):
+                raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                    detail="Invalid mnemonic — the checksum (last word) is incorrect.")
+            was_generated = False
+        else:
+            mnemonic_plain = mn.generate(strength=128)   # fresh 12 words
+            was_generated = True
+
+        # ★ 4. Pass the BIP-39 passphrase through to derivation
+        passphrase = (data.passphrase or "").strip()
+
         new_wallet = WalletAccount(
             id=wallet_id,
             user=key_info.wallet.user,
             title=data.title,
             balance=0,
-            hr_address=data.hr_address,
+            hr_address=data.hr_address or "",
             network=data.network,
-            last_height=int(data.last_height),
+            last_height=last_height,
             sp_address="",
             spend_key="",
             scan_secret="",
         )
-        # Clamp "Born at Height" to the configured minimum to prevent users
-        # from creating wallets that would force expensive deep scans.
-        blindbit_cfg = await get_blindbit_config()
-        min_height   = blindbit_cfg.min_scan_height or 0
-        if min_height > 0 and int(data.last_height) < min_height:
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST,
-                detail=(
-                    f"Wallet birth height must be at least {min_height} on this server. "
-                    f"You entered {data.last_height}."
-                ),
-            )
+
         (
             sp_address,
             scan_secret_hex,
             spend_key_hex,
         ) = await generate_silent_wallet_address(
-            decrypt_mnemonic(data.mnemonic, str(data.last_height)), network=data.network
+            mnemonic_plain,
+            passphrase=passphrase,     # ← see note if your helper lacks this arg
+            network=data.network,
         )
         if not all([sp_address, scan_secret_hex, spend_key_hex]):
             raise ValueError(
@@ -195,8 +263,8 @@ async def api_wallet_create(
                 status_code=HTTPStatus.BAD_REQUEST,
                 detail="Silent Payment Wallet already exists!",
             )
-        blindbit_cfg = await get_blindbit_config()
-        max_wallets  = blindbit_cfg.max_wallets_per_user or 0
+
+        max_wallets = blindbit_cfg.max_wallets_per_user or 1
         if max_wallets > 0:
             current_count = await count_silnt_wallets(key_info.wallet.user)
             if current_count >= max_wallets:
@@ -207,7 +275,8 @@ async def api_wallet_create(
                         f"{'s' if max_wallets != 1 else ''} on this server. "
                         f"You currently have {current_count}."
                     ),
-                )    
+                )
+
         if data.hr_address:
             try:
                 resolved = bip353_resolve(data.hr_address)
@@ -216,7 +285,7 @@ async def api_wallet_create(
                 if result.lower() != sp_address.lower():
                     raise HTTPException(
                         status_code=HTTPStatus.BAD_REQUEST,
-                        detail=f"BIP353 address resolves to a different SP address than the wallet's.",
+                        detail="BIP353 address resolves to a different SP address than the wallet's.",
                     )
             except HTTPException:
                 raise
@@ -225,17 +294,28 @@ async def api_wallet_create(
                     status_code=HTTPStatus.BAD_REQUEST,
                     detail=f"BIP353 resolution failed for {data.hr_address}: {str(e)}",
                 )
+
         new_wallet.sp_address = sp_address
         await create_silnt_wallet(new_wallet)
+
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST, detail=str(exc)
         ) from exc
+
     return {
-        "wallet_id": wallet_id,
-        "sp_address": sp_address,
-        "scan_secret": scan_secret_hex,  # client must store this securely
-        "spend_key": spend_key_hex,  # client must store this securely
+        "wallet_id":   wallet_id,
+        "sp_address":  sp_address,
+        "scan_secret": scan_secret_hex,   # client must store securely
+        "spend_key":   spend_key_hex,     # client must store securely
+        # ★ Return the mnemonic so the client can show it once (esp. on generate)
+        "mnemonic":    mnemonic_plain,
+        "passphrase":  passphrase if passphrase else None,
+        "last_height": last_height,
+        "network":     data.network,
+        "generated":   was_generated,
     }
 
 
@@ -466,6 +546,7 @@ async def api_get_blindbit_config(
 async def api_update_blindbit_config(
     data: BlindbitConfig, key_info: WalletTypeInfo = Depends(require_trusted_device_admin)
 ) -> BlindbitConfig:
+    require_admin(key_info)
     """Only admin can write blindbit connection settings."""
     return await update_blindbit_config(data)
 
@@ -522,8 +603,7 @@ async def api_scan_wallet(
     # Estimate block count for budget check
     # Use chain tip as fallback if to_height not given
     to_height_est = data.to_height
-    if to_height_est is None:
-        from .helpers.scan import BlindBitOracleClient
+    if to_height_est is None:        
         oracle = BlindBitOracleClient(base_url=blindbit.blindbit_url)
         to_height_est = await oracle.get_chain_tip()
     estimated_blocks = max(1, to_height_est - requested_from)
@@ -593,9 +673,9 @@ async def api_resolve_bip353(
         ..., description="BIP353 address in email format, e.g. alice@domain.com"
     ),
     key_info: WalletTypeInfo = Depends(require_trusted_device),
-) -> dict:
-    return bip353_resolve(address=address)
-
+) -> dict:    
+    return bip353_resolve(address.strip())
+    
 
 # Transactions
 @silnt_api_router.post("/api/v1/tx/build", dependencies=[Depends(require_trusted_device_admin)])
@@ -698,7 +778,6 @@ async def api_build_transaction(
 async def api_broadcast_transaction(data: BroadcastTxRequest):
     try:
         blindbit = await get_blindbit_config()
-        config = Config()
         base = (blindbit.mempool_url or "https://mempool.space").rstrip("/")
         mempool_url = f"{base}/api/tx"
 
@@ -711,19 +790,32 @@ async def api_broadcast_transaction(data: BroadcastTxRequest):
                     status_code=HTTPStatus.BAD_GATEWAY,
                     detail=f"Broadcast failed: {resp.text}",
                 )
+
             txid = resp.text.strip()
-            if data.spent_txids and data.wallet_id:
-                for spent_txid in data.spent_txids:
-                    await update_unconfirmed_utxo(data.wallet_id, spent_txid)
-                logger.info(
-                    f"Marked {len(data.spent_txids)} UTXOs as unconfirmed_spent after broadcast of {txid}"
-                )
-                input_outpoints = [(u_txid, u_vout) for u_txid, u_vout in data.spent_outpoints]
-                await mark_utxos_spent_by_tx(
+
+            # ── Mark the spent inputs immediately so Activity shows the Sent tx
+            #    without waiting for a rescan. Use the exact outpoints the client
+            #    sent; this is keyed on (txid, vout), so it never over-marks.
+            if data.wallet_id and data.spent_outpoints:
+                # data.spent_outpoints is a list of {txid, vout} models/dicts.
+                input_outpoints = [
+                    (op.txid, op.vout) if hasattr(op, "txid") else (op["txid"], op["vout"])
+                    for op in data.spent_outpoints
+                ]
+                marked = await mark_utxos_spent_by_tx(
                     wallet_id=data.wallet_id,
                     input_outpoints=input_outpoints,
                     spending_txid=txid,
                 )
+                logger.info(
+                    f"Broadcast {txid}: marked {marked} input UTXO(s) unconfirmed_spent"
+                )
+            else:
+                logger.warning(
+                    f"Broadcast {txid}: no spent_outpoints supplied; the Sent tx "
+                    f"will only appear in Activity after the next rescan"
+                )
+
             return {"txid": txid}
 
     except HTTPException:
@@ -731,7 +823,7 @@ async def api_broadcast_transaction(data: BroadcastTxRequest):
     except httpx.ConnectError:
         raise HTTPException(
             status_code=HTTPStatus.BAD_GATEWAY,
-            detail=f"Could not connect to {config.mempool_endpoint}",
+            detail=f"Could not connect to {base}",
         )
     except httpx.TimeoutException:
         raise HTTPException(
@@ -757,10 +849,12 @@ async def api_recover_wallet_keys(
     if wallet.user != key_info.wallet.user:
         raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
 
+    passphrase = (data.passphrase or "").strip()
     try:
         mnemonic_plain = decrypt_mnemonic(data.mnemonic, str(data.last_height))
         sp_address, scan_secret_hex, spend_key_hex = await generate_silent_wallet_address(
             mnemonic_plain,
+            passphrase=passphrase, 
             network=wallet.network,
         )
     except Exception as e:
@@ -775,7 +869,8 @@ async def api_recover_wallet_keys(
             status_code=HTTPStatus.BAD_REQUEST,
             detail=(
                 "The mnemonic you entered does not match this wallet. "
-                "Derived SP address differs from the stored one."
+                "If this wallet was created with a passphrase, make sure you enter "
+                "the exact same passphrase."
             ),
         )
 
@@ -833,6 +928,7 @@ async def api_update_cloudflare_config(
     data: CloudflareConfig,
     key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
 ) -> CloudflareConfig:
+    require_admin(key_info)
     # Verify token + zone by fetching domain — also auto-populates data.domain
     if data.api_token and data.zone_id:
         try:
@@ -971,19 +1067,16 @@ async def api_update_utxo_label(
     data: UpdateUtxoLabel,
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
-    utxos = await get_utxos_by_txid(txid)
-     # Find the UTXO(s) by txid and verify ownership via their parent wallet
-    utxos = await get_utxos_by_txid(txid)
-    if not utxos:
-        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="UTXO not found.")
+     # Verify the caller owns the target wallet
+    wallet = await get_silnt_wallet(data.wallet_id)
+    if not wallet or wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
 
-    # All matching UTXOs should belong to a wallet the caller owns
-    for utxo in utxos:
-        wallet = await get_silnt_wallet(utxo.wallet_id)
-        if not wallet or wallet.user != key_info.wallet.user:
-            raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+    # Update only rows in that wallet — never globally by txid
+    updated = await update_utxo_label_by_txid(txid, data.label, wallet_id=data.wallet_id)
+    if updated == 0:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="UTXO not found in this wallet.")
 
-    updated = await update_utxo_label_by_txid(txid, data.label)
     return {"txid": txid, "label": data.label, "updated": updated}
 
 @silnt_api_router.put("/api/v1/wallet/{wallet_id}/addresses/{addr_id}/label")
@@ -1079,38 +1172,26 @@ async def api_device_check(
     response: Response,
     key_info: WalletTypeInfo = Depends(require_invoice_key),
 ):
-    """
-    Called by Thrilla after a successful login. If the device cookie is missing
-    or unknown, send a confirmation email and return 'pending'. Otherwise
-    refresh the cookie and return 'trusted'.
-    """
-    user_id  = key_info.wallet.user
-    cookie   = request.cookies.get(DEVICE_COOKIE_NAME)
-    ua       = request.headers.get("user-agent", "")[:512]
-    ip       = get_client_ip(request)
+    user_id = key_info.wallet.user
+    cookie  = request.cookies.get(cookie_name_for_user(user_id))   # ← per-user
+    ua      = request.headers.get("user-agent", "")[:512]
+    ip      = get_client_ip(request)
 
-    # Check if a cookie exists AND is in trusted set
     if cookie:
         existing = await get_trusted_device(user_id, cookie)
         if existing:
-            # Already trusted — touch + return
             await touch_trusted_device(user_id, cookie)
-            # Refresh cookie expiry
-            set_device_cookie(response, cookie)
+            set_device_cookie(response, user_id, cookie)            # refresh expiry
             return DeviceCheckResponse(
                 status       = "trusted",
                 device_count = await count_trusted_devices(user_id),
                 cap          = MAX_TRUSTED_DEVICES_PER_USER,
             )
 
-    # New device — generate a fresh device_id (server-issued)
     new_device_id = secrets.token_urlsafe(24)
 
-    # Check the cap
     current_count = await count_trusted_devices(user_id)
     if current_count >= MAX_TRUSTED_DEVICES_PER_USER:
-        # Still send email — but the confirmation step will reject
-        # Better UX: tell the user up front
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
             detail=(
@@ -1120,7 +1201,6 @@ async def api_device_check(
             ),
         )
 
-    # Look up the user's email
     account = await get_account(user_id)
     if not account or not account.email:
         raise HTTPException(
@@ -1128,9 +1208,7 @@ async def api_device_check(
             detail="This account has no email address. Cannot send confirmation.",
         )
 
-    # Build + send the confirmation email
     token = make_device_confirm_token(user_id, new_device_id, ua, ip)
-    # NOTE: configure base URL appropriately for your deployment
     base_url = "https://signet.thrilla.me"
     confirm_url = f"{base_url.rstrip('/')}/confirm-device?token={token}"
 
@@ -1139,18 +1217,16 @@ async def api_device_check(
         f"Hi {account.username or 'there'},\n\n"
         f"A new device tried to sign in to your wallet:\n\n"
         f"  Browser: {ua or 'unknown'}\n"
-        f"  IP:      {ip or 'unknown'}\n"
         f"  Time:    {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}\n\n"
         f"If this was you, confirm the device here:\n\n"
         f"  {confirm_url}\n\n"
         f"This link expires in 1 hour.\n\n"
-        f"If this WASN'T you, change your password immediately and ignore this email."
+        f"If this WASN'T you, change your password immediately and ignore "
+        f"this email. (Note: any IP shown in your activity logs may be a "
+        f"CDN/proxy IP and may not reflect the actual location.)"
     )
-
     res = await send_email_notification(
-        to_emails = [account.email],
-        message   = body,
-        subject   = subject,
+        to_emails=[account.email], message=body, subject=subject
     )
     if res.get("status") != "ok":
         logger.warning(f"Device confirmation email failed: {res}")
@@ -1159,10 +1235,10 @@ async def api_device_check(
             detail="Could not send confirmation email. Please contact your administrator.",
         )
 
-    # Set the cookie now — but the device won't be trusted until confirmed.
-    # Future requests will carry the cookie; the confirm endpoint reads it
-    # from the URL token (more reliable than relying on the cookie at click-time).
-    set_device_cookie(response, new_device_id)
+    # Set the per-user cookie now. Won't be valid until confirmed via email,
+    # but it makes the cookie available for subsequent requests in case the
+    # email link returns to this browser.
+    set_device_cookie(response, user_id, new_device_id)
 
     return DeviceCheckResponse(
         status       = "pending",
@@ -1177,12 +1253,6 @@ async def api_device_confirm(
     response: Response,
     token:    str,
 ):
-    """
-    Called when the user clicks the link in the confirmation email.
-    Validates the token + cap, then writes the device into trusted_devices.
-    Also sets the cookie (in case the user opened the link in a different
-    tab/window without the cookie present).
-    """
     payload = verify_device_confirm_token(token)
     if not payload:
         raise HTTPException(
@@ -1195,7 +1265,6 @@ async def api_device_confirm(
     ua        = payload.get("ua", "")
     ip        = payload.get("ip", "")
 
-    # Hard cap re-check at confirm time (cap may have changed since email)
     current_count = await count_trusted_devices(user_id)
     if current_count >= MAX_TRUSTED_DEVICES_PER_USER:
         raise HTTPException(
@@ -1213,8 +1282,8 @@ async def api_device_confirm(
         ip         = ip,
     )
 
-    # Ensure the cookie matches (in case user opened link in different browser)
-    set_device_cookie(response, device_id)
+    # Set the per-user cookie on the confirming browser
+    set_device_cookie(response, user_id, device_id)
 
     return DeviceConfirmResponse(
         confirmed    = True,
@@ -1227,12 +1296,13 @@ async def api_device_confirm(
 async def api_list_devices(
     request:  Request,
     key_info: WalletTypeInfo = Depends(require_trusted_device),
-    silnt_device_id: Optional[str] = Cookie(default=None),
 ):
-    devices = await list_trusted_devices(key_info.wallet.user)
+    user_id = key_info.wallet.user
+    devices = await list_trusted_devices(user_id)
+    current = request.cookies.get(cookie_name_for_user(user_id))
     return DeviceListResponse(
         devices        = devices,
-        current_device = silnt_device_id,
+        current_device = current,
         cap            = MAX_TRUSTED_DEVICES_PER_USER,
     )
 
@@ -1243,18 +1313,18 @@ async def api_revoke_device(
     request:  Request,
     response: Response,
     key_info: WalletTypeInfo = Depends(require_trusted_device),
-    silnt_device_id: Optional[str] = Cookie(default=None),
 ):
-    devices = await list_trusted_devices(key_info.wallet.user)
+    user_id = key_info.wallet.user
+    devices = await list_trusted_devices(user_id)
     target  = next((d for d in devices if d.id == device_row_id), None)
     if not target:
         raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Device not found.")
 
-    deleted = await revoke_trusted_device(key_info.wallet.user, device_row_id)
+    deleted = await revoke_trusted_device(user_id, device_row_id)
 
-    # If user revoked the CURRENT device, clear the cookie too
-    if target.device_id == silnt_device_id:
-        response.delete_cookie(DEVICE_COOKIE_NAME, path="/")
+    current = request.cookies.get(cookie_name_for_user(user_id))
+    if target.device_id == current:
+        clear_device_cookie(response, user_id)
 
     return {"deleted": bool(deleted), "device_row_id": device_row_id}
 
@@ -1263,9 +1333,292 @@ async def api_revoke_device(
 async def api_sign_out_others(
     request:  Request,
     key_info: WalletTypeInfo = Depends(require_trusted_device),
-    silnt_device_id: Optional[str] = Cookie(default=None),
 ):
-    if not silnt_device_id:
+    user_id = key_info.wallet.user
+    current = request.cookies.get(cookie_name_for_user(user_id))
+    if not current:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="No active device.")
-    removed = await revoke_all_other_devices(key_info.wallet.user, silnt_device_id)
+    removed = await revoke_all_other_devices(user_id, current)
     return {"removed_count": removed}
+
+@silnt_api_router.get("/api/v1/auth/me")
+async def api_whoami(
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """Return basic info about the current authenticated user."""    
+    account = await get_account(key_info.wallet.user)
+    return WhoamiResponse(
+        user_id  = key_info.wallet.user,
+        username = account.username if account else None,
+        email    = account.email    if account else None,
+        is_admin = is_lnbits_admin(key_info.wallet.user),
+    )
+
+@silnt_api_router.get("/api/v1/user/prefs")
+async def api_get_user_prefs(
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """
+    Get the current user's prefs + the admin default (so the UI can show
+    'You have no override set — using admin default of N sats').
+    """
+    user_id  = key_info.wallet.user
+    prefs    = await get_user_prefs(user_id)
+    blindbit = await get_blindbit_config()
+    admin_default = int(blindbit.dust_threshold_sats or 5000)
+    return {
+        "user_id":                    user_id,
+        "dust_threshold_sats":        prefs.dust_threshold_sats if prefs else None,
+        "admin_default_dust":         admin_default,
+        "effective_dust_threshold":   await get_effective_dust_threshold(user_id),
+    }
+
+
+@silnt_api_router.put("/api/v1/user/prefs")
+async def api_update_user_prefs(
+    data: UpdateUserPrefsRequest,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """
+    Update the current user's prefs. Passing dust_threshold_sats=None (or 0)
+    clears the override — user falls back to admin default.
+    """
+    user_id = key_info.wallet.user
+
+    dts = data.dust_threshold_sats
+    if dts is not None:
+        try:
+            dts = int(dts)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail="dust_threshold_sats must be an integer or null.",
+            )
+        if dts <= 0:
+            # Treat 0 / negative as "revert to admin default"
+            dts = None
+        elif dts > 10_000:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail="dust_threshold_sats too large (max 10000).",
+            )
+
+    await upsert_user_prefs(user_id, dts)
+    blindbit = await get_blindbit_config()
+    return {
+        "user_id":                    user_id,
+        "dust_threshold_sats":        dts,
+        "admin_default_dust":         int(blindbit.dust_threshold_sats or 5000),
+        "effective_dust_threshold":   await get_effective_dust_threshold(user_id),
+    }
+
+@silnt_api_router.post("/api/v1/bip353/request")
+async def api_create_bip353_request(
+    data: CreateBip353Request,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    user_id  = key_info.wallet.user
+    username = (data.requested_username or "").strip().lower()
+
+    if not USERNAME_PATTERN.match(username):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Username must be 3–20 chars, lowercase letters, digits, dash, or underscore.",
+        )
+    if username in RESERVED_USERNAMES:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="This username is reserved. Choose another.",
+        )
+
+    # Verify wallet ownership FIRST so all checks below are wallet-scoped
+    wallet = await get_silnt_wallet(data.wallet_id)
+    if not wallet or wallet.user != user_id:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Wallet not found.")
+    if not wallet.sp_address:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Wallet has no SP address yet — scan first.",
+        )
+    if wallet.hr_address:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"This wallet already has the address {wallet.hr_address}. Delete it first to request a new one.",
+        )
+
+    # Per-wallet: only one pending request allowed for this wallet at a time
+    existing = await get_wallet_active_request(data.wallet_id)
+    if existing:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail="This wallet already has a pending request. Cancel it before submitting another.",
+        )
+
+    # Per-wallet rejection cooldown
+    last_rejected = await get_wallet_last_rejected_request(data.wallet_id)
+    if last_rejected and last_rejected.processed_at:
+        elapsed = int(time.time()) - last_rejected.processed_at
+        if elapsed < RECENT_REJECT_COOLDOWN:
+            wait_hours = (RECENT_REJECT_COOLDOWN - elapsed) // 3600 + 1
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail=f"This wallet's previous request was rejected recently. Please wait {wait_hours} hours before trying again.",
+            )
+
+    # Username is taken globally (any wallet, any user)
+    if await is_username_taken(username):
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail="This username is already taken. Choose another.",
+        )
+
+    req = await create_bip353_request(
+        user_id            = user_id,
+        wallet_id          = data.wallet_id,
+        sp_address         = wallet.sp_address,
+        requested_username = username,
+        message            = data.message,
+    )
+    return req
+
+@silnt_api_router.get("/api/v1/bip353/requests")
+async def api_list_user_requests(
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    requests = await list_user_bip353_requests(key_info.wallet.user)
+    return {"requests": requests}
+
+
+@silnt_api_router.delete("/api/v1/bip353/requests/{req_id}")
+async def api_cancel_user_request(
+    req_id: str,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    cancelled = await cancel_user_request(req_id, key_info.wallet.user)
+    if not cancelled:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail="No pending request found with that ID.",
+        )
+    return {"cancelled": True}
+
+@silnt_api_router.get("/api/v1/bip353/admin/requests")
+async def api_admin_list_requests(
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    require_admin(key_info)
+    pending = await list_pending_bip353_requests()
+    # Enrich each with requester info for easier display
+    enriched = []
+    for r in pending:
+        account = await get_account(r.user_id)
+        enriched.append({
+            **r.dict(),
+            "requester_username": account.username if account else None,
+            "requester_email":    account.email    if account else None,
+        })
+    return {"requests": enriched}
+
+
+@silnt_api_router.post("/api/v1/bip353/admin/requests/{req_id}/approve")
+async def api_admin_approve_request(
+    req_id: str,
+    data: ApproveBip353Request,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    require_admin(key_info)
+    req = await get_bip353_request(req_id)
+    if not req:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Request not found.")
+    if req.status != "pending":
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"Request is already {req.status}.",
+        )
+
+    final_username = (data.final_username or req.requested_username).strip().lower()
+    if not USERNAME_PATTERN.match(final_username):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Final username is invalid.",
+        )
+    if final_username != req.requested_username and await is_username_taken(final_username):
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail="That username is already taken.",
+        )
+
+   # Verify CF integration is configured
+    cf_config = await get_cloudflare_config()
+    if not cf_config or not cf_config.api_token or not cf_config.zone_id or not cf_config.domain:
+        raise HTTPException(
+            status_code=HTTPStatus.PRECONDITION_FAILED,
+            detail="Cloudflare integration is not configured. "
+                   "Set it up in Settings → Cloudflare first.",
+        )
+
+    # 1. Write the Cloudflare TXT record.
+    #    ★ Confirm the function name + arg order matches your bip353_cloudflare.py ★
+    try:
+        await create_bip353_record(
+            api_token  = cf_config.api_token,
+            zone_id    = cf_config.zone_id,
+            domain     = cf_config.domain,
+            username   = final_username,
+            sp_address = req.sp_address,
+        )
+    except Exception as e:
+        logger.error(f"Cloudflare BIP-353 create failed for {final_username}: {e}")
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail=f"Cloudflare record creation failed: {str(e)}",
+        )
+
+    full_address = f"{final_username}@{cf_config.domain}"
+    try:
+        await update_silnt_wallet(req.wallet_id, {"hr_address": full_address})
+    except Exception as e:
+        logger.error(f"wallet.hr_address update failed after CF create: {e}")
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail="Cloudflare record was created but the wallet update failed. "
+                   "Contact your administrator.",
+        )
+
+    # 3. Mark the request approved
+    await update_bip353_request_status(
+        req_id         = req_id,
+        status         = "approved",
+        processed_by   = key_info.wallet.user,
+        final_username = final_username,
+    )
+
+    return {
+        "approved":       True,
+        "final_username": final_username,
+        "hr_address":     full_address,
+    }
+
+@silnt_api_router.post("/api/v1/bip353/admin/requests/{req_id}/reject")
+async def api_admin_reject_request(
+    req_id: str,
+    data: RejectBip353Request,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    require_admin(key_info)
+    req = await get_bip353_request(req_id)
+    if not req:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Request not found.")
+    if req.status != "pending":
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"Request is already {req.status}.",
+        )
+
+    await update_bip353_request_status(
+        req_id        = req_id,
+        status        = "rejected",
+        processed_by  = key_info.wallet.user,
+        reject_reason = data.reason.strip()[:500],
+    )
+    return {"rejected": True}

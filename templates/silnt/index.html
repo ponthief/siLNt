@@ -65,7 +65,7 @@
       <span v-text="scanProgress.total > 0 ? Math.round(scanProgress.current / scanProgress.total * 100) + '%' : '0%'"></span>
     </div>
   </q-card>
-    <q-card v-if="config.isLoaded">
+    <!-- <q-card v-if="config.isLoaded">
       <q-card-section>
         <q-tabs v-model="tab" no-caps class="bg-dark text-white shadow-2">          
           <q-tab name="utxos" label="UTXOs"></q-tab>
@@ -82,14 +82,14 @@
           </q-tab-panel>
         </q-tab-panels>
       </q-card-section>
-    </q-card>    
+    </q-card>     -->
   </div>
 
   <div class="col-12 col-md-5 q-gutter-y-md">
     <q-card>
       <q-card-section>
         <h6 class="text-subtitle1 q-my-none">
-          Silent Payments Wallet Extension          
+          Thrilla - Silent Payments Wallet          
         </h6>
       </q-card-section>
       <q-card-section class="q-pa-none">
@@ -461,7 +461,7 @@
 
 {% endblock %} {% block vue_templates %}
 
-<template id="wallet-config"
+<!-- <template id="wallet-config"
   >{% include("silnt/components/wallet-config.html") %}</template
 >
 <template id="utxo-list"
@@ -469,7 +469,7 @@
 >
 <template id="wallet-list"
   >{% include("silnt/components/wallet-list.html") %}</template
->
+> -->
 
 {% endblock %} {% block scripts %} {{ window_vars(user) }}
 <style>

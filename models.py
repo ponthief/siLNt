@@ -1,20 +1,38 @@
 from typing import Optional, List
 from fastapi import Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+import re
 
+USERNAME_PATTERN = re.compile(r"^[a-z0-9_\-]{3,20}$")
+RESERVED_USERNAMES = {
+    "admin", "administrator", "root", "support", "help", "info", "abuse",
+    "postmaster", "webmaster", "system", "anthropic", "claude", "bot",
+    "moderator", "mod", "service", "noreply", "no-reply", "test", "demo",
+}
+REQUEST_COOLDOWN_SECONDS = 24 * 3600
+RECENT_REJECT_COOLDOWN   = 24 * 3600
+
+class CreateWallet(BaseModel):
+    title:       str
+    network:     str = "mainnet"
+    hr_address:  Optional[str] = None    
+    mnemonic:    Optional[str] = None    
+    passphrase:  Optional[str] = None    
+    last_height: Optional[int] = None
 
 class BlindbitConfig(BaseModel):
     blindbit_url: str = ""
     mempool_url: str = "https://mempool.space"
     min_scan_height:  int = 0   # 0 = no minimum; e.g. 840000 = no scans before block 840000
-    max_wallets_per_user: int = 0   # 0 = unlimited
+    max_wallets_per_user: int = 1   # 0 = unlimited
     dust_threshold_sats:    int = 5000
 
 class CreateWallet(BaseModel):
     mnemonic: str = None
     title: str = None
     network: str = "mainnet"
-    hr_address: str = None
+    passphrase: Optional[str] = ""
+    hr_address: Optional[str] = None
     last_height: str = None
     balance: Optional[int] = None
 
@@ -73,16 +91,10 @@ class BuildTxRequest(BaseModel):
     scan_secret:  str 
 
 
-class BroadcastTxRequest(BaseModel):
-    tx_hex: str
-    wallet_id: Optional[str] = None
-    spent_txids: list[str] = []
-    spent_outpoints: list[tuple[str, int]] = []   # list of [txid, vout]
-
-
 class RecoverKeysRequest(BaseModel):
     mnemonic:    str          # encrypted (AES-encrypted with last_height as key)
     last_height: int          # encryption key + birth height
+    passphrase:  Optional[str] = None   # NEW: BIP-39 passphrase (plaintext)
     
 class Config(BaseModel):
     sats_denominated: bool = True
@@ -124,6 +136,8 @@ class ForgotPasswordRequest(BaseModel):
 
 class UpdateUtxoLabel(BaseModel):
     label: str = ''
+    wallet_id: str
+    vout: Optional[int] = None
 
 class UpdateUtxoFrozenRequest(BaseModel):
     frozen: bool
@@ -157,3 +171,60 @@ class DeviceListResponse(BaseModel):
     devices:        List[TrustedDevice]
     current_device: Optional[str] = None
     cap:            int
+
+class WhoamiResponse(BaseModel):
+    user_id:   str
+    username:  Optional[str] = None
+    email:     Optional[str] = None
+    is_admin:  bool
+
+class UserPrefs(BaseModel):
+    user_id:             str
+    dust_threshold_sats: Optional[int] = None
+    updated_at:          int
+
+class UpdateUserPrefsRequest(BaseModel):
+    dust_threshold_sats: Optional[int] = None    # None = revert to admin default
+
+class Bip353Request(BaseModel):
+    id:                 str
+    user_id:            str
+    wallet_id:          str
+    sp_address:         str
+    requested_username: str
+    final_username:     Optional[str] = None
+    message:            Optional[str] = None
+    status:             str   # 'pending' | 'approved' | 'rejected' | 'cancelled'
+    reject_reason:      Optional[str] = None
+    created_at:         int
+    processed_at:       Optional[int] = None
+    processed_by:       Optional[str] = None
+
+
+class CreateBip353Request(BaseModel):
+    wallet_id:          str
+    requested_username: str
+    message:            Optional[str] = Field(default=None, max_length=500)
+
+class ApproveBip353Request(BaseModel):
+    final_username: Optional[str] = None    # admin may tweak the requested name
+
+class RejectBip353Request(BaseModel):
+    reason: str = Field(..., max_length=500)
+
+class BroadcastOutpoint(BaseModel):
+    txid: str
+    vout: int
+
+class BroadcastTxRequest(BaseModel):
+    tx_hex:          str
+    wallet_id:       str
+    # full outpoints of the inputs this tx spends
+    spent_outpoints: List[BroadcastOutpoint] = []
+    # optional metadata for richer Activity display before rescan
+    recipient:       Optional[str] = None
+    amount:          Optional[int] = None
+    fee:             Optional[int] = None
+    # backward-compat: older clients may still send spent_txids
+    spent_txids:     Optional[List[str]] = None
+    

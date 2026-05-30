@@ -50,7 +50,7 @@ async def m001_initial(db):
     )
     await db.execute(
         """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_silnt_utxos_vout ON silnt.utxos (txid, vout);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_silnt_utxos_vout_wallet_id ON silnt.utxos (txid, vout, wallet_id);
         """
     )
 
@@ -102,4 +102,41 @@ async def m005_trusted_devices(db):
     )
     await db.execute(
         "CREATE INDEX IF NOT EXISTS trusted_devices_user ON silnt.trusted_devices(user_id)"
+    )
+
+async def m006_user_prefs(db):
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS silnt.user_prefs (
+            user_id              TEXT PRIMARY KEY,
+            dust_threshold_sats  INTEGER DEFAULT NULL,
+            updated_at           INTEGER NOT NULL
+        )
+        """
+    )
+
+async def m007_bip353_requests(db):
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS silnt.bip353_requests (
+            id                  TEXT PRIMARY KEY,
+            user_id             TEXT NOT NULL,
+            wallet_id           TEXT NOT NULL,
+            sp_address          TEXT NOT NULL,
+            requested_username  TEXT NOT NULL,
+            final_username      TEXT,
+            message             TEXT,
+            status              TEXT NOT NULL DEFAULT 'pending',
+            reject_reason       TEXT,
+            created_at          INTEGER NOT NULL,
+            processed_at        INTEGER,
+            processed_by        TEXT
+        )
+        """
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS bip353_requests_user ON silnt.bip353_requests(user_id, status)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS bip353_requests_status ON silnt.bip353_requests(status, created_at)"
     )

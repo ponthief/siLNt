@@ -8,7 +8,9 @@ from ..crud import (
     update_utxo_dust_flag,    
     set_utxo_freeze_auto,
     clear_utxo_freeze_auto,
-    get_utxo_freeze_reason   
+    get_utxo_freeze_reason,
+    get_effective_dust_threshold,
+    get_silnt_wallet
 )
 
 
@@ -52,8 +54,11 @@ async def evaluate_dust_for_wallet(wallet_id: str) -> int:
     Returns the number of UTXOs that transitioned from non-dust to dust on
     this run (useful for the "flagged N new dust UTXO(s)" log line).
     """
-    blindbit  = await get_blindbit_config()
-    threshold = int(blindbit.dust_threshold_sats or 5000)
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        return 0
+    threshold = await get_effective_dust_threshold(wallet.user)
+    blindbit  = await get_blindbit_config()      
     mempool   = blindbit.mempool_url or "https://mempool.space"
 
     utxos             = await get_wallet_unspent_utxos_for_dust_check(wallet_id)

@@ -5,6 +5,7 @@ import httpx
 import io
 import math
 import struct
+from typing import Optional
 from base64 import b64encode
 from embit import bip32, bip39, ec, finalizer, script
 from embit.networks import NETWORKS
@@ -38,14 +39,43 @@ from .curve import (
     p as CURVE_P,
 )
 from embit.ec import SchnorrSig
+from mnemonic import Mnemonic
 
+def _validate_or_generate_mnemonic(
+    plain_mnemonic: Optional[str],
+) -> tuple[str, bool]:
+    """
+    Returns (mnemonic_plain, was_generated).
+    - If plain_mnemonic is provided: validate 12 words + BIP-39 checksum.
+    - If absent: generate a fresh 12-word seed.
+    """    
+    mn = Mnemonic("english")
 
-def get_seed(mnemonic) -> bytes:
+    if plain_mnemonic:
+        words = plain_mnemonic.strip().lower().split()
+        if len(words) != 12:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail=f"Mnemonic must be exactly 12 words (got {len(words)}).",
+            )
+        normalized = " ".join(words)
+        if not mn.check(normalized):
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail="Invalid mnemonic — the checksum (last word) is incorrect. "
+                       "Double-check your recovery phrase.",
+            )
+        return normalized, False
+
+    # Generate a new 12-word mnemonic (128 bits entropy)
+    return mn.generate(strength=128), True
+
+def get_seed(mnemonic, passphrase: str = "") -> bytes:
     """
     Re‑creates the BIP‑39 seed from the hard‑coded mnemonic.
     Returns the 64‑byte seed (as `bytes`).
     """
-    seed = bip39.mnemonic_to_seed(mnemonic)
+    seed = bip39.mnemonic_to_seed(mnemonic, password=passphrase)
     return seed
 
 
@@ -87,8 +117,8 @@ def encode_silent_payment_address(
     return ret
 
 
-async def generate_silent_wallet_address(mnemonic, network: str = "mainnet") -> tuple:
-    seed = get_seed(mnemonic)
+async def generate_silent_wallet_address(mnemonic, passphrase="", network: str = "mainnet") -> tuple:
+    seed = get_seed(mnemonic, passphrase=passphrase)
     key_material = generate_hardened_keys(seed, network)
 
     B_scan = pubkey_point_gen_from_int(int_from_bytes(key_material["scan_priv_key"]))

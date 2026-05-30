@@ -16,31 +16,19 @@ AD_FLAG = 0x0020
 
 
 def _query_txt_with_dnssec(qname: str) -> tuple[list[str], bool]:
-    """
-    Query a TXT record using a DNSSEC-validating resolver.
-    Returns (txt_records, dnssec_validated).
-    dnssec_validated is True only when the AD flag is set in the response,
-    meaning the upstream resolver successfully validated the DNSSEC chain.
-    Tries each resolver in DNSSEC_RESOLVERS in order.
-    """
     qname_obj = dns.name.from_text(qname)
-
-    # Build query with DO (DNSSEC OK) bit set so resolver includes RRSIGs
     request = dns.message.make_query(qname_obj, dns.rdatatype.TXT, want_dnssec=True)
 
     last_error = None
     for nameserver in DNSSEC_RESOLVERS:
         try:
-            # Try TCP first (more reliable for DNSSEC responses which can be large)
             try:
                 response = dns.query.tcp(request, nameserver, timeout=10)
             except Exception:
                 response = dns.query.udp(request, nameserver, timeout=10)
 
-            # AD flag set = resolver validated the full DNSSEC chain
             dnssec_valid = bool(response.flags & AD_FLAG)
 
-            # Extract TXT records from answer section
             records = []
             for rrset in response.answer:
                 if rrset.rdtype == dns.rdatatype.TXT:
@@ -50,9 +38,20 @@ def _query_txt_with_dnssec(qname: str) -> tuple[list[str], bool]:
             if records:
                 return records, dnssec_valid
 
-            # Check for NXDOMAIN (RCODE 3)
+            # NXDOMAIN → domain itself doesn't exist
             if response.rcode() == dns.rcode.NXDOMAIN:
                 raise dns.resolver.NXDOMAIN()
+
+            # ★ NEW: resolver answered successfully (NOERROR) but there are no
+            # TXT records → the name has no BIP-353 record. This is a definitive
+            # "not found", NOT a resolver failure. Raise NoAnswer so the caller
+            # maps it to 404 instead of falling through to "all resolvers failed".
+            if response.rcode() == dns.rcode.NOERROR:
+                raise dns.resolver.NoAnswer(response=response)
+
+            # Any other RCODE (SERVFAIL etc.) → try the next resolver
+            last_error = Exception(f"RCODE {response.rcode()} from {nameserver}")
+            continue
 
         except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
             raise

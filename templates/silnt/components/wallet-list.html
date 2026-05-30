@@ -4,7 +4,7 @@
         <template v-slot:avatar>
           <q-icon name="info" />
         </template>
-        Wallet operations (scan, send, generate labeled addresses) are available
+        Wallet operations (scan, send, generate labeled addresses) as well as Admin configurations are available
         in the <strong>Thrilla</strong> mobile/web app, where keys are stored
         securely on your device.
         <template v-slot:action>
@@ -18,7 +18,7 @@
           />
         </template>
     </q-banner>
-    <div class="row items-center no-wrap q-mb-md justify-between">
+    <!-- <div class="row items-center no-wrap q-mb-md justify-between">
       <div class="col-auto">
         <q-btn-dropdown
           split
@@ -49,8 +49,8 @@
         ></q-btn>
       </div>
       <div class="col-4 q-pl-lg"></div>      
-    </div>
-    <q-table
+    </div> -->
+    <!-- <q-table
       flat
       dense
       :rows="walletAccounts"
@@ -78,9 +78,7 @@
             <span style="cursor:pointer">
               <span v-text="props.row.sp_address ? props.row.sp_address.slice(0, 14) + '...' : ''"></span>
               <q-tooltip v-text="props.row.sp_address"></q-tooltip>
-            </span>
-
-            <!-- Labeled addresses -->
+            </span>            
             <div
               v-for="addr in props.row.addresses"
               :key="addr.id || addr._tempId"
@@ -186,10 +184,10 @@
           </q-td>
         </q-tr>
       </template>
-    </q-table>
+    </q-table> -->
   </q-card-section>
 </q-card>
-<q-dialog v-model="qrDialog.show" position="top">
+<!-- <q-dialog v-model="qrDialog.show" position="top">
   <q-card class="q-pa-lg lnbits__dialog-card">
     <div class="row items-center q-mb-md">
       <h5 class="text-subtitle1 q-my-none">Receive to Silent Payment Address</h5>
@@ -365,4 +363,4 @@
       </div>
     </q-form>
   </q-card>
-</q-dialog>
+</q-dialog> -->

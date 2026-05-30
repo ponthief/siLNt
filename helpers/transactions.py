@@ -45,17 +45,14 @@ async def list_wallet_transactions(
     offset:    int = 0,
 ) -> list[dict]:
     """
-    Build the combined chronological transaction list. No mempool calls here —
-    everything from local DB. Fast.
+    Combined chronological transaction list from local DB (no mempool calls).
 
     Each row:
-      { kind: 'receive'|'send'|'self_send',
-        txid, timestamp, amount_sats,
-        input_sum, output_sum,        # both populated for self_send
-        output_count, input_count,
-        labels: [str],
-        confirmed: bool                # heuristic from UTXO state
-      }
+      { kind: 'send'|'receive',
+        txid, timestamp, amount_sats,    # negative = net outflow, positive = inflow
+        input_sum, output_sum,
+        input_count, output_count,
+        labels: [str] }
     """
     receives = {r["txid"]: r for r in await get_wallet_receives(wallet_id)}
     sends    = {s["txid"]: s for s in await get_wallet_sends(wallet_id)}
@@ -66,35 +63,28 @@ async def list_wallet_transactions(
         rcv = receives.get(txid)
         snd = sends.get(txid)
 
-        if snd and rcv:
-            kind        = "self_send"
-            timestamp   = snd["spent_at"] or rcv["timestamp"]
-            # Net amount = what came back minus what went out (negative = net outflow,
-            # equals fee + any external recipient amount)
-            amount_sats = rcv["output_sum"] - snd["input_sum"]
-            labels      = rcv["labels"]
-            input_sum   = snd["input_sum"]
-            output_sum  = rcv["output_sum"]
-            input_count = snd["input_count"]
-            output_count= rcv["output_count"]
-        elif snd:
-            kind        = "send"
-            timestamp   = snd["spent_at"]
-            amount_sats = -snd["input_sum"]   # fully outgoing (will refine on detail)
-            labels      = []
-            input_sum   = snd["input_sum"]
-            output_sum  = 0
-            input_count = snd["input_count"]
-            output_count= 0
+        if snd:
+            # Spent inputs → a send. If the wallet also owns an output (change or
+            # a consolidation back to self), subtract it so amount = net outflow.
+            input_sum    = snd["input_sum"]
+            output_sum   = rcv["output_sum"] if rcv else 0
+            net_out      = input_sum - output_sum     # sent amount + fee
+            kind         = "send"
+            timestamp    = snd["spent_at"] or (rcv["timestamp"] if rcv else 0)
+            amount_sats  = -net_out                   # negative = outflow
+            labels       = rcv["labels"] if rcv else []
+            input_count  = snd["input_count"]
+            output_count = rcv["output_count"] if rcv else 0
         else:
-            kind        = "receive"
-            timestamp   = rcv["timestamp"]
-            amount_sats = rcv["output_sum"]
-            labels      = rcv["labels"]
-            input_sum   = 0
-            output_sum  = rcv["output_sum"]
-            input_count = 0
-            output_count= rcv["output_count"]
+            # No inputs spent → pure receive.
+            input_sum    = 0
+            output_sum   = rcv["output_sum"]
+            kind         = "receive"
+            timestamp    = rcv["timestamp"]
+            amount_sats  = rcv["output_sum"]          # positive = inflow
+            labels       = rcv["labels"]
+            input_count  = 0
+            output_count = rcv["output_count"]
 
         rows.append({
             "kind":         kind,
@@ -108,7 +98,6 @@ async def list_wallet_transactions(
             "labels":       labels,
         })
 
-    # Newest first
     rows.sort(key=lambda r: r["timestamp"], reverse=True)
     return rows[offset:offset + limit]
 
