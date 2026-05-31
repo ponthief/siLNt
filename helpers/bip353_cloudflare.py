@@ -6,7 +6,7 @@ Creates/updates TXT records of the form:
 
 import httpx
 from loguru import logger
-
+from ..crud import get_cloudflare_config
 
 CF_API = "https://api.cloudflare.com/client/v4"
 
@@ -65,6 +65,7 @@ async def find_existing_record(
 async def create_bip353_record(
     api_token: str,
     zone_id: str,
+    domain: str,
     username: str,
     sp_address: str,
     ttl: int = 300,
@@ -72,8 +73,7 @@ async def create_bip353_record(
     """
     Create or update a BIP-353 TXT record in Cloudflare.
     Returns {"record_name": ..., "hr_address": ..., "action": "created"|"updated"}
-    """
-    domain = await get_zone_domain(api_token, zone_id)
+    """    
     record_name = bip353_record_name(username, domain)
     content = bip353_record_content(sp_address)
 
@@ -82,7 +82,7 @@ async def create_bip353_record(
     payload = {
         "type": "TXT",
         "name": record_name,
-        "content": content,
+        "content":  '"' + content + '"',
         "ttl": ttl,
         "comment": "BIP-353 Silent Payment address — managed by Thrilla",
     }
@@ -125,10 +125,10 @@ async def create_bip353_record(
 async def delete_bip353_record(
     api_token: str,
     zone_id: str,
+    domain: str,
     username: str,
 ) -> bool:
-    """Delete a BIP-353 TXT record. Returns True if deleted, False if not found."""
-    domain = await get_zone_domain(api_token, zone_id)
+    """Delete a BIP-353 TXT record. Returns True if deleted, False if not found."""    
     record_name = bip353_record_name(username, domain)
     record_id = await find_existing_record(api_token, zone_id, record_name)
 

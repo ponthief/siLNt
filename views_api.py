@@ -13,7 +13,7 @@ from .helpers.wallet import (
     generate_labeled_sp_address,
     get_spend_pub_from_secret,
 )
-from .helpers.scan import scan_wallet, get_scan_progress, request_scan_stop
+from .helpers.scan import scan_wallet, get_scan_progress, request_scan_stop, get_tx_status
 from .helpers.address_resolver import bip353_resolve
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, Cookie
 from lnbits.core.models import WalletTypeInfo
@@ -108,7 +108,10 @@ from .crud import (
     list_pending_bip353_requests,
     is_username_taken,
     update_bip353_request_status,
-    cancel_user_request
+    cancel_user_request,
+    restore_utxo_to_unspent,
+    get_wallet_unspent_balance,
+    get_utxo
 )
 
 from .models import (
@@ -138,6 +141,7 @@ from .models import (
     CreateBip353Request,
     ApproveBip353Request,
     RejectBip353Request,
+    RestoreUtxoRequest,
     USERNAME_PATTERN,
     RESERVED_USERNAMES,
     RECENT_REJECT_COOLDOWN,
@@ -745,7 +749,7 @@ async def api_build_transaction(
             if user and domain:
                 resolved = bip353_resolve(data.recipient)
                 result = resolved["result"].replace("bitcoin:?sp=", "")
-                if not result.startswith("sp1"):
+                if not result.startswith("sp1") and not result.startswith("tsp1"):
                     raise HTTPException(
                         status_code=HTTPStatus.BAD_REQUEST,
                         detail="Address must resolve to Silent Payment address (sp1).",
@@ -983,6 +987,7 @@ async def api_setup_bip353(
         result = await create_bip353_record(
             api_token=cf.api_token,
             zone_id=cf.zone_id,
+            domain=cf.domain,
             username=data.username.lower(),
             sp_address=wallet.sp_address,
             ttl=data.ttl,
@@ -1029,7 +1034,7 @@ async def api_delete_bip353(
 
     try:
         username = wallet.hr_address.split("@")[0]
-        deleted = await delete_bip353_record(cf.api_token, cf.zone_id, username)
+        deleted = await delete_bip353_record(cf.api_token, cf.zone_id, cf.domain, username)
     except CloudflareError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_GATEWAY, detail=str(e))
 
@@ -1576,7 +1581,7 @@ async def api_admin_approve_request(
 
     full_address = f"{final_username}@{cf_config.domain}"
     try:
-        await update_silnt_wallet(req.wallet_id, {"hr_address": full_address})
+        await update_hr_address(req.wallet_id, full_address)
     except Exception as e:
         logger.error(f"wallet.hr_address update failed after CF create: {e}")
         raise HTTPException(
@@ -1622,3 +1627,74 @@ async def api_admin_reject_request(
         reject_reason = data.reason.strip()[:500],
     )
     return {"rejected": True}
+
+@silnt_api_router.get("/api/v1/bitmail/domain")
+async def api_get_bitmail_domain(
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """
+    BitMail domain for display. Read from the existing cloudflare_config.domain.
+    No secrets (api_token/zone_id) are returned.
+    """
+    cf = await get_cloudflare_config()      # your existing getter
+    domain = ""
+    if cf:
+        # cf may be a model or a dict — handle both
+        domain = getattr(cf, "domain", None) or (cf.get("domain") if isinstance(cf, dict) else "") or ""
+    return {"domain": domain}
+
+@silnt_api_router.post(
+    "/api/v1/utxos/restore", dependencies=[Depends(require_trusted_device_admin)]
+)
+async def api_restore_utxo(data: RestoreUtxoRequest):
+    wallet = await get_silnt_wallet(data.wallet_id)
+    if not wallet:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet not found.")
+
+    # Find the UTXO and confirm it's unconfirmed_spent
+    utxo = await get_utxo(data.wallet_id, data.txid, data.vout)
+    if not utxo:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="UTXO not found.")
+    if utxo["utxo_state"] != "unconfirmed_spent":
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"UTXO is '{utxo['utxo_state']}', not 'unconfirmed_spent' — nothing to restore.",
+        )
+
+    # Verify the spending tx is actually gone (don't restore a still-pending or
+    # confirmed spend — that would corrupt state).
+    blindbit = await get_blindbit_config()
+    status = await get_tx_status(
+        blindbit.mempool_url or "https://mempool.space", utxo["spent_in_txid"]
+    )
+    if status is not None and not status.get("unknown"):
+        if status.get("confirmed"):
+            raise HTTPException(
+                status_code=HTTPStatus.CONFLICT,
+                detail="The spending transaction has confirmed — this UTXO is genuinely spent.",
+            )
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail="The spending transaction is still pending in the mempool. "
+                   "Wait until it drops before restoring.",
+        )
+    if status is not None and status.get("unknown"):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_GATEWAY,
+            detail="Couldn't verify the transaction status right now. Try again shortly.",
+        )
+
+    # status is None → tx is gone → safe to restore
+    restored = await restore_utxo_to_unspent(data.wallet_id, data.txid, data.vout)
+    if restored == 0:
+        # Race: state changed between read and write (e.g. a concurrent scan).
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail="UTXO state changed before it could be restored. Refresh and try again.",
+        )
+
+    # Recompute and persist balance from the now-updated UTXO set
+    balance = await get_wallet_unspent_balance(data.wallet_id)
+    await update_balance(data.wallet_id, balance)
+
+    return {"restored": True, "txid": data.txid, "vout": data.vout, "balance": balance}

@@ -973,3 +973,40 @@ async def get_wallet_last_rejected_request(wallet_id: str) -> Optional[Bip353Req
         {"wid": wallet_id},
     )
     return Bip353Request(**dict(row)) if row else None
+
+async def get_utxo(wallet_id: str, txid: str, vout: int) -> Optional[dict]:
+    """
+    Fetch a single UTXO by (wallet_id, txid, vout).
+    Returns a dict with txid, vout, spent_in_txid, utxo_state — or None if absent.
+    """
+    rows = await db.fetchall(
+        """SELECT txid, vout, spent_in_txid, utxo_state
+             FROM silnt.utxos
+            WHERE wallet_id = :wid AND txid = :txid AND vout = :vout""",
+        {"wid": wallet_id, "txid": txid, "vout": vout},
+    )
+    return rows[0] if rows else None
+
+
+async def restore_utxo_to_unspent(wallet_id: str, txid: str, vout: int) -> int:
+    """
+    Restore an unconfirmed_spent UTXO back to unspent (clears spend metadata).
+    Only affects rows currently in 'unconfirmed_spent' state. Returns rowcount.
+    """
+    result = await db.execute(
+        """UPDATE silnt.utxos
+              SET utxo_state = 'unspent', spent_in_txid = NULL, spent_at = NULL
+            WHERE wallet_id = :wid AND txid = :txid AND vout = :vout
+              AND utxo_state = 'unconfirmed_spent'""",
+        {"wid": wallet_id, "txid": txid, "vout": vout},
+    )
+    return getattr(result, "rowcount", 0) or 0
+
+
+async def get_wallet_unspent_balance(wallet_id: str) -> int:
+    """Sum of all 'unspent' UTXO amounts for a wallet."""
+    rows = await db.fetchall(
+        "SELECT amount FROM silnt.utxos WHERE wallet_id = :wid AND utxo_state = 'unspent'",
+        {"wid": wallet_id},
+    )
+    return sum(r["amount"] for r in rows)

@@ -227,4 +227,9 @@ class BroadcastTxRequest(BaseModel):
     fee:             Optional[int] = None
     # backward-compat: older clients may still send spent_txids
     spent_txids:     Optional[List[str]] = None
+
+class RestoreUtxoRequest(BaseModel):
+    wallet_id: str
+    txid: str
+    vout: int
     

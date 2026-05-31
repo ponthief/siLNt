@@ -621,7 +621,18 @@ async def scan_wallet(
     set_scan_progress(
         wallet_id, blocks_scanned, total_blocks, total_found, active=False
     )
-
+    
+    try:
+        rec = await reconcile_unconfirmed_spent(wallet_id)
+        if rec["restored"] or rec["confirmed"]:
+            logger.info(
+                f"Wallet {wallet_id} reconcile: "
+                f"{rec['confirmed']} confirmed, {rec['restored']} restored, "
+                f"{rec['pending']} still pending"
+            )
+    except Exception as e:
+        logger.warning(f"Reconcile failed for {wallet_id}: {e}")
+        
     unspent = await db.fetchall(
         "SELECT amount FROM silnt.utxos WHERE wallet_id = :wallet_id AND utxo_state = 'unspent'",
         {"wallet_id": wallet_id},
@@ -670,3 +681,93 @@ async def get_block_ts(txid: str) -> int:
     except Exception:
         pass
     return 0
+
+async def get_tx_status(base_mempool_url: str, txid: str) -> dict | None:
+    """
+    Returns {"confirmed": bool} if the tx is known to the explorer,
+    or None if the tx is unknown (404 — dropped / never propagated).
+    """
+    base = (base_mempool_url or "https://mempool.space").rstrip("/")
+    url = f"{base}/api/tx/{txid}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0, verify=False) as c:
+            r = await c.get(url)
+            if r.status_code == 404:
+                return None                      # unknown → dropped
+            if r.status_code != 200:
+                # transient error — treat as "unknown status", do nothing this round
+                return {"unknown": True}
+            data = r.json()
+            return {"confirmed": bool(data.get("status", {}).get("confirmed", False))}
+    except Exception as e:
+        logger.warning(f"tx-status check failed for {txid}: {e}")
+        return {"unknown": True}                  # network hiccup — don't change state
+
+
+async def reconcile_unconfirmed_spent(wallet_id: str) -> dict:
+    """
+    Walk the wallet's unconfirmed_spent UTXOs and reconcile each against the
+    explorer. Returns counts of {confirmed, restored, pending}.
+    """
+    blindbit = await get_blindbit_config()
+    base = blindbit.mempool_url or "https://mempool.space"
+
+    rows = await db.fetchall(
+        """SELECT txid, vout, spent_in_txid FROM silnt.utxos
+           WHERE wallet_id = :wid AND utxo_state = 'unconfirmed_spent'""",
+        {"wid": wallet_id},
+    )
+    if not rows:
+        return {"confirmed": 0, "restored": 0, "pending": 0}
+
+    # Group outpoints by the spending txid so we query each tx once
+    by_txid: dict[str, list[tuple[str, int]]] = {}
+    for r in rows:
+        stx = r["spent_in_txid"]
+        if not stx:
+            # No spending txid recorded but state is unconfirmed_spent — anomalous.
+            # Safest is to leave it; a manual restore can handle it.
+            continue
+        by_txid.setdefault(stx, []).append((r["txid"], r["vout"]))
+
+    confirmed = restored = pending = 0
+
+    for spending_txid, outpoints in by_txid.items():
+        status = await get_tx_status(base, spending_txid)
+
+        if status is None:
+            # Dropped / unknown to the explorer → the spend never happened.
+            # Restore these inputs to unspent so they're spendable again.
+            for (in_txid, in_vout) in outpoints:
+                await db.execute(
+                    """UPDATE silnt.utxos
+                          SET utxo_state    = 'unspent',
+                              spent_in_txid = NULL,
+                              spent_at      = NULL
+                        WHERE wallet_id = :wid AND txid = :txid AND vout = :vout
+                          AND utxo_state = 'unconfirmed_spent'""",
+                    {"wid": wallet_id, "txid": in_txid, "vout": in_vout},
+                )
+                restored += 1
+            logger.info(
+                f"Restored {len(outpoints)} UTXO(s) to unspent — spending tx "
+                f"{spending_txid} was dropped/unknown"
+            )
+
+        elif status.get("confirmed"):
+            # The spend confirmed → finalize as spent.
+            for (in_txid, in_vout) in outpoints:
+                await db.execute(
+                    """UPDATE silnt.utxos SET utxo_state = 'spent'
+                        WHERE wallet_id = :wid AND txid = :txid AND vout = :vout
+                          AND utxo_state = 'unconfirmed_spent'""",
+                    {"wid": wallet_id, "txid": in_txid, "vout": in_vout},
+                )
+                confirmed += 1
+            logger.info(f"Finalized {len(outpoints)} UTXO(s) spent by confirmed tx {spending_txid}")
+
+        else:
+            # Still pending in mempool, or transient error → leave unchanged.
+            pending += len(outpoints)
+
+    return {"confirmed": confirmed, "restored": restored, "pending": pending}

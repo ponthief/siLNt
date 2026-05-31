@@ -312,20 +312,9 @@ def build_transaction(
         )
 
     # If change is below dust threshold, try two strategies:
-    if 0 < change_amount < 546:
-        reduced_amount = amount - (546 - change_amount)
-        if reduced_amount >= 546:
-            # Strategy 1: reduce amount to make change viable
-            change_amount = total_input - reduced_amount - fee
-            amount        = reduced_amount
-            logger.debug(
-                f"Adjusted amount to {amount} sats to avoid dust change "
-                f"— change now {change_amount} sats"
-            )
-        else:
-            # Strategy 2: absorb dust into fee
+    if 0 < change_amount < 546:            
             logger.debug(f"Change {change_amount} sats below dust — adding to fee")
-            fee          += change_amount
+            fee += change_amount
             change_amount = 0
 
     # ── 5. Derive BIP-352 change scriptpubkey (m=1) ──────────────────────
