@@ -20,15 +20,13 @@ import time
 from http import HTTPStatus
 from typing import Optional
 from uuid import uuid4
-
-import bcrypt
 from fastapi import HTTPException, Request
 from loguru import logger
 from pydantic import BaseModel
 
-from lnbits.core.crud import (
-    create_account,
+from lnbits.core.crud import (    
     get_account_by_username_or_email,
+    create_account
 )
 from lnbits.core.crud.extensions import (
     create_user_extension,
@@ -59,14 +57,14 @@ class VerifyRegistrationRequest(BaseModel):
 # ── Token helpers ─────────────────────────────────────────────────────────────
 
 def _generate_verification_token(
-    username: str, email: str, password_hash: str
+    username: str, email: str, password: str
 ) -> str:
     """Sign a token carrying the pending registration data."""
     payload = {
         "kind":          "register",
         "username":      username,
         "email":         email,
-        "password_hash": password_hash,
+        "password":      password,
         "ts":            int(time.time()),
     }
     payload_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
@@ -132,14 +130,10 @@ async def start_registration(
         raise HTTPException(
             HTTPStatus.BAD_REQUEST,
             "Username or email already in use.",
-        )
-
-    password_hash = bcrypt.hashpw(
-        data.password.encode(), bcrypt.gensalt()
-    ).decode()
+        )    
 
     try:
-        token = _generate_verification_token(username, email, password_hash)
+        token = _generate_verification_token(username, email, data.password)
     except Exception as exc:
         logger.error(f"Token generation failed: {exc}")
         raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not start registration.")
@@ -203,11 +197,6 @@ async def start_registration(
 # ── Complete registration: create account + enable extensions ─────────────────
 
 async def complete_registration(token: str) -> dict:
-    """
-    Decode the verification token and create the LNbits account.
-    Enables LNBITS_USER_DEFAULT_EXTENSIONS on the new account, marking paid
-    extensions as already-paid (so e.g. siLNt activates without payment).
-    """
     payload = _decode_verification_token(token)
     if not payload:
         raise HTTPException(
@@ -215,9 +204,9 @@ async def complete_registration(token: str) -> dict:
             "Verification link is invalid or has expired. Please register again.",
         )
 
-    username      = payload["username"]
-    email         = payload["email"]
-    password_hash = payload["password_hash"]
+    username     = payload["username"]
+    email        = payload["email"]
+    raw_password = payload["password"]      # ← raw password from the token
 
     existing = await get_account_by_username_or_email(username) \
             or await get_account_by_username_or_email(email)
@@ -228,18 +217,17 @@ async def complete_registration(token: str) -> dict:
         )
 
     try:
-        # LNbits Account requires an id field — generate a uuid4 hex
-        account_id = uuid4().hex
         account = Account(
-            id            = account_id,
-            username      = username,
-            email         = email,
-            password_hash = password_hash,
+            id       = uuid4().hex,
+            username = username,
+            email    = email,
         )
-        await create_account(account=account)
+        account.hash_password(raw_password)     # ← LNbits-correct, id-bound hashing
+        await create_account(account)      # ← the working creation path
+        account_id = account.id
         logger.info(f"Email-verified account created: {username} ({email}) id={account_id}")
 
-        # Enable LNBITS_USER_DEFAULT_EXTENSIONS — paid bypass for paid extensions
+        # Enable default extensions (paid bypass) — unchanged
         try:
             default_exts = settings.lnbits_user_default_extensions or []
             for ext_id in default_exts:
@@ -252,11 +240,8 @@ async def complete_registration(token: str) -> dict:
                         payment_hash_to_enable="default_enabled",
                     ),
                 )
-                # INSERT new row — update_user_extension only modifies existing rows
-                # so we must use create_user_extension for new accounts.
-                # If a row already exists for some reason, fall through to update.
-                existing = await get_user_extension(account_id, ext_id)
-                if existing:
+                existing_ext = await get_user_extension(account_id, ext_id)
+                if existing_ext:
                     await update_user_extension(user_extension=user_ext)
                 else:
                     await create_user_extension(user_extension=user_ext)
