@@ -8,6 +8,7 @@ from ..crud import (
     update_utxo_dust_flag,    
     set_utxo_freeze_auto,
     clear_utxo_freeze_auto,
+    normalize_unfrozen_override,
     get_utxo_freeze_reason,
     get_effective_dust_threshold,
     get_silnt_wallet
@@ -107,13 +108,14 @@ async def evaluate_dust_for_wallet(wallet_id: str) -> int:
             # NOT clobber existing manual freezes (the WHERE in the UPDATE
             # filters by current state, or the helper should — see note).
             current_reason = await get_utxo_freeze_reason(utxo_txid, utxo_vout)
-            if current_reason != "manual":
+            if current_reason not in ("manual", "manual_unfrozen"):
                 await set_utxo_freeze_auto(utxo_txid, utxo_vout)
         else:
             # Ensure suspected_dust=FALSE; release any auto-freeze (leave manual)
             if current_dust:
                 await update_utxo_dust_flag(utxo_txid, utxo_vout, False)
             await clear_utxo_freeze_auto(utxo_txid, utxo_vout)
+            await normalize_unfrozen_override(utxo_txid, utxo_vout)
 
     if newly_flagged:
         logger.info(f"Wallet {wallet_id}: flagged {newly_flagged} new dust UTXO(s)")

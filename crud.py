@@ -574,23 +574,38 @@ async def get_utxo_freeze_reason(txid: str, vout: int) -> Optional[str]:
     return row["freeze_reason"] if row else None
 
 async def set_utxo_freeze_auto(txid: str, vout: int) -> None:
-    """Mark a UTXO as auto-frozen (dust eval owns this lock)."""
+    """
+    Mark a UTXO as auto-frozen (dust eval owns this lock). Only acts on UTXOs that
+    are not user-owned: freeze_reason NULL or already 'auto'. A 'manual' freeze or
+    a 'manual_unfrozen' override is left untouched.
+    """
     await db.execute(
         """UPDATE silnt.utxos
            SET frozen = TRUE, freeze_reason = 'auto'
            WHERE txid = :txid AND vout = :vout
-           AND (freeze_reason IS NULL OR freeze_reason = 'auto')
+             AND (freeze_reason IS NULL OR freeze_reason = 'auto')
         """,
-
         {"txid": txid, "vout": vout},
     )
-
 
 async def set_utxo_freeze_manual(txid: str, vout: int) -> None:
     """Mark a UTXO as manually frozen (user owns this lock)."""
     await db.execute(
         """UPDATE silnt.utxos
            SET frozen = TRUE, freeze_reason = 'manual'
+           WHERE txid = :txid AND vout = :vout""",
+        {"txid": txid, "vout": vout},
+    )
+    
+async def clear_utxo_freeze_manual(txid: str, vout: int) -> None:
+    """
+    User-initiated unfreeze. Clears the frozen flag regardless of who set it, and
+    records freeze_reason = 'manual_unfrozen' so the dust evaluator knows this was
+    a deliberate user override and must NOT auto-re-freeze it.
+    """
+    await db.execute(
+        """UPDATE silnt.utxos
+           SET frozen = FALSE, freeze_reason = 'manual_unfrozen'
            WHERE txid = :txid AND vout = :vout""",
         {"txid": txid, "vout": vout},
     )
@@ -615,6 +630,14 @@ async def clear_utxo_freeze_manual(txid: str, vout: int) -> None:
         """UPDATE silnt.utxos
            SET frozen = FALSE, freeze_reason = NULL
            WHERE txid = :txid AND vout = :vout""",
+        {"txid": txid, "vout": vout},
+    )
+
+async def normalize_unfrozen_override(txid: str, vout: int) -> None:
+    """Once a UTXO is no longer dust, drop a lingering 'manual_unfrozen' marker."""
+    await db.execute(
+        """UPDATE silnt.utxos SET freeze_reason = NULL
+           WHERE txid = :txid AND vout = :vout AND freeze_reason = 'manual_unfrozen'""",
         {"txid": txid, "vout": vout},
     )
 
