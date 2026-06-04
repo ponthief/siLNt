@@ -40,6 +40,180 @@ from .curve import (
 )
 from embit.ec import SchnorrSig
 from mnemonic import Mnemonic
+SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+
+# ── Phase 1: per-input tweaked signing keys + scripts (orig steps 1–2) ────────
+def _prepare_inputs(spend_key, utxos: list[dict]):
+    """
+    For each UTXO, derive the full signing key (priv_key_tweak + spend_key, with
+    BIP-340 odd-Y negation) and its taproot script. Returns parallel lists.
+    """
+    n = SECP256K1_N
+    input_keys = []
+    input_scripts = []
+    for utxo in utxos:
+        priv_key_tweak_hex = utxo.get("priv_key_tweak") or ""
+        if not priv_key_tweak_hex:
+            raise ValueError(f"Missing priv_key_tweak for utxo {utxo['txid']}")
+
+        pub_key_hex = utxo.get("pub_key") or ""
+        if not pub_key_hex:
+            raise ValueError(f"Missing pub_key for utxo {utxo['txid']}")
+
+        priv_tweak_int  = int_from_bytes(bytes.fromhex(priv_key_tweak_hex))
+        spend_key_int   = int_from_bytes(spend_key.secret)
+        full_secret_int = (priv_tweak_int + spend_key_int) % n
+
+        full_pub_point = pubkey_point_gen_from_int(full_secret_int)
+        if not has_even_y(full_pub_point):
+            full_secret_int = n - full_secret_int
+            full_pub_point  = pubkey_point_gen_from_int(full_secret_int)
+
+        signing_key   = ec.PrivateKey(full_secret_int.to_bytes(32, "big"))
+        actual_x_only = bytes.fromhex(pub_key_hex)
+        actual_script = Script(bytes([0x51, 0x20]) + actual_x_only)
+
+        input_keys.append(signing_key)
+        input_scripts.append((actual_script, actual_x_only))
+
+    return input_keys, input_scripts
+
+
+# ── Phase 2: recipient scriptPubKey (orig step 3) ─────────────────────────────
+def _derive_recipient_script(recipient: str, spend_key, utxos: list[dict]) -> Script:
+    if recipient.startswith("sp1") or recipient.startswith("tsp1"):
+        return Script(derive_sp_scriptpubkey(recipient, spend_key.secret, utxos))
+    try:
+        return script.address_to_scriptpubkey(recipient)
+    except Exception as e:
+        raise ValueError(f"Invalid recipient address: {str(e)}")
+
+
+# ── Phase 3: amounts, fee, change (orig step 4) ───────────────────────────────
+def _compute_amounts(utxos: list[dict], amount: int, fee_rate: float):
+    """
+    Returns (total_input, fee, change_amount, estimated_vsize).
+    Dust change (<546) is absorbed into the fee, leaving change_amount = 0.
+    """
+    total_input = sum(u["amount"] for u in utxos)
+    estimated_vsize = int(10 + (57.5 * len(utxos)) + (31 * 2))
+    fee = max(1, math.ceil(estimated_vsize * fee_rate))
+    change_amount = total_input - amount - fee
+
+    if change_amount < 0:
+        raise ValueError(
+            f"Insufficient funds. Need {amount + fee} sats "
+            f"(including {fee} sats fee), have {total_input} sats."
+        )
+
+    if 0 < change_amount < 546:
+        logger.debug(f"Change {change_amount} sats below dust — adding to fee")
+        fee += change_amount
+        change_amount = 0
+
+    return total_input, fee, change_amount, estimated_vsize
+
+
+# ── Phase 4: BIP-352 m=1 change scriptPubKey (orig step 5) ────────────────────
+def _derive_change_script(change_amount, scan_secret_hex, spend_key, utxos, network):
+    """Returns the change Script, or None when change is dust/zero."""
+    if change_amount < 546:
+        return None
+    spend_pub_hex = coincurve.PublicKey.from_secret(
+        spend_key.secret
+    ).format(compressed=True).hex()
+    hrp = "sp" if network.lower() == "mainnet" else "tsp"
+    change_sp_address = generate_labeled_sp_address(
+        scan_secret_hex=scan_secret_hex,
+        spend_pub_hex=spend_pub_hex,
+        m=1,                                   # BIP-352 change label
+        hrp=hrp,
+    )
+    return Script(derive_sp_scriptpubkey(change_sp_address, spend_key.secret, utxos))
+
+
+# ── Phase 5: assemble + verify outputs (orig steps 7 + 7b) ────────────────────
+def _assemble_outputs(amount, recipient_script, change_amount, change_script, recipient):
+    tx_outputs = [TransactionOutput(amount, recipient_script)]
+    if change_script is not None:
+        tx_outputs.append(TransactionOutput(change_amount, change_script))
+
+    tx_outputs.sort(
+        key=lambda x: (
+            x.value,
+            x.script_pubkey.data.hex()
+            if hasattr(x.script_pubkey, "data")
+            else bytes(x.script_pubkey).hex(),
+        )
+    )
+
+    if recipient.startswith("sp1") or recipient.startswith("tsp1"):
+        if not verify_sp_output(recipient_script, tx_outputs):
+            raise ValueError(
+                "Derived SP recipient output not found in transaction outputs. "
+                "Funds would be unrecoverable. Aborting."
+            )
+    if change_script is not None:
+        if not verify_sp_output(change_script, tx_outputs):
+            raise ValueError(
+                "Derived SP change output not found in transaction outputs. "
+                "Change would be unrecoverable. Aborting."
+            )
+
+    return tx_outputs
+
+
+# ── Phase 6: build PSBT, sign, finalize, serialize (orig steps 6 + 8 + 9 + 10) ─
+def _build_sign_finalize(utxos, input_keys, input_scripts, tx_outputs):
+    """
+    BIP69-sort inputs, construct + sign (SIGHASH_DEFAULT) + finalize the PSBT,
+    return the serialized tx hex.
+    """
+    # step 6 — inputs (BIP69 sorted), keep keys/scripts/amounts aligned
+    tx_inputs_with_keys = [
+        (
+            TransactionInput(bytes.fromhex(u["txid"]), int(u.get("vout", 0))),
+            input_keys[i],
+            input_scripts[i],
+            u["amount"],
+        )
+        for i, u in enumerate(utxos)
+    ]
+    tx_inputs_with_keys.sort(key=lambda x: (x[0].txid.hex(), x[0].vout))
+
+    tx_inputs            = [t[0] for t in tx_inputs_with_keys]
+    input_keys_sorted    = [t[1] for t in tx_inputs_with_keys]
+    input_scripts_sorted = [t[2] for t in tx_inputs_with_keys]
+    input_amounts_sorted = [t[3] for t in tx_inputs_with_keys]
+
+    # step 8 — construct PSBT + witness_utxos
+    tx   = Transaction(vin=tx_inputs, vout=tx_outputs)
+    psbt = PSBT(tx)
+    for i in range(len(tx_inputs)):
+        psbt.inputs[i].witness_utxo = TransactionOutput(
+            input_amounts_sorted[i], input_scripts_sorted[i][0]
+        )
+
+    # step 9 — sign each input (SIGHASH_DEFAULT = 0, commits to whole tx)
+    utxo_amounts = [inp.witness_utxo.value         for inp in psbt.inputs]
+    utxo_scripts = [inp.witness_utxo.script_pubkey for inp in psbt.inputs]
+    for i in range(len(psbt.inputs)):
+        h          = taproot_sighash(tx, i, utxo_scripts, utxo_amounts, sighash_type=0)
+        priv_bytes = input_keys_sorted[i].secret
+        cc_key     = coincurve.PrivateKey(priv_bytes)
+        sig_bytes  = cc_key.sign_schnorr(h).rjust(64, b"\x00")
+        psbt.inputs[i].taproot_key_sig = SchnorrSig.parse(sig_bytes)
+
+    # step 10 — finalize + extract
+    for inp in psbt.inputs:
+        if inp.taproot_key_sig is not None:
+            inp.final_scriptwitness = Witness([inp.taproot_key_sig.serialize()])
+            inp.final_scriptsig     = Script(b"")
+    for i, inp in enumerate(psbt.inputs):
+        if inp.final_scriptwitness:
+            tx.vin[i].witness = inp.final_scriptwitness
+
+    return tx.serialize().hex()
 
 def _validate_or_generate_mnemonic(
     plain_mnemonic: Optional[str],
@@ -235,7 +409,7 @@ def verify_sp_output(
             return True
     return False
 
-
+# ── Public entry point — same signature + return as before ────────────────────
 def build_transaction(
     spend_key_hex:   str,
     scan_secret_hex: str,
@@ -249,176 +423,22 @@ def build_transaction(
     Build and sign a Bitcoin transaction.
     Supports Silent Payment addresses (sp1/tsp1) and standard on-chain addresses.
     Change goes to the wallet's own m=1 labeled SP address (BIP-352 reserved
-    change index), producing a unique scriptPubKey only the wallet's scanner
-    can recognize as its own.
-    Returns dict with tx_hex, fee, amount, change.
+    change index). Returns dict with tx_hex, fee, amount, change.
     """
-    # ── 1. Parse spend key ────────────────────────────────────────────────
     spend_key = ec.PrivateKey(bytes.fromhex(spend_key_hex))
-    n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 
-    # ── 2. Build per-input tweaked keys and scripts ───────────────────────
-    input_keys    = []
-    input_scripts = []
-    for utxo in utxos:
-        priv_key_tweak_hex = utxo.get("priv_key_tweak") or ""
-        if not priv_key_tweak_hex:
-            raise ValueError(f"Missing priv_key_tweak for utxo {utxo['txid']}")
-
-        pub_key_hex = utxo.get("pub_key") or ""
-        if not pub_key_hex:
-            raise ValueError(f"Missing pub_key for utxo {utxo['txid']}")
-
-        # full_secret = priv_key_tweak + spend_key mod n
-        priv_tweak_int  = int_from_bytes(bytes.fromhex(priv_key_tweak_hex))
-        spend_key_int   = int_from_bytes(spend_key.secret)
-        full_secret_int = (priv_tweak_int + spend_key_int) % n
-
-        # Derive pubkey and negate if odd y (BIP-340)
-        full_pub_point = pubkey_point_gen_from_int(full_secret_int)
-        if not has_even_y(full_pub_point):
-            full_secret_int = n - full_secret_int
-            full_pub_point  = pubkey_point_gen_from_int(full_secret_int)
-
-        signing_key   = ec.PrivateKey(full_secret_int.to_bytes(32, "big"))
-        actual_x_only = bytes.fromhex(pub_key_hex)            # already x-only 32 bytes
-        actual_script = Script(bytes([0x51, 0x20]) + actual_x_only)
-
-        input_keys.append(signing_key)
-        input_scripts.append((actual_script, actual_x_only))
-
-    # ── 3. Recipient scriptpubkey ─────────────────────────────────────────
-    if recipient.startswith("sp1") or recipient.startswith("tsp1"):
-        recipient_script = Script(
-            derive_sp_scriptpubkey(recipient, spend_key.secret, utxos)
-        )
-    else:
-        try:
-            recipient_script = script.address_to_scriptpubkey(recipient)
-        except Exception as e:
-            raise ValueError(f"Invalid recipient address: {str(e)}")
-
-    # ── 4. Calculate amounts ──────────────────────────────────────────────
-    total_input     = sum(u["amount"] for u in utxos)
-    # Estimate vsize: 10 base + 57.5 per taproot input + 31 per output (2 outputs)
-    estimated_vsize = int(10 + (57.5 * len(utxos)) + (31 * 2))
-    fee             = max(1, math.ceil(estimated_vsize * fee_rate))
-    change_amount   = total_input - amount - fee
-
-    if change_amount < 0:
-        raise ValueError(
-            f"Insufficient funds. Need {amount + fee} sats "
-            f"(including {fee} sats fee), have {total_input} sats."
-        )
-
-    # If change is below dust threshold, try two strategies:
-    if 0 < change_amount < 546:            
-            logger.debug(f"Change {change_amount} sats below dust — adding to fee")
-            fee += change_amount
-            change_amount = 0
-
-    # ── 5. Derive BIP-352 change scriptpubkey (m=1) ──────────────────────
-    # Per BIP-352 spec, change MUST go to the wallet's own m=1 labeled SP
-    # address — never back to m=0 (the public sp1… address). This produces
-    # a unique scriptPubKey only this wallet's scanner can identify.
-    change_script = None
-    if change_amount >= 546:
-        spend_pub_hex = coincurve.PublicKey.from_secret(
-            spend_key.secret
-        ).format(compressed=True).hex()
-
-        hrp = "sp" if network.lower() == "mainnet" else "tsp"
-        change_sp_address = generate_labeled_sp_address(
-            scan_secret_hex = scan_secret_hex,
-            spend_pub_hex   = spend_pub_hex,
-            m               = 1,                        # BIP-352 change label
-            hrp             = hrp,
-        )
-
-        # Treat the m=1 address as a regular SP recipient — same code path
-        # as for any external sp1… recipient, but the "recipient" is ourself
-        change_script = Script(
-            derive_sp_scriptpubkey(change_sp_address, spend_key.secret, utxos)
-        )
-
-    # ── 6. Build inputs (BIP69 sorted) ────────────────────────────────────
-    tx_inputs_with_keys = [
-        (
-            TransactionInput(bytes.fromhex(u["txid"]), int(u.get("vout", 0))),
-            input_keys[i],
-            input_scripts[i],
-            u["amount"],
-        )
-        for i, u in enumerate(utxos)
-    ]
-    tx_inputs_with_keys.sort(key=lambda x: (x[0].txid.hex(), x[0].vout))
-
-    tx_inputs            = [t[0] for t in tx_inputs_with_keys]
-    input_keys_sorted    = [t[1] for t in tx_inputs_with_keys]
-    input_scripts_sorted = [t[2] for t in tx_inputs_with_keys]
-    input_amounts_sorted = [t[3] for t in tx_inputs_with_keys]
-
-    # ── 7. Build outputs (BIP69 sorted) ───────────────────────────────────
-    tx_outputs = [TransactionOutput(amount, recipient_script)]
-    if change_script is not None:
-        tx_outputs.append(TransactionOutput(change_amount, change_script))
-
-    tx_outputs.sort(
-        key=lambda x: (
-            x.value,
-            x.script_pubkey.data.hex()
-            if hasattr(x.script_pubkey, "data")
-            else bytes(x.script_pubkey).hex(),
-        )
+    input_keys, input_scripts = _prepare_inputs(spend_key, utxos)
+    recipient_script = _derive_recipient_script(recipient, spend_key, utxos)
+    total_input, fee, change_amount, estimated_vsize = _compute_amounts(
+        utxos, amount, fee_rate
     )
-
-    # ── 7b. Verify SP outputs are present before signing ─────────────────
-    if recipient.startswith("sp1") or recipient.startswith("tsp1"):
-        if not verify_sp_output(recipient_script, tx_outputs):
-            raise ValueError(
-                "Derived SP recipient output not found in transaction outputs. "
-                "Funds would be unrecoverable. Aborting."
-            )
-    if change_script is not None:
-        if not verify_sp_output(change_script, tx_outputs):
-            raise ValueError(
-                "Derived SP change output not found in transaction outputs. "
-                "Change would be unrecoverable. Aborting."
-            )
-
-    # ── 8. Construct PSBT ─────────────────────────────────────────────────
-    tx   = Transaction(vin=tx_inputs, vout=tx_outputs)
-    psbt = PSBT(tx)
-
-    for i in range(len(tx_inputs)):
-        inp = psbt.inputs[i]
-        inp.witness_utxo = TransactionOutput(
-            input_amounts_sorted[i], input_scripts_sorted[i][0]
-        )
-
-    # ── 9. Sign each input ───────────────────────────────────────────────
-    utxo_amounts = [inp.witness_utxo.value        for inp in psbt.inputs]
-    utxo_scripts = [inp.witness_utxo.script_pubkey for inp in psbt.inputs]
-
-    for i in range(len(psbt.inputs)):
-        h         = taproot_sighash(tx, i, utxo_scripts, utxo_amounts, sighash_type=0)
-        priv_bytes = input_keys_sorted[i].secret
-        cc_key    = coincurve.PrivateKey(priv_bytes)
-        sig_bytes = cc_key.sign_schnorr(h)
-        sig_bytes = sig_bytes.rjust(64, b"\x00")
-        psbt.inputs[i].taproot_key_sig = SchnorrSig.parse(sig_bytes)
-
-    # ── 10. Finalize and extract ─────────────────────────────────────────
-    for inp in psbt.inputs:
-        if inp.taproot_key_sig is not None:
-            inp.final_scriptwitness = Witness([inp.taproot_key_sig.serialize()])
-            inp.final_scriptsig     = Script(b"")
-
-    for i, inp in enumerate(psbt.inputs):
-        if inp.final_scriptwitness:
-            tx.vin[i].witness = inp.final_scriptwitness
-
-    tx_hex = tx.serialize().hex()
+    change_script = _derive_change_script(
+        change_amount, scan_secret_hex, spend_key, utxos, network
+    )
+    tx_outputs = _assemble_outputs(
+        amount, recipient_script, change_amount, change_script, recipient
+    )
+    tx_hex = _build_sign_finalize(utxos, input_keys, input_scripts, tx_outputs)
 
     return {
         "tx_hex":        tx_hex,
@@ -430,6 +450,201 @@ def build_transaction(
         "fee_rate_used": fee_rate,
         "vsize":         estimated_vsize,
     }
+
+# def build_transaction(
+#     spend_key_hex:   str,
+#     scan_secret_hex: str,
+#     recipient:       str,
+#     amount:          int,
+#     fee_rate:        float,
+#     utxos:           list[dict],
+#     network:         str = "Mainnet",
+# ) -> dict:
+#     """
+#     Build and sign a Bitcoin transaction.
+#     Supports Silent Payment addresses (sp1/tsp1) and standard on-chain addresses.
+#     Change goes to the wallet's own m=1 labeled SP address (BIP-352 reserved
+#     change index), producing a unique scriptPubKey only the wallet's scanner
+#     can recognize as its own.
+#     Returns dict with tx_hex, fee, amount, change.
+#     """
+#     # ── 1. Parse spend key ────────────────────────────────────────────────
+#     spend_key = ec.PrivateKey(bytes.fromhex(spend_key_hex))
+#     n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+
+#     # ── 2. Build per-input tweaked keys and scripts ───────────────────────
+#     input_keys    = []
+#     input_scripts = []
+#     for utxo in utxos:
+#         priv_key_tweak_hex = utxo.get("priv_key_tweak") or ""
+#         if not priv_key_tweak_hex:
+#             raise ValueError(f"Missing priv_key_tweak for utxo {utxo['txid']}")
+
+#         pub_key_hex = utxo.get("pub_key") or ""
+#         if not pub_key_hex:
+#             raise ValueError(f"Missing pub_key for utxo {utxo['txid']}")
+
+#         # full_secret = priv_key_tweak + spend_key mod n
+#         priv_tweak_int  = int_from_bytes(bytes.fromhex(priv_key_tweak_hex))
+#         spend_key_int   = int_from_bytes(spend_key.secret)
+#         full_secret_int = (priv_tweak_int + spend_key_int) % n
+
+#         # Derive pubkey and negate if odd y (BIP-340)
+#         full_pub_point = pubkey_point_gen_from_int(full_secret_int)
+#         if not has_even_y(full_pub_point):
+#             full_secret_int = n - full_secret_int
+#             full_pub_point  = pubkey_point_gen_from_int(full_secret_int)
+
+#         signing_key   = ec.PrivateKey(full_secret_int.to_bytes(32, "big"))
+#         actual_x_only = bytes.fromhex(pub_key_hex)            # already x-only 32 bytes
+#         actual_script = Script(bytes([0x51, 0x20]) + actual_x_only)
+
+#         input_keys.append(signing_key)
+#         input_scripts.append((actual_script, actual_x_only))
+
+#     # ── 3. Recipient scriptpubkey ─────────────────────────────────────────
+#     if recipient.startswith("sp1") or recipient.startswith("tsp1"):
+#         recipient_script = Script(
+#             derive_sp_scriptpubkey(recipient, spend_key.secret, utxos)
+#         )
+#     else:
+#         try:
+#             recipient_script = script.address_to_scriptpubkey(recipient)
+#         except Exception as e:
+#             raise ValueError(f"Invalid recipient address: {str(e)}")
+
+#     # ── 4. Calculate amounts ──────────────────────────────────────────────
+#     total_input     = sum(u["amount"] for u in utxos)
+#     # Estimate vsize: 10 base + 57.5 per taproot input + 31 per output (2 outputs)
+#     estimated_vsize = int(10 + (57.5 * len(utxos)) + (31 * 2))
+#     fee             = max(1, math.ceil(estimated_vsize * fee_rate))
+#     change_amount   = total_input - amount - fee
+
+#     if change_amount < 0:
+#         raise ValueError(
+#             f"Insufficient funds. Need {amount + fee} sats "
+#             f"(including {fee} sats fee), have {total_input} sats."
+#         )
+
+#     # If change is below dust threshold, try two strategies:
+#     if 0 < change_amount < 546:            
+#             logger.debug(f"Change {change_amount} sats below dust — adding to fee")
+#             fee += change_amount
+#             change_amount = 0
+
+#     # ── 5. Derive BIP-352 change scriptpubkey (m=1) ──────────────────────
+#     # Per BIP-352 spec, change MUST go to the wallet's own m=1 labeled SP
+#     # address — never back to m=0 (the public sp1… address). This produces
+#     # a unique scriptPubKey only this wallet's scanner can identify.
+#     change_script = None
+#     if change_amount >= 546:
+#         spend_pub_hex = coincurve.PublicKey.from_secret(
+#             spend_key.secret
+#         ).format(compressed=True).hex()
+
+#         hrp = "sp" if network.lower() == "mainnet" else "tsp"
+#         change_sp_address = generate_labeled_sp_address(
+#             scan_secret_hex = scan_secret_hex,
+#             spend_pub_hex   = spend_pub_hex,
+#             m               = 1,                        # BIP-352 change label
+#             hrp             = hrp,
+#         )
+
+#         # Treat the m=1 address as a regular SP recipient — same code path
+#         # as for any external sp1… recipient, but the "recipient" is ourself
+#         change_script = Script(
+#             derive_sp_scriptpubkey(change_sp_address, spend_key.secret, utxos)
+#         )
+
+#     # ── 6. Build inputs (BIP69 sorted) ────────────────────────────────────
+#     tx_inputs_with_keys = [
+#         (
+#             TransactionInput(bytes.fromhex(u["txid"]), int(u.get("vout", 0))),
+#             input_keys[i],
+#             input_scripts[i],
+#             u["amount"],
+#         )
+#         for i, u in enumerate(utxos)
+#     ]
+#     tx_inputs_with_keys.sort(key=lambda x: (x[0].txid.hex(), x[0].vout))
+
+#     tx_inputs            = [t[0] for t in tx_inputs_with_keys]
+#     input_keys_sorted    = [t[1] for t in tx_inputs_with_keys]
+#     input_scripts_sorted = [t[2] for t in tx_inputs_with_keys]
+#     input_amounts_sorted = [t[3] for t in tx_inputs_with_keys]
+
+#     # ── 7. Build outputs (BIP69 sorted) ───────────────────────────────────
+#     tx_outputs = [TransactionOutput(amount, recipient_script)]
+#     if change_script is not None:
+#         tx_outputs.append(TransactionOutput(change_amount, change_script))
+
+#     tx_outputs.sort(
+#         key=lambda x: (
+#             x.value,
+#             x.script_pubkey.data.hex()
+#             if hasattr(x.script_pubkey, "data")
+#             else bytes(x.script_pubkey).hex(),
+#         )
+#     )
+
+#     # ── 7b. Verify SP outputs are present before signing ─────────────────
+#     if recipient.startswith("sp1") or recipient.startswith("tsp1"):
+#         if not verify_sp_output(recipient_script, tx_outputs):
+#             raise ValueError(
+#                 "Derived SP recipient output not found in transaction outputs. "
+#                 "Funds would be unrecoverable. Aborting."
+#             )
+#     if change_script is not None:
+#         if not verify_sp_output(change_script, tx_outputs):
+#             raise ValueError(
+#                 "Derived SP change output not found in transaction outputs. "
+#                 "Change would be unrecoverable. Aborting."
+#             )
+
+#     # ── 8. Construct PSBT ─────────────────────────────────────────────────
+#     tx   = Transaction(vin=tx_inputs, vout=tx_outputs)
+#     psbt = PSBT(tx)
+
+#     for i in range(len(tx_inputs)):
+#         inp = psbt.inputs[i]
+#         inp.witness_utxo = TransactionOutput(
+#             input_amounts_sorted[i], input_scripts_sorted[i][0]
+#         )
+
+#     # ── 9. Sign each input ───────────────────────────────────────────────
+#     utxo_amounts = [inp.witness_utxo.value        for inp in psbt.inputs]
+#     utxo_scripts = [inp.witness_utxo.script_pubkey for inp in psbt.inputs]
+
+#     for i in range(len(psbt.inputs)):
+#         h         = taproot_sighash(tx, i, utxo_scripts, utxo_amounts, sighash_type=0)
+#         priv_bytes = input_keys_sorted[i].secret
+#         cc_key    = coincurve.PrivateKey(priv_bytes)
+#         sig_bytes = cc_key.sign_schnorr(h)
+#         sig_bytes = sig_bytes.rjust(64, b"\x00")
+#         psbt.inputs[i].taproot_key_sig = SchnorrSig.parse(sig_bytes)
+
+#     # ── 10. Finalize and extract ─────────────────────────────────────────
+#     for inp in psbt.inputs:
+#         if inp.taproot_key_sig is not None:
+#             inp.final_scriptwitness = Witness([inp.taproot_key_sig.serialize()])
+#             inp.final_scriptsig     = Script(b"")
+
+#     for i, inp in enumerate(psbt.inputs):
+#         if inp.final_scriptwitness:
+#             tx.vin[i].witness = inp.final_scriptwitness
+
+#     tx_hex = tx.serialize().hex()
+
+#     return {
+#         "tx_hex":        tx_hex,
+#         "fee":           fee,
+#         "amount":        amount,
+#         "change":        change_amount,
+#         "total_input":   total_input,
+#         "recipient":     recipient,
+#         "fee_rate_used": fee_rate,
+#         "vsize":         estimated_vsize,
+#     }
 
 
 def decrypt_mnemonic(

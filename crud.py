@@ -1010,3 +1010,58 @@ async def get_wallet_unspent_balance(wallet_id: str) -> int:
         {"wid": wallet_id},
     )
     return sum(r["amount"] for r in rows)
+
+async def delete_all_silnt_data_for_user(user_id: str) -> dict:
+    """
+    Remove every siLNt artifact belonging to a user across ALL networks: UTXOs,
+    addresses, and wallet rows. Network-agnostic — selects the user's wallets
+    directly so it doesn't depend on enumerating networks. Returns counts.
+    """
+    wallet_rows = await db.fetchall(
+        'SELECT id FROM silnt.wallets WHERE "user" = :uid',
+        {"uid": user_id},
+    )
+    wallet_ids = [r["id"] for r in wallet_rows]
+    if not wallet_ids:
+        return {"wallets_deleted": 0}
+
+    for wid in wallet_ids:
+        await db.execute("DELETE FROM silnt.utxos WHERE wallet_id = :wid", {"wid": wid})
+        await db.execute("DELETE FROM silnt.wallet_addresses WHERE wallet_id = :wid", {"wid": wid})
+        await db.execute("DELETE FROM silnt.wallets WHERE id = :wid", {"wid": wid})
+
+    return {"wallets_deleted": len(wallet_ids), "wallet_ids": wallet_ids}
+
+async def get_user_hr_addresses(user_id: str) -> list[str]:
+    """
+    Return all non-empty BitMail (hr_address) values for a user's wallets,
+    across all networks. Used to clean up DNS records on account closure.
+    """
+    rows = await db.fetchall(
+        'SELECT hr_address FROM silnt.wallets '
+        'WHERE "user" = :uid AND hr_address IS NOT NULL AND hr_address <> \'\'',
+        {"uid": user_id},
+    )
+    return [r["hr_address"] for r in rows if r["hr_address"]]
+
+async def clear_wallet_hr_address(wallet_id: str) -> None:
+    """Blank a wallet's hr_address after its BitMail DNS record is removed."""
+    await db.execute(
+        "UPDATE silnt.wallets SET hr_address = '' WHERE id = :wid",
+        {"wid": wallet_id},
+    )
+
+async def count_approved_bip353_for_wallet(wallet_id: str) -> int:
+    """How many times this wallet has been granted a BitMail address (approved)."""
+    row = await db.fetchone(
+        "SELECT COUNT(*) AS c FROM silnt.bip353_requests "
+        "WHERE wallet_id = :wid AND status = 'approved'",
+        {"wid": wallet_id},
+    )
+    # db.fetchone shape may be a mapping or a Row; handle both.
+    if row is None:
+        return 0
+    try:
+        return int(row["c"])
+    except (KeyError, TypeError):
+        return int(row[0])

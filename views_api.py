@@ -28,7 +28,6 @@ from .helpers.bip353_cloudflare import (
     delete_bip353_record,
     CloudflareError    
 )
-
 from .helpers.email_verification import (
     RegistrationRequest, VerifyRegistrationRequest,
     start_registration, complete_registration,
@@ -38,6 +37,7 @@ from .helpers.scan_rate_limiter import check_scan_allowed, mark_scan_finished
 from .helpers.forgot_password import request_password_reset
 from .helpers.transactions import get_wallet_transaction_detail, list_wallet_transactions
 from lnbits.core.crud import get_account
+from lnbits.core.crud.users import delete_account
 from lnbits.core.services.notifications import send_email_notification
 from .helpers.device_auth import (
     require_trusted_device,
@@ -49,8 +49,9 @@ from .helpers.device_auth import (
     cookie_name_for_user,    
     MAX_TRUSTED_DEVICES_PER_USER
 )
-from .helpers.user import is_lnbits_admin, require_admin
+from .helpers.user import is_lnbits_admin, require_admin, validate_born_height
 from .helpers.scan import BlindBitOracleClient
+from .helpers.fee_rates_backend import  get_recommended_fees, get_btc_usd_rate
 from .crud import (
     get_silnt_wallets,
     create_silnt_wallet,
@@ -111,7 +112,11 @@ from .crud import (
     cancel_user_request,
     restore_utxo_to_unspent,
     get_wallet_unspent_balance,
-    get_utxo
+    get_utxo,
+    delete_all_silnt_data_for_user,
+    get_user_hr_addresses,
+    clear_wallet_hr_address,
+    count_approved_bip353_for_wallet
 )
 
 from .models import (
@@ -149,6 +154,8 @@ from .models import (
 
 MAX_ADDRESSES_PER_WALLET = 10
 BIP352_CHANGE_LABEL_INDEX = 1
+BITMAIL_MAX_ACQUISITIONS = 2
+
 silnt_api_router = APIRouter()
 
 _BITMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -355,7 +362,9 @@ async def api_wallet_update(
                 )
             await update_hr_address(wallet.id, data.hr_address)
         if data.last_height is not None and int(data.last_height) != wallet.last_height:
-            await update_last_height(wallet.id, int(data.last_height))
+            validated_height = await validate_born_height(data.last_height)
+            if validated_height is not None:
+                await update_last_height(wallet.id, int(data.last_height))
         if data.title is not None and data.title != wallet.title:
             await update_title(wallet.id, data.title)
         if data.balance is not None and data.balance != wallet.balance:
@@ -1422,7 +1431,7 @@ async def api_create_bip353_request(
     data: CreateBip353Request,
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
-    user_id  = key_info.wallet.user
+    user_id  = key_info.wallet.user    
     username = (data.requested_username or "").strip().lower()
 
     if not USERNAME_PATTERN.match(username):
@@ -1450,7 +1459,13 @@ async def api_create_bip353_request(
             status_code=HTTPStatus.BAD_REQUEST,
             detail=f"This wallet already has the address {wallet.hr_address}. Delete it first to request a new one.",
         )
-
+    used = await count_approved_bip353_for_wallet(data.wallet_id)
+    if used >= BITMAIL_MAX_ACQUISITIONS:
+        raise HTTPException(
+            HTTPStatus.FORBIDDEN,
+            f"This wallet has reached the limit of {BITMAIL_MAX_ACQUISITIONS} "
+            f"BitMail addresses and cannot request another.",
+        )
     # Per-wallet: only one pending request allowed for this wallet at a time
     existing = await get_wallet_active_request(data.wallet_id)
     if existing:
@@ -1698,3 +1713,110 @@ async def api_restore_utxo(data: RestoreUtxoRequest):
     await update_balance(data.wallet_id, balance)
 
     return {"restored": True, "txid": data.txid, "vout": data.vout, "balance": balance}
+
+@silnt_api_router.delete("/api/v1/wallet/{wallet_id}/bip353")
+async def api_remove_bip353(
+    wallet_id: str,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),  # any logged-in user
+):
+    # 1. Resolve the wallet and ENFORCE OWNERSHIP — the whole security boundary.
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "Wallet not found.")
+    if wallet.user != key_info.wallet.user:
+        # Caller does not own this wallet — refuse. Prevents removing anyone
+        # else's BitMail. (Same ownership check used across the extension.)
+        raise HTTPException(HTTPStatus.FORBIDDEN, "Not your wallet.")
+
+    # 2. Nothing to remove?
+    hr = (wallet.hr_address or "").strip()
+    if not hr:
+        return {"removed": False, "reason": "no BitMail address on this wallet"}
+
+    # 3. Delete the DNS record (Cloudflare). The DNS-write capability is contained
+    #    to the caller's OWN address by the ownership check above.
+    cf = await get_cloudflare_config()
+    if cf and getattr(cf, "api_token", "") and getattr(cf, "zone_id", ""):
+        if "@" in hr:
+            uname = hr.split("@", 1)[0]
+            try:                
+                await delete_bip353_record(cf.api_token, cf.zone_id, cf.domain, uname)
+                logger.info(f"Removed BitMail DNS for {hr} (owner {key_info.wallet.user})")
+            except Exception as e:
+                logger.error(f"BitMail DNS removal failed for {hr}: {e}")
+                raise HTTPException(
+                    HTTPStatus.BAD_GATEWAY,
+                    "Could not remove the BitMail DNS record. Please try again.",
+                )
+    else:
+        logger.warning("Cloudflare not configured; clearing hr_address without DNS delete.")
+
+    # 4. Clear hr_address on the wallet row (crud helper — no db in the endpoint).
+    await clear_wallet_hr_address(wallet_id)
+    return {"removed": True, "hr_address": hr}
+
+@silnt_api_router.post(
+    "/api/v1/account/close", dependencies=[Depends(require_trusted_device)]
+)
+async def api_close_account(
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    user_id = key_info.wallet.user
+
+    # 1. Best-effort: remove any BitMail DNS records this user's wallets own, so
+    #    we don't leave dangling TXT records pointing at deleted wallets.    
+    try:
+        cf = await get_cloudflare_config()
+        if cf and getattr(cf, "api_token", "") and getattr(cf, "zone_id", ""):
+            hr_addresses = await get_user_hr_addresses(user_id)
+            for hr in hr_addresses:
+                if "@" in hr:
+                    uname = hr.split("@", 1)[0]
+                    try:                        
+                        await delete_bip353_record(cf.api_token, cf.zone_id, cf.domain, uname)
+                        logger.info(f"Removed BitMail DNS for {hr} during account close")
+                    except Exception as e:
+                        logger.warning(f"Could not remove BitMail DNS for {hr}: {e}")
+    except Exception as e:
+        logger.warning(f"BitMail cleanup skipped during account close: {e}")
+
+    # 2. Delete all siLNt data for this user
+    deleted_wallet_ids = []
+    try:
+        stats = await delete_all_silnt_data_for_user(user_id)
+        deleted_wallet_ids = stats.get("wallet_ids", [])
+        logger.info(f"Deleted siLNt data for user {user_id}: {stats}")
+    except Exception as e:
+        logger.error(f"Failed to delete siLNt data for {user_id}: {e}")
+        raise HTTPException(
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            "Could not remove wallet data. Account not closed — please try again.",
+        )
+
+    # 3. Delete the LNbits account itself (removes the user, their wallets, keys)
+    try:
+        await delete_account(user_id)        # delete_account(account_id) — user_id IS the account id
+        logger.info(f"LNbits account deleted: {user_id}")
+    except Exception as e:
+        logger.error(f"Failed to delete LNbits account {user_id}: {e}")
+        raise HTTPException(
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            "Wallet data was removed but the account could not be fully deleted. "
+            "Please contact the administrator.",
+        )
+
+    return {"closed": True, "wallet_ids": deleted_wallet_ids}
+
+@silnt_api_router.get(
+    "/api/v1/fees/recommended", dependencies=[Depends(require_trusted_device)]
+)
+async def api_recommended_fees():
+    """Recommended fee tiers (sat/vB) for the configured network."""
+    return await get_recommended_fees()
+
+@silnt_api_router.get(
+    "/api/v1/rate/usd", dependencies=[Depends(require_trusted_device)]
+)
+async def api_btc_usd_rate():
+    """BTC/USD rate for the unit toggle. {'rate': <float>} (0 if unavailable)."""
+    return {"rate": await get_btc_usd_rate()}    

@@ -2,6 +2,7 @@ from lnbits.settings import settings as lnbits_settings
 from lnbits.core.models import WalletTypeInfo
 from http import HTTPStatus
 from fastapi import HTTPException
+from ..crud import get_blindbit_config
 
 def require_admin(key_info: WalletTypeInfo) -> None:
     """Raise 403 if the caller is not an LNbits admin."""
@@ -28,3 +29,26 @@ def is_lnbits_admin(user_id: str) -> bool:
     if isinstance(admin_users, str):
         admin_users = [u.strip() for u in admin_users.split(",") if u.strip()]
     return user_id in admin_users
+
+async def validate_born_height(last_height) -> int | None:
+    """
+    Validate a requested born-at height against the system minimum.
+    Returns the validated int height, or None if not provided. Raises 400 if below min.
+    """
+    if last_height is None or last_height == "":
+        return None
+    try:
+        h = int(last_height)
+    except (TypeError, ValueError):
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "Born-at height must be a number.")
+    if h < 0:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "Born-at height must be positive.")
+
+    blindbit = await get_blindbit_config()
+    min_h = int(getattr(blindbit, "min_scan_height", 0) or 0)
+    if min_h > 0 and h < min_h:
+        raise HTTPException(
+            HTTPStatus.BAD_REQUEST,
+            f"Born-at height ({h}) is below the system minimum of {min_h}.",
+        )
+    return h

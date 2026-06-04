@@ -148,16 +148,31 @@ def create_labels(scan_key: bytes, indices: list[int]) -> list[Label]:
 
 
 def match_labels(
-    tx_output_33: bytes, pk_33: bytes, labels: list[Label]
-) -> Optional[Label]:
+    tx_output_33: bytes, pk_33: bytes, labels: list  # list[Label]
+):  # -> Optional[Label]
     try:
         diff = add_public_keys(tx_output_33, negate_public_key(pk_33))
     except Exception:
         return None
     for label in labels:
-        if diff[1:] == label.pub_key[1:]:
+        # Full-point comparison (includes parity byte) — avoids matching a label
+        # that only shares an x-coordinate (its negation), which would produce a
+        # wrong tweak and an unspendable detected output.
+        if diff == label.pub_key:
             return label
     return None
+
+# def match_labels(
+#     tx_output_33: bytes, pk_33: bytes, labels: list[Label]
+# ) -> Optional[Label]:
+#     try:
+#         diff = add_public_keys(tx_output_33, negate_public_key(pk_33))
+#     except Exception:
+#         return None
+#     for label in labels:
+#         if diff[1:] == label.pub_key[1:]:
+#             return label
+#     return None
 
 
 def receiver_scan_transaction_with_shared_secret(
@@ -351,6 +366,27 @@ def sync_block_from_compute_index(index, scan_key, spend_pub_key, labels):
             logger.warning(f"compute_index txid={txid}: {e}")
     return owned
 
+async def get_outspend_status(base_mempool_url: str, txid: str, vout: int) -> dict | None:
+    """
+    Exact-outpoint spent check via mempool.
+    Returns {"spent": bool} when known, or None on unknown/error (caller leaves
+    the UTXO in unconfirmed_spent and retries next scan).
+    """
+    base = (base_mempool_url or "https://mempool.space").rstrip("/")
+    url = f"{base}/api/tx/{txid}/outspend/{vout}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0, verify=False) as c:
+            r = await c.get(url)
+            if r.status_code == 404:
+                # outpoint unknown to explorer — can't confirm; treat as unknown
+                return None
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            return {"spent": bool(data.get("spent", False))}
+    except Exception as e:
+        logger.warning(f"outspend check failed for {txid}:{vout}: {e}")
+        return None
 
 class BlindBitOracleClient:
     def __init__(self, base_url: str):
@@ -444,8 +480,18 @@ async def scan_block(
 
 
 async def mark_spent_utxos_batch(heights, client, wallet_id, owned_utxos_lookup):
+    """
+    Short-hash matches move UTXOs to 'unconfirmed_spent' (provisional), then each
+    is verified against the exact outpoint via mempool outspend before finalizing.
+    Replaces the previous version that finalized 'spent' directly on an 8-byte
+    short-hash match.
+    """
     if not owned_utxos_lookup:
         return
+
+    # Resolve the mempool base once for verification.    
+    blindbit = await get_blindbit_config()
+    mempool_base = blindbit.mempool_url or "https://mempool.space"
 
     async def check_height(height: int):
         try:
@@ -456,8 +502,6 @@ async def mark_spent_utxos_batch(heights, client, wallet_id, owned_utxos_lookup)
             if not spent_set:
                 return
 
-            # spent-outputs index contains first 8 bytes of x-only pubkey
-            # of each spent output — match against our owned UTXOs pub_key
             rows = await db.fetchall(
                 """SELECT txid, vout, pub_key FROM silnt.utxos
                    WHERE wallet_id = :wallet_id
@@ -465,25 +509,103 @@ async def mark_spent_utxos_batch(heights, client, wallet_id, owned_utxos_lookup)
                 {"wallet_id": wallet_id},
             )
             for row in rows:
-                short_pub = row["pub_key"][:16]  # first 8 bytes = 16 hex chars
-                if short_pub in spent_set:
+                short_pub = row["pub_key"][:16]  # 8 bytes = 16 hex chars
+                if short_pub not in spent_set:
+                    continue
+                # PROVISIONAL: short-hash match → mark unconfirmed_spent, do NOT
+                # finalize. Only flip from 'unspent'; leave existing
+                # 'unconfirmed_spent' as-is (verification below handles both).
+                await db.execute(
+                    """UPDATE silnt.utxos SET utxo_state = 'unconfirmed_spent'
+                       WHERE txid = :txid AND vout = :vout
+                         AND wallet_id = :wallet_id
+                         AND utxo_state = 'unspent'""",
+                    {"txid": row["txid"], "vout": row["vout"], "wallet_id": wallet_id},
+                )
+                # VERIFY the exact outpoint before finalizing.
+                status = await get_outspend_status(mempool_base, row["txid"], row["vout"])
+                if status is None:
+                    # Unknown — leave as unconfirmed_spent, retry next scan.
+                    logger.info(
+                        f"{row['txid']}:{row['vout']} short-hash matched at block "
+                        f"{height}; outspend unknown — left unconfirmed_spent"
+                    )
+                    continue
+                if status["spent"]:
                     await db.execute(
                         """UPDATE silnt.utxos SET utxo_state = 'spent'
                            WHERE txid = :txid AND vout = :vout
-                           AND wallet_id = :wallet_id""",
-                        {
-                            "txid": row["txid"],
-                            "vout": row["vout"],
-                            "wallet_id": wallet_id,
-                        },
+                             AND wallet_id = :wallet_id
+                             AND utxo_state = 'unconfirmed_spent'""",
+                        {"txid": row["txid"], "vout": row["vout"], "wallet_id": wallet_id},
                     )
                     logger.info(
-                        f"Marked {row['txid']}:{row['vout']} spent at block {height}"
+                        f"Confirmed {row['txid']}:{row['vout']} spent (outspend) "
+                        f"at block {height}"
+                    )
+                else:
+                    # FALSE POSITIVE: 8-byte short-hash collision. Restore unspent.
+                    await db.execute(
+                        """UPDATE silnt.utxos SET utxo_state = 'unspent'
+                           WHERE txid = :txid AND vout = :vout
+                             AND wallet_id = :wallet_id
+                             AND utxo_state = 'unconfirmed_spent'""",
+                        {"txid": row["txid"], "vout": row["vout"], "wallet_id": wallet_id},
+                    )
+                    logger.warning(
+                        f"Short-hash FALSE POSITIVE: {row['txid']}:{row['vout']} "
+                        f"matched spent-index at block {height} but outspend says "
+                        f"unspent — restored to unspent."
                     )
         except Exception as e:
             logger.warning(f"mark_spent_utxos error at block {height}: {e}")
 
+    # Verification adds an explorer call per matched UTXO. Matches are rare
+    # (only your own spends), so this stays cheap. Kept within the same
+    # asyncio.gather over heights as before.    
     await asyncio.gather(*[check_height(h) for h in heights])
+
+# async def mark_spent_utxos_batch(heights, client, wallet_id, owned_utxos_lookup):
+#     if not owned_utxos_lookup:
+#         return
+
+#     async def check_height(height: int):
+#         try:
+#             spent_data = await client.get_spent_outputs(height)
+#             if not spent_data:
+#                 return
+#             spent_set = set(spent_data.get("index", []))
+#             if not spent_set:
+#                 return
+
+#             # spent-outputs index contains first 8 bytes of x-only pubkey
+#             # of each spent output — match against our owned UTXOs pub_key
+#             rows = await db.fetchall(
+#                 """SELECT txid, vout, pub_key FROM silnt.utxos
+#                    WHERE wallet_id = :wallet_id
+#                    AND utxo_state IN ('unspent', 'unconfirmed_spent')""",
+#                 {"wallet_id": wallet_id},
+#             )
+#             for row in rows:
+#                 short_pub = row["pub_key"][:16]  # first 8 bytes = 16 hex chars
+#                 if short_pub in spent_set:
+#                     await db.execute(
+#                         """UPDATE silnt.utxos SET utxo_state = 'spent'
+#                            WHERE txid = :txid AND vout = :vout
+#                            AND wallet_id = :wallet_id""",
+#                         {
+#                             "txid": row["txid"],
+#                             "vout": row["vout"],
+#                             "wallet_id": wallet_id,
+#                         },
+#                     )
+#                     logger.info(
+#                         f"Marked {row['txid']}:{row['vout']} spent at block {height}"
+#                     )
+#         except Exception as e:
+#             logger.warning(f"mark_spent_utxos error at block {height}: {e}")
+
+#     await asyncio.gather(*[check_height(h) for h in heights])
 
 
 async def set_last_scan_height(wallet_id: str, height: int) -> None:
