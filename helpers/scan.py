@@ -155,10 +155,10 @@ def match_labels(
     except Exception:
         return None
     for label in labels:
-        # Full-point comparison (includes parity byte) — avoids matching a label
+        # X-only comparison (includes parity byte) — avoids matching a label
         # that only shares an x-coordinate (its negation), which would produce a
         # wrong tweak and an unspendable detected output.
-        if diff == label.pub_key:
+        if diff[1:] == label.pub_key[1:]:
             return label
     return None
 
