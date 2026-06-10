@@ -14,7 +14,8 @@ from .models import (
     UpdateUtxoLabel,
     TrustedDevice,
     UserPrefs,
-    Bip353Request
+    Bip353Request,
+    BoltzSwapRecord
 )
 
 from embit.descriptor import Descriptor, Key
@@ -1088,3 +1089,47 @@ async def count_approved_bip353_for_wallet(wallet_id: str) -> int:
         return int(row["c"])
     except (KeyError, TypeError):
         return int(row[0])
+
+async def create_boltz_swap(rec: BoltzSwapRecord) -> BoltzSwapRecord:
+    await db.execute(
+        """
+        INSERT INTO silnt.boltz_swaps
+            (id, wallet_id, silnt_wallet_id, status, timeout_block_height, json_data)
+        VALUES (:id, :wallet_id, :silnt_wallet_id, :status, :timeout, :json_data)
+        """,
+        {
+            "id": rec.id,
+            "wallet_id": rec.wallet_id,
+            "silnt_wallet_id": rec.silnt_wallet_id,
+            "status": rec.status,
+            "timeout": rec.timeout_block_height,
+            "json_data": rec.json(),
+        },
+    )
+    return rec
+
+async def get_boltz_swap(swap_id: str) -> Optional[BoltzSwapRecord]:
+    row = await db.fetchone(
+        "SELECT json_data FROM silnt.boltz_swaps WHERE id = :id", {"id": swap_id}
+    )
+    return BoltzSwapRecord(**json.loads(row["json_data"])) if row else None
+
+async def update_boltz_swap(rec: BoltzSwapRecord) -> BoltzSwapRecord:
+    await db.execute(
+        """
+        UPDATE silnt.boltz_swaps
+        SET status = :status, timeout_block_height = :timeout,
+            updated_at = now(), json_data = :json_data
+        WHERE id = :id
+        """,
+        {"status": rec.status, "timeout": rec.timeout_block_height,
+         "json_data": rec.json(), "id": rec.id},
+    )
+    return rec
+
+async def list_boltz_swaps_by_status(status: str) -> list[BoltzSwapRecord]:
+    rows = await db.fetchall(
+        "SELECT json_data FROM silnt.boltz_swaps WHERE status = :status",
+        {"status": status},
+    )
+    return [BoltzSwapRecord(**json.loads(r["json_data"])) for r in rows]

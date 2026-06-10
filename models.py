@@ -26,6 +26,7 @@ class BlindbitConfig(BaseModel):
     min_scan_height:  int = 0   # 0 = no minimum; e.g. 840000 = no scans before block 840000
     max_wallets_per_user: int = 1   # 0 = unlimited
     dust_threshold_sats:    int = 5000
+    boltz_url: str = ""
 
 class CreateWallet(BaseModel):
     mnemonic: str = None
@@ -233,3 +234,41 @@ class RestoreUtxoRequest(BaseModel):
     txid: str
     vout: int
     
+# ── Models ────────────────────────────────────────────────────────────────────
+class CreateSwapInRequest(BaseModel):
+    wallet_id: str          # LNbits wallet to receive the Lightning payment
+    amount: int             # sats to receive on Lightning
+
+
+class SwapInResponse(BaseModel):
+    swap_id: str
+    address: str            # on-chain lockup address to pay
+    expected_amount: int    # exact sats to send on-chain (incl. Boltz fees)
+    timeout_block_height: Optional[int] = None
+    not_refund_safe: bool = True
+
+class BoltzSwapRecord(BaseModel):
+    id: str
+    wallet_id: str                       # LNbits wallet (receives LN)
+    silnt_wallet_id: Optional[str] = None
+    status: str = "created"              # created|funded|failed|refunded|completed
+    # refund material:
+    refund_privkey: str                  # hex — SENSITIVE
+    refund_public_key: str               # hex (what we sent to Boltz)
+    claim_public_key: str                # hex (Boltz's key from create response)
+    swap_tree: dict                      # the swapTree Boltz returned (JSON)
+    timeout_block_height: Optional[int] = None
+    # lockup output to refund (filled once the on-chain lockup is observed):
+    lockup_txid: Optional[str] = None
+    lockup_vout: Optional[int] = None
+    lockup_value: Optional[int] = None
+    # bookkeeping:
+    address: Optional[str] = None        # Boltz lockup address
+    expected_amount: Optional[int] = None
+    invoice: Optional[str] = None
+    payment_hash: Optional[str] = None
+    refund_address: Optional[str] = None # where the refund should go (user's on-chain addr)
+
+class RefundRequest(BaseModel):
+    address: str          # user's on-chain destination for the refund
+    fee_sats: int = 300

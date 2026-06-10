@@ -1223,8 +1223,14 @@ async def api_device_check(
         )
 
     token = make_device_confirm_token(user_id, new_device_id, ua, ip)
-    base_url = "https://signet.thrilla.me"
-    confirm_url = f"{base_url.rstrip('/')}/confirm-device?token={token}"
+    origin = request.headers.get("origin") or request.headers.get("referer") or ""
+    if not origin:
+        origin = f"https://{request.headers.get('host', '')}"
+    origin = origin.rstrip("/")
+    if origin.count("/") > 2:
+        parts = origin.split("/")
+        origin = "/".join(parts[:3])    
+    confirm_url = f"{origin}/confirm-device?token={token}"
 
     subject = "Confirm a new device on your wallet"
     body = (

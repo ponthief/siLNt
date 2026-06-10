@@ -44,7 +44,7 @@ async def m001_initial(db):
         """
         CREATE TABLE IF NOT EXISTS silnt.blindbit_config (
             id TEXT PRIMARY KEY,
-            json_data TEXT NOT NULL DEFAULT '{}'
+            json_data TEXT NOT NULL DEFAULT '{}'            
         );
         """
     )
@@ -139,4 +139,24 @@ async def m007_bip353_requests(db):
     )
     await db.execute(
         "CREATE INDEX IF NOT EXISTS bip353_requests_status ON silnt.bip353_requests(status, created_at)"
+    )
+
+async def m008_boltz_swaps(db):
+    await db.execute(
+        f"""
+        CREATE TABLE silnt.boltz_swaps (
+            id                   TEXT PRIMARY KEY,          -- Boltz swap id
+            wallet_id            TEXT NOT NULL,             -- LNbits wallet (LN side)
+            silnt_wallet_id      TEXT,                      -- SP wallet that funded it
+            status               TEXT NOT NULL,             -- created/funded/failed/refunded/completed
+            timeout_block_height INTEGER,                   -- refund nLockTime floor
+            created_at           TIMESTAMP NOT NULL DEFAULT {db.timestamp_now},
+            updated_at           TIMESTAMP NOT NULL DEFAULT {db.timestamp_now},
+            json_data            TEXT NOT NULL              -- the rest (see SwapRecord)
+        );
+        """
+    )
+    # index for finding swaps that may need refunding
+    await db.execute(
+        "CREATE INDEX idx_boltz_swaps_status ON silnt.boltz_swaps (status);"
     )
