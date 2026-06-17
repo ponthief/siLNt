@@ -160,3 +160,44 @@ async def m008_boltz_swaps(db):
     await db.execute(
         "CREATE INDEX idx_boltz_swaps_status ON silnt.boltz_swaps (status);"
     )
+
+async def m009_fix_utxos_primary_key(db):
+    """
+    The original PK was on txid alone, making a txid globally unique across ALL
+    wallets. That's wrong: two different wallets can receive outputs in the same
+    transaction, and one tx can pay multiple vouts to one wallet. The txid-only PK
+    fired before the ON CONFLICT (txid,vout,wallet_id) upsert could absorb the
+    re-insert, causing a duplicate-key crash when a 2nd wallet saw the same txid.
+    Drop it and use the full outpoint-per-wallet as the PK (the unique index
+    idx_silnt_utxos_vout_wallet_id already enforces this combination).
+    """
+    await db.execute("ALTER TABLE silnt.utxos DROP CONSTRAINT IF EXISTS utxos_pkey")
+    await db.execute(
+        "ALTER TABLE silnt.utxos "
+        "ADD CONSTRAINT utxos_pkey PRIMARY KEY (txid, vout, wallet_id)"
+    )
+
+async def m010_bitmail_per_address(db):
+    """
+    Per-address BitMail (BIP-353): each SP address — the wallet's base address
+    OR a labeled address — may have at most one BitMail, assigned once.
+
+    1. wallet_addresses.hr_address: the BitMail bound to a labeled address.
+       (The wallet's BASE address continues to use wallets.hr_address.)
+    2. bip353_requests.address_id: which labeled address the request targets.
+       NULL = the wallet's base SP address (back-compat: all existing rows are
+       base-address requests, so NULL is the correct default for them).
+    """
+    await db.execute(
+        "ALTER TABLE silnt.wallet_addresses "
+        "ADD COLUMN IF NOT EXISTS hr_address TEXT DEFAULT NULL"
+    )
+    await db.execute(
+        "ALTER TABLE silnt.bip353_requests "
+        "ADD COLUMN IF NOT EXISTS address_id TEXT DEFAULT NULL"
+    )
+    # Helps the per-address "already has an approved BitMail?" lifetime check.
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS bip353_requests_addr "
+        "ON silnt.bip353_requests(wallet_id, address_id, status)"
+    )

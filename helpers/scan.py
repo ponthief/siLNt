@@ -668,13 +668,15 @@ async def scan_wallet(
     blocks_scanned = 0
     last_scanned_height = start
     total_blocks = end - start + 1
+    stopped = False
     clear_scan_stop(wallet_id)
     set_scan_progress(wallet_id, 0, total_blocks, 0)
-    BATCH_SIZE = 30
+    BATCH_SIZE = 10
 
     for batch_start in range(0, total_blocks, BATCH_SIZE):
         if should_stop(wallet_id):
             logger.info(f"Scan stopped at {last_scanned_height}")
+            stopped = True
             await set_last_scan_height(wallet_id, last_scanned_height)
             set_scan_progress(
                 wallet_id, blocks_scanned, total_blocks, total_found, active=False
@@ -728,11 +730,7 @@ async def scan_wallet(
                     logger.error(
                         f"Block {h}: found {len(result)} UTXO(s) but DB insert failed: {ins_err}"
                     )
-                    # Bubble up a clean signal to the caller
-                    raise RuntimeError(
-                        f"Found UTXO(s) at block {h} but they could not be saved. "
-                        f"Please contact your administrator. (Internal error: insert failed)"
-                    )
+                    continue
             blocks_scanned += 1
             last_scanned_height = h
 
@@ -776,6 +774,7 @@ async def scan_wallet(
         "blocks_scanned": blocks_scanned,
         "final_height": last_scanned_height,
         "balance": balance,
+        "stopped": stopped
     }
 
 

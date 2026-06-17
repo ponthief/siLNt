@@ -106,6 +106,38 @@ def check_scan_allowed(
     )
 
 
-def mark_scan_finished(user_id: str, wallet_id: str) -> None:
-    """Release the concurrent-scan slot once a scan finishes (success or failure)."""
+def mark_scan_finished(
+    user_id: str,
+    wallet_id: str,
+    actual_blocks: Optional[int] = None,
+    estimated_blocks: Optional[int] = None,
+    reset_wallet_cooldown: bool = False,
+) -> None:
+    """
+    Release the concurrent-scan slot once a scan finishes (success/failure/stop).
+
+    If actual_blocks and estimated_blocks are given, reconcile the per-user block
+    budget: at start we debited the ESTIMATE; here we refund the difference so the
+    user is only charged for blocks ACTUALLY scanned (oracle load done).
+
+    If reset_wallet_cooldown is True (user explicitly stopped), clear the per-wallet
+    cooldown so they can retry immediately — the block budget is the real oracle-load
+    guard, and a self-initiated stop isn't the rapid-rescan case the cooldown targets.
+    """
     _active_scans[user_id].discard(wallet_id)
+
+    # Reconcile the block budget: replace the most recent estimate-debit for this
+    # user with the actual count (refund the unscanned remainder).
+    if actual_blocks is not None and estimated_blocks is not None:
+        log = _user_blocks_log.get(user_id)
+        if log:
+            # Find the most recent entry matching the estimate we debited and
+            # correct it to the actual blocks scanned.
+            for i in range(len(log) - 1, -1, -1):
+                ts, count = log[i]
+                if count == estimated_blocks:
+                    log[i] = (ts, max(0, int(actual_blocks)))
+                    break
+
+    if reset_wallet_cooldown:
+        _last_scan_time.pop(wallet_id, None)

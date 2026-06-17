@@ -1,7 +1,8 @@
 import json
 import time
-from typing import Optional, Tuple, List
 import secrets
+import os
+from typing import Optional, Tuple, List
 from lnbits.db import Database
 from lnbits.helpers import urlsafe_short_hash
 from .models import (
@@ -268,12 +269,35 @@ async def get_cloudflare_config() -> CloudflareConfig:
         "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
         {"id": CF_CONFIG_ID},
     )
-    if not row:
-        return CloudflareConfig()
-    return CloudflareConfig(**json.loads(row["json_data"]))
+    cfg = CloudflareConfig(**json.loads(row["json_data"])) if row else CloudflareConfig()
+    # BitMail/DNS domain is deployment config, not an admin-editable field.
+    # Source it from SILNT_BITMAIL_DOMAIN when set; otherwise keep whatever is
+    # stored (back-compat). Strip a leading dot in case someone reuses the
+    # cookie-domain form (".thrilla.me" → "thrilla.me").
+    env_domain = os.environ.get("SILNT_BITMAIL_DOMAIN", "").strip().lstrip(".")
+    if env_domain:
+        cfg.domain = env_domain
+    return cfg
 
 
 async def update_cloudflare_config(config: CloudflareConfig) -> CloudflareConfig:
+    # Domain is not admin-editable — force it from the env var (or keep the
+    # currently-effective value), ignoring whatever the client sent.
+    env_domain = os.environ.get("SILNT_BITMAIL_DOMAIN", "").strip().lstrip(".")
+    if env_domain:
+        config.domain = env_domain
+    else:
+        # No env override: preserve the existing stored domain rather than let
+        # the client change it.
+        existing = await db.fetchone(
+            "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
+            {"id": CF_CONFIG_ID},
+        )
+        if existing:
+            try:
+                config.domain = CloudflareConfig(**json.loads(existing["json_data"])).domain
+            except Exception:
+                pass
     json_data = config.json()
     existing = await db.fetchone(
         "SELECT id FROM silnt.blindbit_config WHERE id = :id",
@@ -865,21 +889,23 @@ async def get_effective_dust_threshold(user_id: str) -> int:
 async def create_bip353_request(
     user_id:            str,
     wallet_id:          str,
-    sp_address:         str,
+    sp_address:         str,    
     requested_username: str,
     message:            Optional[str],
+    address_id:         Optional[str] = None,
 ) -> Bip353Request:
     row_id = secrets.token_urlsafe(16)
     now    = int(time.time())
     await db.execute(
         """INSERT INTO silnt.bip353_requests
-              (id, user_id, wallet_id, sp_address, requested_username, message,
+              (id, user_id, wallet_id, address_id, sp_address, requested_username, message,
                status, created_at)
-           VALUES (:id, :uid, :wid, :sp, :uname, :msg, 'pending', :ts)""",
+           VALUES (:id, :uid, :wid, :aid, :sp, :uname, :msg, 'pending', :ts)""",
         {
             "id":    row_id,
             "uid":   user_id,
             "wid":   wallet_id,
+            "aid":   address_id,
             "sp":    sp_address,
             "uname": requested_username,
             "msg":   message,
@@ -887,11 +913,76 @@ async def create_bip353_request(
         },
     )
     return Bip353Request(
-        id=row_id, user_id=user_id, wallet_id=wallet_id, sp_address=sp_address,
-        requested_username=requested_username, message=message, status="pending",
-        created_at=now,
+        id=row_id, user_id=user_id, wallet_id=wallet_id, address_id=address_id,
+        sp_address=sp_address, requested_username=requested_username, message=message,
+        status="pending", created_at=now,
     )
 
+async def address_has_approved_bitmail(wallet_id: str, address_id: Optional[str]) -> bool:
+    """
+    True if this specific SP address (base = NULL address_id, or a labeled
+    address row) has EVER had an approved BitMail. Enforces 'assign once' per
+    address — the slot stays burned even after removal.
+    """
+    if address_id is None:
+        row = await db.fetchone(
+            """SELECT 1 FROM silnt.bip353_requests
+               WHERE wallet_id = :wid AND address_id IS NULL AND status = 'approved'
+               LIMIT 1""",
+            {"wid": wallet_id},
+        )
+    else:
+        row = await db.fetchone(
+            """SELECT 1 FROM silnt.bip353_requests
+               WHERE wallet_id = :wid AND address_id = :aid AND status = 'approved'
+               LIMIT 1""",
+            {"wid": wallet_id, "aid": address_id},
+        )
+    return row is not None
+
+async def update_label_hr_address(address_id: str, hr_address: str) -> None:
+    await db.execute(
+        "UPDATE silnt.wallet_addresses SET hr_address = :hra WHERE id = :id",
+        {"hra": hr_address, "id": address_id},
+    )
+
+async def clear_label_hr_address(address_id: str) -> None:
+    await db.execute(
+        "UPDATE silnt.wallet_addresses SET hr_address = NULL WHERE id = :id",
+        {"id": address_id},
+    )
+# Also check the existing wallets.hr_address column (base addresses)
+    row = await db.fetchone(
+        """SELECT 1 FROM silnt.wallets
+           WHERE LOWER(hr_address) LIKE LOWER(:pat)""",
+        {"pat": f"{username}@%"},
+    )
+    if row:
+        return True
+    # And labeled-address BitMails (wallet_addresses.hr_address)
+    row = await db.fetchone(
+        """SELECT 1 FROM silnt.wallet_addresses
+           WHERE LOWER(hr_address) LIKE LOWER(:pat)""",
+        {"pat": f"{username}@%"},
+    )
+    return row is not None
+
+async def get_user_hr_addresses(user_id: str) -> list[str]:
+    rows = await db.fetchall(
+        'SELECT hr_address FROM silnt.wallets '
+        'WHERE "user" = :uid AND hr_address IS NOT NULL AND hr_address <> \'\'',
+        {"uid": user_id},
+    )
+    out = [r["hr_address"] for r in rows if r["hr_address"]]
+    # Labeled-address BitMails belonging to this user's wallets, too.
+    label_rows = await db.fetchall(
+        '''SELECT wa.hr_address FROM silnt.wallet_addresses wa
+           JOIN silnt.wallets w ON w.id = wa.wallet_id
+           WHERE w."user" = :uid AND wa.hr_address IS NOT NULL AND wa.hr_address <> \'\'''',
+        {"uid": user_id},
+    )
+    out.extend(r["hr_address"] for r in label_rows if r["hr_address"])
+    return out
 
 async def get_bip353_request(req_id: str) -> Optional[Bip353Request]:
     row = await db.fetchone(
@@ -1053,20 +1144,15 @@ async def delete_all_silnt_data_for_user(user_id: str) -> dict:
         await db.execute("DELETE FROM silnt.utxos WHERE wallet_id = :wid", {"wid": wid})
         await db.execute("DELETE FROM silnt.wallet_addresses WHERE wallet_id = :wid", {"wid": wid})
         await db.execute("DELETE FROM silnt.wallets WHERE id = :wid", {"wid": wid})
+        await db.execute("DELETE FROM silnt.wallets WHERE id = :wid", {"wid": wid})
 
+    # Per-user data (keyed by user_id, not wallet_id) — these must be cleaned even
+    # if the user somehow had no wallets, so do them unconditionally.
+    await db.execute("DELETE FROM silnt.bip353_requests WHERE user_id = :uid", {"uid": user_id})
+    await db.execute("DELETE FROM silnt.trusted_devices  WHERE user_id = :uid", {"uid": user_id})
+    await db.execute("DELETE FROM silnt.user_prefs        WHERE user_id = :uid", {"uid": user_id})
+    
     return {"wallets_deleted": len(wallet_ids), "wallet_ids": wallet_ids}
-
-async def get_user_hr_addresses(user_id: str) -> list[str]:
-    """
-    Return all non-empty BitMail (hr_address) values for a user's wallets,
-    across all networks. Used to clean up DNS records on account closure.
-    """
-    rows = await db.fetchall(
-        'SELECT hr_address FROM silnt.wallets '
-        'WHERE "user" = :uid AND hr_address IS NOT NULL AND hr_address <> \'\'',
-        {"uid": user_id},
-    )
-    return [r["hr_address"] for r in rows if r["hr_address"]]
 
 async def clear_wallet_hr_address(wallet_id: str) -> None:
     """Blank a wallet's hr_address after its BitMail DNS record is removed."""
@@ -1133,3 +1219,73 @@ async def list_boltz_swaps_by_status(status: str) -> list[BoltzSwapRecord]:
         {"status": status},
     )
     return [BoltzSwapRecord(**json.loads(r["json_data"])) for r in rows]
+
+async def list_boltz_swaps_for_wallet(
+    wallet_id: str, silnt_wallet_id: str | None = None
+) -> list[BoltzSwapRecord]:
+    rows = await db.fetchall(
+        """
+        SELECT json_data FROM silnt.boltz_swaps
+        WHERE wallet_id = :w OR silnt_wallet_id = :s
+        ORDER BY created_at DESC
+        """,
+        {"w": wallet_id, "s": silnt_wallet_id or wallet_id},
+    )
+    return [BoltzSwapRecord(**json.loads(r["json_data"])) for r in rows]
+
+
+async def delete_boltz_swap(swap_id: str) -> None:
+    await db.execute(
+        "DELETE FROM silnt.boltz_swaps WHERE id = :id",
+        {"id": swap_id},
+    )
+
+async def mark_utxos_confirmed_spent_by_tx(wallet_id: str, spending_txid: str) -> int:
+    """
+    Finalize a confirmed send: move this wallet's inputs spent in `spending_txid`
+    from 'unconfirmed_spent' to 'spent'. Returns rows affected. Idempotent —
+    re-running on an already-'spent' tx changes nothing.
+    """
+    result = await db.execute(
+        """UPDATE silnt.utxos
+              SET utxo_state = 'spent'
+            WHERE wallet_id = :wid
+              AND spent_in_txid = :txid
+              AND utxo_state = 'unconfirmed_spent'""",
+        {"wid": wallet_id, "txid": spending_txid},
+    )
+    return getattr(result, "rowcount", 0) or 0
+
+async def cancel_pending_request_for_address(wallet_id: str, address_id: Optional[str]) -> int:
+    """Cancel any PENDING BitMail request bound to a specific address (a label,
+    or the wallet base when address_id is None). Used when the address/wallet is
+    deleted so the request doesn't linger in the admin queue. Approved rows are
+    left intact (they preserve the wallet's lifetime cap and keep the username
+    reserved)."""
+    if address_id is None:
+        result = await db.execute(
+            """UPDATE silnt.bip353_requests
+               SET status = 'cancelled', processed_at = :ts
+               WHERE wallet_id = :wid AND address_id IS NULL AND status = 'pending'""",
+            {"wid": wallet_id, "ts": int(time.time())},
+        )
+    else:
+        result = await db.execute(
+            """UPDATE silnt.bip353_requests
+               SET status = 'cancelled', processed_at = :ts
+               WHERE wallet_id = :wid AND address_id = :aid AND status = 'pending'""",
+            {"wid": wallet_id, "aid": address_id, "ts": int(time.time())},
+        )
+    return getattr(result, "rowcount", 0) or 0
+
+
+async def cancel_all_pending_requests_for_wallet(wallet_id: str) -> int:
+    """Cancel ALL pending BitMail requests for a wallet (any address). Used when
+    the whole wallet is deleted."""
+    result = await db.execute(
+        """UPDATE silnt.bip353_requests
+           SET status = 'cancelled', processed_at = :ts
+           WHERE wallet_id = :wid AND status = 'pending'""",
+        {"wid": wallet_id, "ts": int(time.time())},
+    )
+    return getattr(result, "rowcount", 0) or 0

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from http import HTTPStatus
 from base64 import b64encode
@@ -6,6 +7,7 @@ import hashlib
 import re
 import secrets
 import time
+import time as _time
 from .helpers.wallet import (
     generate_silent_wallet_address,
     decrypt_mnemonic,
@@ -116,7 +118,13 @@ from .crud import (
     delete_all_silnt_data_for_user,
     get_user_hr_addresses,
     clear_wallet_hr_address,
-    count_approved_bip353_for_wallet
+    count_approved_bip353_for_wallet,
+    address_has_approved_bitmail,
+    update_label_hr_address,
+    clear_label_hr_address,
+    mark_utxos_confirmed_spent_by_tx,
+    cancel_pending_request_for_address,
+    cancel_all_pending_requests_for_wallet
 )
 
 from .models import (
@@ -152,9 +160,10 @@ from .models import (
     RECENT_REJECT_COOLDOWN,
 )
 
-MAX_ADDRESSES_PER_WALLET = 10
+MAX_ADDRESSES_PER_WALLET = 2
 BIP352_CHANGE_LABEL_INDEX = 1
-BITMAIL_MAX_ACQUISITIONS = 2
+BITMAIL_MAX_ACQUISITIONS = 3
+BLINDBIT_SYNC_TOLERANCE = 2
 
 silnt_api_router = APIRouter()
 
@@ -385,6 +394,33 @@ async def api_wallet_delete(wallet_id: str):
         raise HTTPException(
             status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
         )
+     # Clean up BitMail state before wiping the wallet:
+    # 1. Cancel all pending requests so none linger in the admin queue.
+    try:
+        await cancel_all_pending_requests_for_wallet(wallet_id)
+    except Exception as e:
+        logger.warning(f"Could not cancel pending requests for deleted wallet {wallet_id}: {e}")
+
+    # 2. Remove DNS records for any live BitMails (base + labeled) on this wallet.
+    cf = await get_cloudflare_config()
+    if cf and getattr(cf, "api_token", "") and getattr(cf, "zone_id", ""):
+        hrs = []
+        if (wallet.hr_address or "").strip():
+            hrs.append(wallet.hr_address.strip())
+        try:
+            for a in await get_wallet_addresses(wallet_id):
+                ahr = (a.get("hr_address") if isinstance(a, dict) else getattr(a, "hr_address", None)) or ""
+                if ahr.strip():
+                    hrs.append(ahr.strip())
+        except Exception as e:
+            logger.warning(f"Could not enumerate labeled BitMails for {wallet_id}: {e}")
+        for hr in hrs:
+            if "@" in hr:
+                try:
+                    await delete_bip353_record(cf.api_token, cf.zone_id, cf.domain, hr.split("@", 1)[0])
+                    logger.info(f"Removed BitMail DNS {hr} for deleted wallet {wallet_id}")
+                except Exception as e:
+                    logger.warning(f"Could not remove BitMail DNS {hr} for deleted wallet {wallet_id}: {e}")
     await delete_silnt_wallet(wallet_id)
     await delete_utxos_for_wallet(wallet_id)
     await delete_wallet_label_addresses(wallet_id)
@@ -462,6 +498,29 @@ async def api_delete_wallet_address(
         )
     if wallet.user != key_info.wallet.user:
         raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+    # Clean up this address's BitMail state before deleting the row, so we don't
+    # (a) orphan a pending request in the admin queue, or (b) leave a live DNS
+    # record bound to an address that no longer exists.
+    addr = await get_wallet_address(address_id)
+
+    # 1. Cancel any pending BitMail request for this address.
+    try:
+        await cancel_pending_request_for_address(wallet_id, address_id)
+    except Exception as e:
+        logger.warning(f"Could not cancel pending request for deleted address {address_id}: {e}")
+
+    # 2. If the address had an approved BitMail, remove its DNS record. The
+    #    approved bip353_requests row is intentionally LEFT intact: it preserves
+    #    the wallet's lifetime BitMail cap and keeps the username reserved.
+    hr = (addr.hr_address or "").strip() if addr else ""
+    if hr and "@" in hr:
+        cf = await get_cloudflare_config()
+        if cf and getattr(cf, "api_token", "") and getattr(cf, "zone_id", ""):
+            try:
+                await delete_bip353_record(cf.api_token, cf.zone_id, cf.domain, hr.split("@", 1)[0])
+                logger.info(f"Removed BitMail DNS {hr} for deleted labeled address {address_id}")
+            except Exception as e:
+                logger.warning(f"Could not remove BitMail DNS for deleted address {address_id}: {e}")
     await delete_wallet_label_address(address_id, wallet_id)
     return "", HTTPStatus.NO_CONTENT
 
@@ -630,37 +689,34 @@ async def api_scan_wallet(
         ip=client_ip,
         estimated_blocks=estimated_blocks,
     )
-    try:
-        result = await scan_wallet(
-            wallet_id=wallet_id,
-            scan_secret_hex=data.scan_secret,
-            spend_secret_hex=data.spend_key,
-            from_height=data.from_height,
-            to_height=data.to_height,
-        )
-        return result
-    except ValueError as e:
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
-    except RuntimeError as e:
-        # Our scan code raises RuntimeError with user-friendly messages —
-        # surface those without leaking implementation details
-        logger.error(f"Scan runtime error for {wallet_id}: {e}")
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-            detail=str(e),
-        )
-    except Exception as e:
-        # Catch-all for unexpected errors — generic message to the user,
-        # full traceback in server logs
-        logger.error(f"Scan unexpected error for {wallet_id}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-            detail="An unexpected error occurred during scanning. Please contact your administrator.",
-        )
+    user_id = key_info.wallet.user
 
-    finally:
-        # ALWAYS release the concurrent-scan slot, even on error/exception
-        mark_scan_finished(key_info.wallet.user, wallet_id)
+    async def _run_scan():
+        result = None
+        try:
+            result = await scan_wallet(
+                wallet_id=wallet_id,
+                scan_secret_hex=data.scan_secret,
+                spend_secret_hex=data.spend_key,
+                from_height=data.from_height,
+                to_height=data.to_height,
+            )
+        except ValueError as e:
+            logger.error(f"Scan value error for {wallet_id}: {e}"); _mark_scan_failed(wallet_id)
+        except RuntimeError as e:
+            logger.error(f"Scan runtime error for {wallet_id}: {e}"); _mark_scan_failed(wallet_id)
+        except Exception as e:
+            logger.error(f"Scan unexpected error for {wallet_id}: {e}", exc_info=True); _mark_scan_failed(wallet_id)
+        finally:
+            actual = (result or {}).get("blocks_scanned") if isinstance(result, dict) else None
+            mark_scan_finished(
+                user_id, wallet_id,
+                actual_blocks=actual,
+                estimated_blocks=estimated_blocks,
+            )
+
+    asyncio.create_task(_run_scan())
+    return {"started": True}    
 
 @silnt_api_router.post("/api/v1/wallet/{wallet_id}/scan/stop")
 async def api_stop_scan(
@@ -668,14 +724,19 @@ async def api_stop_scan(
 ):
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
-        raise HTTPException(
-            status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
-        )
-    # Ownership guard: users may only stop scans for their own wallets.
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
     if wallet.user != key_info.wallet.user:
         raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
     request_scan_stop(wallet_id)
-    mark_scan_finished(key_info.wallet.user, wallet_id)
+    # Charge only for blocks actually scanned so far, and clear the per-wallet
+    # cooldown so the user can immediately retry (e.g. fix the range and rescan).
+    actual = get_scan_progress(wallet_id).get("current", 0)
+    mark_scan_finished(
+        key_info.wallet.user, wallet_id,
+        actual_blocks=actual,
+        estimated_blocks=None,         # not reconciling here; just reset cooldown
+        reset_wallet_cooldown=True,
+    )
     return {"status": "stop requested"}
 
 
@@ -1460,11 +1521,39 @@ async def api_create_bip353_request(
             status_code=HTTPStatus.BAD_REQUEST,
             detail="Wallet has no SP address yet — scan first.",
         )
-    if wallet.hr_address:
+
+    # Resolve the TARGET address: None = wallet base address; else a labeled address row.
+    address_id = data.address_id
+    if address_id is None:
+        target_sp_address = wallet.sp_address
+        current_hr        = (wallet.hr_address or "").strip()
+    else:
+        addr = await get_wallet_address(address_id)
+        if not addr or addr.wallet_id != data.wallet_id:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail="Labeled address not found on this wallet.",
+            )
+        target_sp_address = addr.sp_address
+        current_hr        = (addr.hr_address or "").strip()
+
+    # This specific address already HAS a BitMail right now.
+    if current_hr:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
-            detail=f"This wallet already has the address {wallet.hr_address}. Delete it first to request a new one.",
+            detail=f"This address already has the BitMail {current_hr}. "
+                   f"Remove it first — note a removed BitMail cannot be re-added to the same address.",
         )
+
+    # Assign-once: this address was granted a BitMail before (even if since removed).
+    if await address_has_approved_bitmail(data.wallet_id, address_id):
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN,
+            detail="This address previously had a BitMail and cannot be assigned another. "
+                   "BitMail assignment is permanent per address.",
+        )
+
+    # Wallet-wide cap across base + labeled addresses (base + 2 labeled = 3).
     used = await count_approved_bip353_for_wallet(data.wallet_id)
     if used >= BITMAIL_MAX_ACQUISITIONS:
         raise HTTPException(
@@ -1472,39 +1561,14 @@ async def api_create_bip353_request(
             f"This wallet has reached the limit of {BITMAIL_MAX_ACQUISITIONS} "
             f"BitMail addresses and cannot request another.",
         )
-    # Per-wallet: only one pending request allowed for this wallet at a time
-    existing = await get_wallet_active_request(data.wallet_id)
-    if existing:
-        raise HTTPException(
-            status_code=HTTPStatus.CONFLICT,
-            detail="This wallet already has a pending request. Cancel it before submitting another.",
-        )
-
-    # Per-wallet rejection cooldown
-    last_rejected = await get_wallet_last_rejected_request(data.wallet_id)
-    if last_rejected and last_rejected.processed_at:
-        elapsed = int(time.time()) - last_rejected.processed_at
-        if elapsed < RECENT_REJECT_COOLDOWN:
-            wait_hours = (RECENT_REJECT_COOLDOWN - elapsed) // 3600 + 1
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST,
-                detail=f"This wallet's previous request was rejected recently. Please wait {wait_hours} hours before trying again.",
-            )
-
-    # Username is taken globally (any wallet, any user)
-    if await is_username_taken(username):
-        raise HTTPException(
-            status_code=HTTPStatus.CONFLICT,
-            detail="This username is already taken. Choose another.",
-        )
-
     req = await create_bip353_request(
-        user_id            = user_id,
-        wallet_id          = data.wallet_id,
-        sp_address         = wallet.sp_address,
-        requested_username = username,
-        message            = data.message,
-    )
+            user_id            = user_id,
+            wallet_id          = data.wallet_id,
+            sp_address         = target_sp_address,            
+            requested_username = username,
+            message            = data.message,
+            address_id         = address_id,
+        )
     return req
 
 @silnt_api_router.get("/api/v1/bip353/requests")
@@ -1602,9 +1666,12 @@ async def api_admin_approve_request(
 
     full_address = f"{final_username}@{cf_config.domain}"
     try:
-        await update_hr_address(req.wallet_id, full_address)
+        if req.address_id is None:
+            await update_hr_address(req.wallet_id, full_address)         # base address
+        else:
+            await update_label_hr_address(req.address_id, full_address)  # labeled address
     except Exception as e:
-        logger.error(f"wallet.hr_address update failed after CF create: {e}")
+        logger.error(f"hr_address update failed after CF create: {e}")
         raise HTTPException(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             detail="Cloudflare record was created but the wallet update failed. "
@@ -1723,6 +1790,7 @@ async def api_restore_utxo(data: RestoreUtxoRequest):
 @silnt_api_router.delete("/api/v1/wallet/{wallet_id}/bip353")
 async def api_remove_bip353(
     wallet_id: str,
+    address_id: Optional[str] = Query(None),   # None = wallet base address; else a labeled address
     key_info: WalletTypeInfo = Depends(require_trusted_device),  # any logged-in user
 ):
     # 1. Resolve the wallet and ENFORCE OWNERSHIP — the whole security boundary.
@@ -1730,14 +1798,20 @@ async def api_remove_bip353(
     if not wallet:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Wallet not found.")
     if wallet.user != key_info.wallet.user:
-        # Caller does not own this wallet — refuse. Prevents removing anyone
-        # else's BitMail. (Same ownership check used across the extension.)
         raise HTTPException(HTTPStatus.FORBIDDEN, "Not your wallet.")
 
-    # 2. Nothing to remove?
-    hr = (wallet.hr_address or "").strip()
+    # 2. Resolve which address's BitMail we're removing.
+    label_addr = None
+    if address_id is None:
+        hr = (wallet.hr_address or "").strip()
+    else:
+        label_addr = await get_wallet_address(address_id)
+        if not label_addr or label_addr.wallet_id != wallet_id:
+            raise HTTPException(HTTPStatus.BAD_REQUEST, "Labeled address not found on this wallet.")
+        hr = (label_addr.hr_address or "").strip()
+
     if not hr:
-        return {"removed": False, "reason": "no BitMail address on this wallet"}
+        return {"removed": False, "reason": "no BitMail address on this address"}
 
     # 3. Delete the DNS record (Cloudflare). The DNS-write capability is contained
     #    to the caller's OWN address by the ownership check above.
@@ -1757,8 +1831,13 @@ async def api_remove_bip353(
     else:
         logger.warning("Cloudflare not configured; clearing hr_address without DNS delete.")
 
-    # 4. Clear hr_address on the wallet row (crud helper — no db in the endpoint).
-    await clear_wallet_hr_address(wallet_id)
+    # 4. Clear hr_address on the right row. The bip353_requests 'approved' row is
+    #    left intact, so address_has_approved_bitmail() keeps the slot burned —
+    #    a removed BitMail cannot be re-added to the same address.
+    if address_id is None:
+        await clear_wallet_hr_address(wallet_id)
+    else:
+        await clear_label_hr_address(address_id)
     return {"removed": True, "hr_address": hr}
 
 @silnt_api_router.post(
@@ -1825,4 +1904,109 @@ async def api_recommended_fees():
 )
 async def api_btc_usd_rate():
     """BTC/USD rate for the unit toggle. {'rate': <float>} (0 if unavailable)."""
-    return {"rate": await get_btc_usd_rate()}    
+    return {"rate": await get_btc_usd_rate()}
+
+@silnt_api_router.get("/api/v1/tx/{txid}/confirmation")
+async def api_tx_confirmation(
+    txid: str,
+    wallet_id: str,
+    key_info: WalletTypeInfo = Depends(require_admin_key),
+):
+    """
+    Check whether an outgoing send tx has confirmed. If confirmed, transition the
+    wallet's spent inputs from 'unconfirmed_spent' to 'spent' and refresh balance.
+    Lightweight: one mempool/esplora lookup for this txid — NOT a scan.
+    Returns {confirmed: bool, block_height: int|None, balance: int}.
+    """
+    # Ownership: only let a wallet query a tx it actually sent.
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "Wallet not found.")
+    # (Add your usual user/wallet ownership check here, matching other endpoints.)
+
+    cfg = await get_blindbit_config()
+    mempool = (cfg.mempool_url or "").rstrip("/")
+    if not mempool:
+        raise HTTPException(HTTPStatus.SERVICE_UNAVAILABLE, "Mempool URL not configured.")
+
+    confirmed = False
+    block_height = None
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await c.get(f"{mempool}/api/tx/{txid}/status")
+        if r.status_code == 200:
+            st = r.json()
+            confirmed = bool(st.get("confirmed"))
+            block_height = st.get("block_height")
+
+    if confirmed:
+        # Finalize: unconfirmed_spent -> spent for this tx's inputs in this wallet.
+        await mark_utxos_confirmed_spent_by_tx(wallet_id, txid)
+        # Recompute balance from unspent UTXOs and persist it.
+        new_balance = await get_wallet_unspent_balance(wallet_id)
+        await update_balance(wallet_id, new_balance)
+    else:
+        new_balance = await get_wallet_unspent_balance(wallet_id)
+
+    return {"confirmed": confirmed, "block_height": block_height, "balance": new_balance}
+
+
+@silnt_api_router.get("/api/v1/admin/blindbit/health")
+async def api_blindbit_health(
+    key_info: WalletTypeInfo = Depends(require_admin_key),
+):
+    """
+    Health = BlindBit reachable AND in sync with the chain tip (mempool/esplora).
+    Comparing heights is robust to bursty block production (mainnet can go hours
+    with no block); a real stall shows up as BlindBit falling behind the tip.
+    Returns up/down + whether the heights diverge (+ the heights only when they do).
+    """
+    blindbit = await get_blindbit_config()
+    bb_url = (blindbit.blindbit_url or "").rstrip("/")
+    mp_url = (blindbit.mempool_url or "").rstrip("/")
+    if not bb_url:
+        return {"ok": False, "in_sync": False, "error": "BlindBit Oracle URL not configured.",
+                "blindbit_height": None, "tip_height": None, "behind_by": None, "latency_ms": None}
+
+    started = _time.monotonic()
+    # 1) BlindBit height (the thing we're checking)
+    try:
+        async with httpx.AsyncClient(timeout=8.0, verify=False) as c:
+            r = await c.get(f"{bb_url}/info")
+        latency_ms = int((_time.monotonic() - started) * 1000)
+        if r.status_code != 200:
+            return {"ok": False, "in_sync": False, "error": f"Oracle returned HTTP {r.status_code}.",
+                    "blindbit_height": None, "tip_height": None, "behind_by": None, "latency_ms": latency_ms}
+        bb_height = int(r.json().get("height"))
+    except Exception as exc:
+        latency_ms = int((_time.monotonic() - started) * 1000)
+        return {"ok": False, "in_sync": False, "error": str(exc)[:200],
+                "blindbit_height": None, "tip_height": None, "behind_by": None, "latency_ms": latency_ms}
+
+    # 2) Chain tip from mempool/esplora (the reference). If we can't get it, we
+    #    can still report BlindBit is UP, just can't assess sync.
+    tip_height = None
+    if mp_url:
+        try:
+            async with httpx.AsyncClient(timeout=8.0, verify=False) as c:
+                rt = await c.get(f"{mp_url}/api/blocks/tip/height")
+            if rt.status_code == 200:
+                tip_height = int(rt.text.strip())
+        except Exception:
+            tip_height = None
+
+    if tip_height is None:
+        # BlindBit is up but we couldn't fetch the tip to compare.
+        return {"ok": True, "in_sync": None, "error": "Could not fetch chain tip to compare.",
+                "blindbit_height": bb_height, "tip_height": None, "behind_by": None, "latency_ms": latency_ms}
+
+    behind_by = tip_height - bb_height           # positive = BlindBit is behind
+    in_sync = behind_by <= BLINDBIT_SYNC_TOLERANCE   # ahead or within tolerance = healthy
+    return {
+        "ok": True,
+        "in_sync": in_sync,
+        "error": None,
+        "blindbit_height": bb_height,
+        "tip_height": tip_height,
+        "behind_by": behind_by,
+        "latency_ms": latency_ms,
+    }

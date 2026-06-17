@@ -107,6 +107,7 @@ class WalletAddress(BaseModel):
     wallet_id: str
     sp_address: str
     label_index: int
+    hr_address: Optional[str] = None
     created_at: int = 0
 
 
@@ -193,6 +194,7 @@ class Bip353Request(BaseModel):
     wallet_id:          str
     sp_address:         str
     requested_username: str
+    address_id:     Optional[str] = None
     final_username:     Optional[str] = None
     message:            Optional[str] = None
     status:             str   # 'pending' | 'approved' | 'rejected' | 'cancelled'
@@ -205,6 +207,7 @@ class Bip353Request(BaseModel):
 class CreateBip353Request(BaseModel):
     wallet_id:          str
     requested_username: str
+    address_id:         Optional[str] = None   # NULL = wallet base SP address
     message:            Optional[str] = Field(default=None, max_length=500)
 
 class ApproveBip353Request(BaseModel):
@@ -238,6 +241,9 @@ class RestoreUtxoRequest(BaseModel):
 class CreateSwapInRequest(BaseModel):
     wallet_id: str          # LNbits wallet to receive the Lightning payment
     amount: int             # sats to receive on Lightning
+    refund_address: str                  # on-chain (non-SP) address to refund to on failure
+    silnt_wallet_id: Optional[str] = None  # SP wallet funding the swap (for ownership/listing)
+    network: str
 
 
 class SwapInResponse(BaseModel):
@@ -245,12 +251,12 @@ class SwapInResponse(BaseModel):
     address: str            # on-chain lockup address to pay
     expected_amount: int    # exact sats to send on-chain (incl. Boltz fees)
     timeout_block_height: Optional[int] = None
-    not_refund_safe: bool = True
 
 class BoltzSwapRecord(BaseModel):
     id: str
     wallet_id: str                       # LNbits wallet (receives LN)
     silnt_wallet_id: Optional[str] = None
+    network: Optional[str] = None
     status: str = "created"              # created|funded|failed|refunded|completed
     # refund material:
     refund_privkey: str                  # hex — SENSITIVE
@@ -270,5 +276,8 @@ class BoltzSwapRecord(BaseModel):
     refund_address: Optional[str] = None # where the refund should go (user's on-chain addr)
 
 class RefundRequest(BaseModel):
-    address: str          # user's on-chain destination for the refund
+    address: Optional[str] = None   # if omitted, use the address stored at create
     fee_sats: int = 300
+
+class FundedRequest(BaseModel):
+    lockup_txid: str         # the SP-send tx that paid the Boltz lockup address

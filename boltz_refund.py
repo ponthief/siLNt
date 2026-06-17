@@ -30,6 +30,7 @@ point math so the internal-key derivation doesn't depend on coincurve internals.
 import hashlib
 from typing import Optional
 
+from loguru import logger
 import coincurve
 
 
@@ -60,6 +61,13 @@ def _padd(A, B):
         l = (y2 - y1) * _inv(x2 - x1) % _P
     x3 = (l * l - x1 - x2) % _P
     return (x3, (l * (x1 - x3) - y1) % _P)
+
+
+def _pneg(Pt):
+    if Pt is None:
+        return None
+    x, y = Pt
+    return (x, (_P - y) % _P)
 
 
 def _pmul(k, Pt):
@@ -163,18 +171,38 @@ def _leaf_hash(script: bytes) -> bytes:
 
 
 def reconstruct_taproot(claim_pub_hex: str, refund_pub_hex: str,
-                        claim_script_hex: str, refund_script_hex: str):
+                        claim_script_hex: str, refund_script_hex: str,
+                        agg_order: str = "claim_first"):
     """
     Returns (internal_key_xonly: bytes, output_key_xonly: bytes,
              output_parity: int, control_block: bytes, refund_script: bytes).
     The control block is for spending via the REFUND leaf (sibling = claim leaf).
+
+    agg_order controls the BIP-327 KeyAgg input order, which Boltz may set by
+    sorting the keys lexicographically rather than a fixed claim/refund order.
+    The exact order changes the aggregate internal key (and thus the address), so
+    the caller tries both and keeps whichever reconstructs the funded address.
     """
     claim_pub = bytes.fromhex(claim_pub_hex)
     refund_pub = bytes.fromhex(refund_pub_hex)
     claim_script = bytes.fromhex(claim_script_hex)
     refund_script = bytes.fromhex(refund_script_hex)
 
-    internal = _key_agg([claim_pub, refund_pub])   # Boltz (claim) FIRST
+    if agg_order == "refund_first":
+        agg_keys = [refund_pub, claim_pub]
+    elif agg_order == "sorted":
+        agg_keys = sorted([claim_pub, refund_pub])
+    else:  # "claim_first" (default / original)
+        agg_keys = [claim_pub, refund_pub]
+
+    internal = _key_agg(agg_keys)
+    # BIP-341: the taptweak is applied to the internal point represented by its
+    # x-only key, i.e. the EVEN-Y point. MuSig2 KeyAgg can yield an odd-Y
+    # aggregate; if so, negate it to the even-Y point before tweaking, else the
+    # output key (and address) come out wrong. (This is the parity that bit us —
+    # distinct from key ORDER, which we also try.)
+    if not _even(internal):
+        internal = _pneg(internal)
     ikey = _ser_x(internal)
 
     lh_r = _leaf_hash(refund_script)
@@ -270,7 +298,7 @@ def build_refund_tx(
     destination_address: str,   # user's on-chain refund address
     timeout_block_height: int,
     fee_sats: int,
-    network: str = "regtest",
+    network: str,               # REQUIRED — caller passes the swap's recorded network
 ) -> str:
     """
     Returns the signed refund tx hex. RAISES if the reconstructed Taproot address
@@ -283,18 +311,33 @@ def build_refund_tx(
     claim_script_hex = swap_tree["claimLeaf"]["output"]
     refund_script_hex = swap_tree["refundLeaf"]["output"]
 
-    ikey, outkey, parity, control_block, refund_script = reconstruct_taproot(
-        claim_public_key_hex, refund_pub, claim_script_hex, refund_script_hex
-    )
+    # Boltz may aggregate the internal key in different key orders (fixed order
+    # vs BIP-327 sorted). The order changes the address, so try each and keep the
+    # one that reconstructs the ACTUAL funded lockup address. The guardrail below
+    # still enforces a match, so this can only ever select a correct reconstruction.
+    recon = None
+    for order in ("claim_first", "refund_first", "sorted"):
+        ikey, outkey, parity, control_block, refund_script = reconstruct_taproot(
+            claim_public_key_hex, refund_pub, claim_script_hex, refund_script_hex, agg_order=order
+        )
+        if taproot_address(outkey, network) == lockup_address:
+            recon = (ikey, outkey, parity, control_block, refund_script)
+            logger.info(f"[refund] reconstruction matched with key order: {order}")
+            break
 
     # ── SAFETY GUARDRAIL: reconstructed address must equal the funded address ──
-    recon_addr = taproot_address(outkey, network)
-    if recon_addr != lockup_address:
+    if recon is None:
+        # Recompute the default order purely to report it in the error.
+        _, outkey_dbg, _, _, _ = reconstruct_taproot(
+            claim_public_key_hex, refund_pub, claim_script_hex, refund_script_hex, agg_order="claim_first"
+        )
+        recon_addr = taproot_address(outkey_dbg, network)
         raise RuntimeError(
             "Refund ABORTED: reconstructed Taproot address does not match the "
-            f"funded lockup address.\n  reconstructed={recon_addr}\n  lockup={lockup_address}\n"
+            f"funded lockup address (tried all key orders).\n  reconstructed={recon_addr}\n  lockup={lockup_address}\n"
             "Refusing to sign — the swap tree / keys do not reconstruct the output."
         )
+    ikey, outkey, parity, control_block, refund_script = recon
 
     in_spk = bytes.fromhex("5120") + outkey          # P2TR scriptPubKey of the lockup
     dest_spk = _spk_from_address(destination_address)

@@ -4,6 +4,7 @@ import hashlib
 import json
 import time
 import re
+import os
 from typing import Optional
 from fastapi import Cookie, Depends, HTTPException, Request, Response
 from http import HTTPStatus
@@ -18,6 +19,7 @@ MAX_TRUSTED_DEVICES_PER_USER = 5
 DEVICE_COOKIE_PREFIX = "silnt_device_id_"
 DEVICE_COOKIE_MAX_AGE        = 365 * 24 * 3600   # 1 year
 DEVICE_CONFIRM_TOKEN_TTL     = 3600              # 1 hour
+DEVICE_COOKIE_DOMAIN = os.environ.get("SILNT_DEVICE_COOKIE_DOMAIN", "").strip() or None
 
 def _is_thrilla_request(request: Request) -> bool:
     # Thrilla's fetch wrapper sends this header on every call. The LNbits-native
@@ -45,11 +47,12 @@ def set_device_cookie(response: Response, user_id: str, device_id: str) -> None:
         secure   = True,
         samesite = "none",
         path     = "/",
+        domain= DEVICE_COOKIE_DOMAIN
     )
 
 def clear_device_cookie(response: Response, user_id: str) -> None:
     """Clear a user's device cookie (used when revoking own device)."""
-    response.delete_cookie(cookie_name_for_user(user_id), path="/")
+    response.delete_cookie(cookie_name_for_user(user_id), path="/", domain=DEVICE_COOKIE_DOMAIN)
 
 def _hmac_sign(payload: str) -> str:
     key = (lnbits_settings.auth_secret_key or "").encode()

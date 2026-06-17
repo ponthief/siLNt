@@ -46,8 +46,14 @@ import coincurve
 from lnbits.core.services import create_invoice
 from lnbits.decorators import require_admin_key
 from lnbits.core.models import WalletTypeInfo
-from .crud import get_blindbit_config   # siLNt's existing config accessor
-from .models import CreateSwapInRequest, SwapInResponse
+from .crud import (
+    get_blindbit_config,
+    get_boltz_swap,
+    create_boltz_swap,
+    update_boltz_swap
+  )  # siLNt's existing config accessor
+from .models import CreateSwapInRequest, SwapInResponse, BoltzSwapRecord, FundedRequest
+from .swap_crypto import encrypt_refund_key
 
 # ── Config ────────────────────────────────────────────────────────────────────
 # boltz_url is stored in the siLNt BlindBit/system config (same store as
@@ -67,12 +73,6 @@ async def _boltz_url() -> str:
             "Swaps are not configured. Set the Boltz API URL in Admin settings.",
         )
     return url
-
-# ── In-memory/store of swap secrets ───────────────────────────────────────────
-# Persist these in the siLNt DB in production. The refund_privkey + swap_tree are
-# needed to build a refund tx if the swap fails. Keyed by swap_id.
-# (Shown here as a dict for clarity — wire to crud.py for real persistence.)
-_SWAP_SECRETS: dict = {}
 
 
 async def _boltz_get(path: str) -> dict:
@@ -170,24 +170,31 @@ async def api_create_swap_in(
     if not (swap_id and address and expected):
         raise HTTPException(HTTPStatus.BAD_GATEWAY, "Boltz response missing swap fields")
 
-    # 4. Store refund material (persist to DB in production).
-    _SWAP_SECRETS[swap_id] = {
-        "refund_privkey": refund_secret.hex(),
-        "swap_tree": swap.get("swapTree"),
-        "claim_public_key": swap.get("claimPublicKey"),
-        "timeout_block_height": swap.get("timeoutBlockHeight"),
-        "invoice": invoice,
-        "payment_hash": payment.payment_hash,
-        "wallet_id": data.wallet_id,
-        "expected_amount": expected,
-    }
-    logger.info(_SWAP_SECRETS[swap_id])
+    # 4. PERSIST refund material (durable — a refund may be needed later/after restart).
+    rec = BoltzSwapRecord(
+        id=swap_id,
+        wallet_id=data.wallet_id,
+        silnt_wallet_id=data.silnt_wallet_id,
+        network=data.network,
+        status="created",
+        refund_privkey=encrypt_refund_key(refund_secret.hex()),
+        refund_public_key=refund_pub,
+        claim_public_key=swap.get("claimPublicKey"),
+        swap_tree=swap.get("swapTree"),
+        timeout_block_height=swap.get("timeoutBlockHeight"),
+        address=address,                      # lockup address (guardrail checks this)
+        expected_amount=int(expected),
+        invoice=invoice,
+        payment_hash=payment.payment_hash,
+        refund_address=data.refund_address,   # where a failed-swap refund goes
+    )
+    await create_boltz_swap(rec)
     return SwapInResponse(
         swap_id=swap_id,
         address=address,
         expected_amount=int(expected),
         timeout_block_height=swap.get("timeoutBlockHeight"),
-        not_refund_safe=True,
+        payment_hash=payment.payment_hash
     )
 
 
@@ -204,3 +211,59 @@ async def api_swap_in_status(
         raise
     except Exception as exc:
         raise HTTPException(HTTPStatus.BAD_GATEWAY, f"Could not fetch status: {exc}")
+    # If Boltz reports the swap is done (it claimed the lockup / invoice settled),
+    # advance our record to "completed" so the UI stops showing it as active.
+    boltz_state = status.get("status") if isinstance(status, dict) else None
+    if boltz_state in ("transaction.claimed", "invoice.settled"):
+        rec = await get_boltz_swap(swap_id)
+        if rec and rec.status not in ("completed", "refunded"):
+            rec.status = "completed"
+            await update_boltz_swap(rec)
+    return status
+
+@silnt_boltz_router.post("/api/v1/swap/in/{swap_id}/funded")
+async def api_swap_in_funded(
+    swap_id: str,
+    data: FundedRequest,
+    key_info: WalletTypeInfo = Depends(require_admin_key),
+):
+    """
+    Record the on-chain lockup outpoint after the SP send broadcasts. REQUIRED for
+    a refund to be buildable later. The client passes only the funding txid; we
+    resolve which vout pays the lockup address (and its value) by fetching the tx
+    from the mempool/esplora endpoint — so the client doesn't have to guess the vout.
+    """
+    rec = await get_boltz_swap(swap_id)
+    if not rec:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "Swap not found.")
+    if rec.wallet_id != key_info.wallet.id and rec.silnt_wallet_id != key_info.wallet.id:
+        raise HTTPException(HTTPStatus.FORBIDDEN, "Not your swap.")
+
+    # Fetch the tx and find the output paying the lockup address.    
+    cfg = await get_blindbit_config()
+    mempool = cfg.mempool_url
+    if not mempool:
+        raise HTTPException(HTTPStatus.SERVICE_UNAVAILABLE, "Mempool URL not configured.")
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await c.get(f"{mempool}/api/tx/{data.lockup_txid}")
+        if r.status_code != 200:
+            raise HTTPException(HTTPStatus.BAD_GATEWAY, f"Could not fetch funding tx: {r.status_code}")
+        tx = r.json()
+
+    vout = None
+    value = None
+    for i, o in enumerate(tx.get("vout", [])):
+        if o.get("scriptpubkey_address") == rec.address:
+            vout = i
+            value = o.get("value")
+            break
+    if vout is None:
+        raise HTTPException(HTTPStatus.BAD_REQUEST,
+                            "Funding tx has no output paying the lockup address.")
+
+    rec.lockup_txid = data.lockup_txid
+    rec.lockup_vout = vout
+    rec.lockup_value = int(value)
+    rec.status = "funded"
+    await update_boltz_swap(rec)
+    return {"success": True, "swap_id": swap_id, "lockup_vout": vout, "lockup_value": int(value)}
