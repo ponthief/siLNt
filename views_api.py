@@ -38,7 +38,7 @@ from mnemonic import Mnemonic
 from .helpers.scan_rate_limiter import check_scan_allowed, mark_scan_finished
 from .helpers.forgot_password import request_password_reset
 from .helpers.transactions import get_wallet_transaction_detail, list_wallet_transactions
-from lnbits.core.crud import get_account
+from lnbits.core.crud import get_account, get_account_by_username
 from lnbits.core.crud.users import delete_account
 from lnbits.core.services.notifications import send_email_notification
 from .helpers.device_auth import (
@@ -54,6 +54,9 @@ from .helpers.device_auth import (
 from .helpers.user import is_lnbits_admin, require_admin, validate_born_height
 from .helpers.scan import BlindBitOracleClient
 from .helpers.fee_rates_backend import  get_recommended_fees, get_btc_usd_rate
+from .helpers.payjoin_wallet import sync_wallet
+from .helpers.payjoin_merge import build_merged_payjoin
+from .helpers.psbt_combine import combine_and_finalize
 from .crud import (
     get_silnt_wallets,
     create_silnt_wallet,
@@ -124,7 +127,14 @@ from .crud import (
     clear_label_hr_address,
     mark_utxos_confirmed_spent_by_tx,
     cancel_pending_request_for_address,
-    cancel_all_pending_requests_for_wallet
+    cancel_all_pending_requests_for_wallet,
+    list_all_bip353_requests,
+    delete_bip353_request_if_terminal,
+    delete_terminal_bip353_requests,
+    create_payjoin_descriptor, get_payjoin_descriptor, list_payjoin_descriptors,
+    delete_payjoin_descriptor, derive_descriptor_address, list_payjoin_descriptor_user_ids,
+    create_payjoin_request, get_payjoin_request, update_payjoin_request,
+    list_payjoin_requests_for_receiver, list_payjoin_requests_for_sender, get_reserved_outpoints
 )
 
 from .models import (
@@ -155,6 +165,10 @@ from .models import (
     ApproveBip353Request,
     RejectBip353Request,
     RestoreUtxoRequest,
+    ImportDescriptorData,
+    ProposePayjoinData,
+    AcceptPayjoinData,
+    FinalizePayjoinData,
     USERNAME_PATTERN,
     RESERVED_USERNAMES,
     RECENT_REJECT_COOLDOWN,
@@ -2010,3 +2024,368 @@ async def api_blindbit_health(
         "behind_by": behind_by,
         "latency_ms": latency_ms,
     }
+
+@silnt_api_router.get("/api/v1/bip353/admin/requests/history")
+async def api_admin_request_history(
+    limit: int = 13,
+    offset: int = 0,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    require_admin(key_info)
+    reqs = await list_all_bip353_requests(limit=limit, offset=offset)
+    enriched = []
+    for r in reqs:
+        account = await get_account(r.user_id)
+        enriched.append({
+            **r.dict(),
+            "requester_username": account.username if account else None,
+            "requester_email":    account.email    if account else None,
+        })
+    return {"requests": enriched}
+
+
+@silnt_api_router.delete("/api/v1/bip353/admin/requests/{req_id}")
+async def api_admin_purge_request(
+    req_id: str,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    require_admin(key_info)
+    deleted = await delete_bip353_request_if_terminal(req_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Only rejected or cancelled requests can be purged.",
+        )
+    return {"purged": True, "id": req_id}
+
+
+@silnt_api_router.post("/api/v1/bip353/admin/requests/purge-terminal")
+async def api_admin_purge_terminal(
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    require_admin(key_info)
+    count = await delete_terminal_bip353_requests()
+    return {"purged": count}
+
+# ── fulcrum config (host/port for SYNC) ───────────────────────────────────────
+# Sync uses Fulcrum; broadcast uses mempool (reused). Pull Fulcrum host/port from
+# blindbit config — add fields there, or hardcode per-instance for now.
+async def _fulcrum_cfg():
+    cfg = await get_blindbit_config()
+    return (
+        getattr(cfg, "fulcrum_host", "127.0.0.1"),
+        int(getattr(cfg, "fulcrum_port", 50003)),
+        bool(getattr(cfg, "fulcrum_tls", False)),
+        getattr(cfg, "network", None) or "signet",
+    )
+
+
+async def _broadcast_via_mempool(tx_hex: str) -> str:
+    """Reuse siLNt's mempool broadcast path (same as /api/v1/tx/broadcast)."""
+    blindbit = await get_blindbit_config()
+    base = (blindbit.mempool_url or "https://mempool.space").rstrip("/")
+    url = f"{base}/api/tx"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(url, content=tx_hex, headers={"Content-Type": "text/plain"})
+        if resp.status_code != 200:
+            raise HTTPException(status_code=HTTPStatus.BAD_GATEWAY,
+                                detail=f"Broadcast failed: {resp.text}")
+        return resp.text.strip()
+
+# ── descriptors ───────────────────────────────────────────────────────────────
+@silnt_api_router.post("/api/v1/payjoin/descriptors")
+async def api_payjoin_import_descriptor(
+    data: ImportDescriptorData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    _, _, _, network = await _fulcrum_cfg()
+    try:
+        d = await create_payjoin_descriptor(
+            user_id=key_info.wallet.user, descriptor=data.descriptor,
+            network=network, label=data.label,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+    return d.dict()
+
+
+@silnt_api_router.get("/api/v1/payjoin/descriptors")
+async def api_payjoin_list_descriptors(
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    rows = await list_payjoin_descriptors(key_info.wallet.user)
+    return [r.dict() for r in rows]
+
+
+@silnt_api_router.delete("/api/v1/payjoin/descriptors/{did}")
+async def api_payjoin_delete_descriptor(
+    did: str, key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    d = await get_payjoin_descriptor(did)
+    if not d or d.user_id != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Not found.")
+    await delete_payjoin_descriptor(did, key_info.wallet.user)
+    return {"deleted": True}
+
+
+@silnt_api_router.get("/api/v1/payjoin/descriptors/{did}/utxos")
+async def api_payjoin_utxos(
+    did: str, key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    d = await get_payjoin_descriptor(did)
+    if not d or d.user_id != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Not found.")
+    host, port, tls, network = await _fulcrum_cfg()
+    try:
+        res = sync_wallet(d.descriptor, network, host, port, use_tls=tls)
+    except Exception as e:
+        logger.warning(f"payjoin sync failed: {e}")
+        raise HTTPException(status_code=HTTPStatus.BAD_GATEWAY,
+                            detail=f"Fulcrum sync failed: {e}")
+    reserved = await get_reserved_outpoints(key_info.wallet.user)
+    utxos_out = []
+    for u in res.utxos:
+        d2 = dict(u.__dict__)
+        d2["reserved"] = f"{u.txid}:{u.vout}" in reserved
+        utxos_out.append(d2)
+    return {
+        "confirmed_sats": res.confirmed_sats,
+        "unconfirmed_sats": res.unconfirmed_sats,
+        "utxos": utxos_out,
+    }
+
+
+# ── propose (sender) ──────────────────────────────────────────────────────────
+@silnt_api_router.get("/api/v1/payjoin/receivers")
+async def api_payjoin_receivers(
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """Usernames eligible to receive a PayJoin (users who have imported a
+    descriptor), excluding the caller. Populates the propose dropdown."""
+    uid = key_info.wallet.user
+    ids = await list_payjoin_descriptor_user_ids(exclude_user_id=uid)
+    out = []
+    for i in ids:
+        acct = await get_account(i)
+        if acct and acct.username:
+            out.append({"user_id": i, "username": acct.username})
+    # stable, de-duplicated by username
+    seen = set()
+    uniq = []
+    for r in sorted(out, key=lambda x: x["username"].lower()):
+        if r["username"] in seen:
+            continue
+        seen.add(r["username"])
+        uniq.append(r)
+    return {"receivers": uniq}
+
+@silnt_api_router.post("/api/v1/payjoin/propose")
+async def api_payjoin_propose(
+    data: ProposePayjoinData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    sd = await get_payjoin_descriptor(data.sender_descriptor_id)
+    if not sd or sd.user_id != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Sender descriptor not found.")
+
+    # Resolve receiver by on-instance username. get_account_by_username lowercases
+    # internally and returns only activated accounts (Account|None).
+    receiver = await get_account_by_username(data.receiver_username)
+    if not receiver:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Receiver username not found.")
+    if receiver.id == key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Cannot PayJoin yourself.")
+    # Reject inputs already reserved by another pending PayJoin (soft-lock).
+    reserved = await get_reserved_outpoints(key_info.wallet.user)
+    clash = [f"{u['txid']}:{u['vout']}" for u in data.sender_inputs
+             if f"{u['txid']}:{u['vout']}" in reserved]
+    if clash:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=f"These inputs are already reserved by a pending PayJoin: "
+                   f"{', '.join(c[:14] + '…' for c in clash)}. Cancel that first or pick others.",
+        )
+    # sender's display username (key_info.wallet.user is the user_id, not name)
+    sender_acct = await get_account(key_info.wallet.user)
+    sender_username = (sender_acct.username if sender_acct else None) or key_info.wallet.user
+
+    req = await create_payjoin_request(
+        sender_user_id=key_info.wallet.user,
+        sender_username=sender_username,
+        sender_descriptor_id=sd.id,
+        receiver_username=data.receiver_username,
+        receiver_user_id=receiver.id,
+        amount_sats=data.amount_sats,
+        fee_rate=data.fee_rate,
+        payment_address="",  # set at accept (need receiver's descriptor)
+        sender_inputs=data.sender_inputs,
+    )
+    return req.dict()
+
+
+# ── list requests ─────────────────────────────────────────────────────────────
+@silnt_api_router.get("/api/v1/payjoin/requests")
+async def api_payjoin_requests(
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    uid = key_info.wallet.user
+    incoming = await list_payjoin_requests_for_receiver(uid)
+    outgoing = await list_payjoin_requests_for_sender(uid)
+    return {
+        "incoming": [r.dict() for r in incoming],
+        "outgoing": [r.dict() for r in outgoing],
+    }
+
+
+# ── accept (receiver) -> build final unsigned PSBT ────────────────────────────
+@silnt_api_router.post("/api/v1/payjoin/requests/{rid}/accept")
+async def api_payjoin_accept(
+    rid: str, data: AcceptPayjoinData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    req = await get_payjoin_request(rid)
+    if not req or req.receiver_user_id != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Request not found.")
+    if req.status != "PROPOSED":
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                            detail=f"Cannot accept in state {req.status}.")
+
+    rd = await get_payjoin_descriptor(data.receiver_descriptor_id)
+    if not rd or rd.user_id != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Receiver descriptor not found.")
+
+    # Don't let the receiver contribute an input already reserved by another of
+    # their pending PayJoins.
+    reserved = await get_reserved_outpoints(key_info.wallet.user)
+    ri = data.receiver_input
+    if f"{ri['txid']}:{ri['vout']}" in reserved:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail="That input is already reserved by another pending PayJoin.",
+        )
+    sd = await get_payjoin_descriptor(req.sender_descriptor_id)
+    host, port, tls, network = await _fulcrum_cfg()
+
+    payment_address = derive_descriptor_address(rd.descriptor, network, 0, 0)  # TODO: next-unused index
+
+    try:
+        built = build_merged_payjoin(
+            sender_descriptor=sd.descriptor,
+            sender_inputs=json.loads(req.sender_inputs),
+            receiver_descriptor=rd.descriptor,
+            receiver_input=data.receiver_input,
+            network=network,
+            destination=payment_address,
+            amount=req.amount_sats,
+            fee_rate=req.fee_rate,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=f"Build failed: {e}")
+
+    await update_payjoin_request(
+        rid, status="ACCEPTED",
+        receiver_descriptor_id=rd.id,
+        receiver_input=json.dumps(data.receiver_input),
+        receiver_input_sats=int(data.receiver_input["value"]),
+        fee_sats=built["fee"],
+        payment_address=payment_address,
+        unsigned_psbt=built["psbt_base64"],
+    )
+    return {"status": "ACCEPTED", "unsigned_psbt": built["psbt_base64"]}
+
+
+# ── contribute (receiver submits signed copy) ─────────────────────────────────
+@silnt_api_router.post("/api/v1/payjoin/requests/{rid}/contribute")
+async def api_payjoin_contribute(
+    rid: str, data: FinalizePayjoinData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    req = await get_payjoin_request(rid)
+    if not req or req.receiver_user_id != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Request not found.")
+    if req.status != "ACCEPTED":
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                            detail=f"Cannot contribute in state {req.status}.")
+    await update_payjoin_request(rid, status="CONTRIBUTED", psbt=data.signed_psbt)
+    return {"status": "CONTRIBUTED"}
+
+
+# ── sender fetches the pristine unsigned PSBT to sign (at CONTRIBUTED) ─────────
+@silnt_api_router.get("/api/v1/payjoin/requests/{rid}/unsigned")
+async def api_payjoin_unsigned(
+    rid: str, key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    req = await get_payjoin_request(rid)
+    if not req or req.sender_user_id != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Request not found.")
+    if not req.unsigned_psbt:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                            detail="No unsigned PSBT yet — receiver hasn't accepted.")
+    # The sender signs THIS pristine unsigned copy (NOT the receiver's signed one).
+    return {"status": req.status, "unsigned_psbt": req.unsigned_psbt}
+
+# ── finalize (sender submits signed copy) -> combine + broadcast ──────────────
+@silnt_api_router.post("/api/v1/payjoin/requests/{rid}/finalize")
+async def api_payjoin_finalize(
+    rid: str, data: FinalizePayjoinData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    req = await get_payjoin_request(rid)
+    if not req or req.sender_user_id != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Request not found.")
+    if req.status != "CONTRIBUTED":
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                            detail=f"Cannot finalize in state {req.status}.")
+
+    await update_payjoin_request(rid, status="FINALIZING")
+
+    try:
+        result = combine_and_finalize([req.psbt, data.signed_psbt])
+    except Exception as e:
+        await update_payjoin_request(rid, status="CONTRIBUTED")
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=f"Combine failed: {e}")
+
+    if not result["finalized"]:
+        await update_payjoin_request(rid, status="CONTRIBUTED")
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                            detail=f"Not fully signed: {result.get('finalize_error')}")
+
+    tx_hex = result["tx_hex"]
+    try:
+        txid = await _broadcast_via_mempool(tx_hex)
+    except HTTPException:
+        await update_payjoin_request(rid, status="CONTRIBUTED", tx_hex=tx_hex)
+        raise
+    except Exception as e:
+        await update_payjoin_request(rid, status="CONTRIBUTED", tx_hex=tx_hex)
+        raise HTTPException(status_code=HTTPStatus.BAD_GATEWAY, detail=f"Broadcast failed: {e}")
+
+    await update_payjoin_request(rid, status="BROADCAST", tx_hex=tx_hex, txid=txid)
+    return {"status": "BROADCAST", "txid": txid, "tx_hex": tx_hex}
+
+
+# ── decline (receiver) / cancel (sender) ──────────────────────────────────────
+@silnt_api_router.post("/api/v1/payjoin/requests/{rid}/decline")
+async def api_payjoin_decline(
+    rid: str, key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    req = await get_payjoin_request(rid)
+    if not req or req.receiver_user_id != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Request not found.")
+    if req.status in ("BROADCAST", "CANCELLED"):
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Already terminal.")
+    await update_payjoin_request(rid, status="CANCELLED", reject_reason="declined by receiver")
+    return {"status": "CANCELLED"}
+
+
+@silnt_api_router.post("/api/v1/payjoin/requests/{rid}/cancel")
+async def api_payjoin_cancel(
+    rid: str, key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    req = await get_payjoin_request(rid)
+    if not req or req.sender_user_id != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Request not found.")
+    if req.status in ("BROADCAST", "CANCELLED"):
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Already terminal.")
+    await update_payjoin_request(rid, status="CANCELLED", reject_reason="cancelled by sender")
+    return {"status": "CANCELLED"}

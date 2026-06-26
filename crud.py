@@ -19,10 +19,11 @@ from .models import (
     BoltzSwapRecord
 )
 
+from .models import PayjoinDescriptor, PayjoinRequest
 from embit.descriptor import Descriptor, Key
 from embit.descriptor.arguments import AllowedDerivation
 from embit.networks import NETWORKS
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 db = Database("ext_silnt")
 
@@ -1151,7 +1152,7 @@ async def delete_all_silnt_data_for_user(user_id: str) -> dict:
     await db.execute("DELETE FROM silnt.bip353_requests WHERE user_id = :uid", {"uid": user_id})
     await db.execute("DELETE FROM silnt.trusted_devices  WHERE user_id = :uid", {"uid": user_id})
     await db.execute("DELETE FROM silnt.user_prefs        WHERE user_id = :uid", {"uid": user_id})
-    
+
     return {"wallets_deleted": len(wallet_ids), "wallet_ids": wallet_ids}
 
 async def clear_wallet_hr_address(wallet_id: str) -> None:
@@ -1289,3 +1290,314 @@ async def cancel_all_pending_requests_for_wallet(wallet_id: str) -> int:
         {"wid": wallet_id, "ts": int(time.time())},
     )
     return getattr(result, "rowcount", 0) or 0
+
+async def list_all_bip353_requests(limit: int = 13, offset: int = 0) -> list[Bip353Request]:
+    """All BitMail requests (any status), newest first, paginated. Admin history."""
+    rows = await db.fetchall(
+        """SELECT * FROM silnt.bip353_requests
+           ORDER BY created_at DESC
+           LIMIT :limit OFFSET :offset""",
+        {"limit": limit, "offset": offset},
+    )
+    return [Bip353Request(**r) for r in rows]
+
+async def delete_bip353_request_if_terminal(req_id: str) -> int:
+    """Delete a single request ONLY if it is rejected or cancelled. Approved and
+    pending rows are protected (approved = burned-slot/username record; pending =
+    still in the queue). Returns rows deleted (0 if not terminal / not found)."""
+    result = await db.execute(
+        """DELETE FROM silnt.bip353_requests
+           WHERE id = :id AND status IN ('rejected', 'cancelled')""",
+        {"id": req_id},
+    )
+    return getattr(result, "rowcount", 0) or 0
+
+
+async def delete_terminal_bip353_requests() -> int:
+    """Bulk-delete ALL rejected/cancelled requests. Approved/pending untouched."""
+    result = await db.execute(
+        """DELETE FROM silnt.bip353_requests
+           WHERE status IN ('rejected', 'cancelled')"""
+    )
+    return getattr(result, "rowcount", 0) or 0
+
+# ── descriptor parsing ────────────────────────────────────────────────────────
+def _embit_net(network: str):
+    n = network.lower()
+    if n == "mainnet":
+        return NETWORKS["main"]
+    if n == "regtest":
+        return NETWORKS["regtest"]
+    return NETWORKS["test"]
+
+
+def _fmt_path(derivation: list[int]) -> str:
+    """[84',1',0'] ints -> '84h/1h/0h'."""
+    H = 0x80000000
+    parts = []
+    for i in derivation:
+        if i >= H:
+            parts.append(f"{i - H}h")
+        else:
+            parts.append(str(i))
+    return "/".join(parts)
+
+
+def _strip_checksum(descriptor: str) -> str:
+    """Remove BIP-380 '#checksum' so a Sparrow export pasted verbatim parses.
+    Checksum is a trailing '#'+8 chars; xpubs/paths never contain '#'."""
+    s = (descriptor or "").strip()
+    if "#" in s:
+        s = s[: s.rindex("#")].strip()
+    return s
+
+def _normalize_multipath(descriptor: str) -> str:
+    """
+    Repair the key-path branch spec so embit can parse it and so BOTH the receive
+    (0) and change (1) chains are covered.
+
+    Some clients mangle the literal '<0;1>' (it contains '<' '>') into an empty
+    branch, e.g. '...xpub//*'. Others export a single chain '.../0/*'. Normalize
+    all of these to the canonical multipath '.../<0;1>/*'.
+
+    Operates on the checksum-stripped string. Only touches the key-path tail
+    (after the xpub); never alters the xpub or the [origin] prefix.
+    """
+    s = _strip_checksum(descriptor)
+    # The tail we care about is the '/.../*' after the xpub, before the closing ')'.
+    # Repair the two known bad/!canonical forms:
+    #   //*        (empty branch  -> the <0;1> was eaten)
+    #   /<0;1>/*   (already canonical -> leave)
+    #   /0/*       (single receive chain -> expand to multipath)
+    if "//*" in s:
+        s = s.replace("//*", "/<0;1>/*")
+    elif "/<0;1>/*" in s:
+        pass  # canonical
+    elif "/0/*" in s and "/<0;1>/*" not in s:
+        s = s.replace("/0/*", "/<0;1>/*")
+    return s
+
+def _prepare_descriptor(descriptor: str) -> str:
+    """Checksum-stripped + multipath-normalized string for embit parsing."""
+    return _normalize_multipath(descriptor)
+
+def parse_descriptor(descriptor: str) -> dict:
+    """
+    Parse + validate a BIP-84 output descriptor (Sparrow export).
+    Returns {xpub, master_fp, account_path, script_type}. Raises ValueError on
+    anything that isn't a single-key wpkh descriptor.
+    """
+    try:
+        d = Descriptor.from_string(_prepare_descriptor(descriptor))
+    except Exception as e:
+        raise ValueError(f"Could not parse descriptor: {e}")
+    if not d.wpkh:
+        raise ValueError("Only BIP-84 native SegWit (wpkh) descriptors are supported.")
+    if len(d.keys) != 1:
+        raise ValueError("Only single-key descriptors are supported.")
+    k = d.keys[0]
+    if k.origin is None:
+        raise ValueError("Descriptor is missing key origin ([fingerprint/path]).")
+    return {
+        "xpub": str(k.key).split("/")[0],          # strip any /<0;1>/* suffix
+        "master_fp": k.origin.fingerprint.hex(),
+        "account_path": _fmt_path(k.origin.derivation),
+        "script_type": "wpkh",
+    }
+
+def derive_descriptor_address(descriptor: str, network: str, chain: int, index: int) -> str:
+    """Derive a concrete address from the descriptor: chain 0=receive,1=change."""
+    d = Descriptor.from_string(_prepare_descriptor(descriptor))
+    return d.derive(index, branch_index=chain).address(_embit_net(network))
+
+# ── descriptors CRUD ──────────────────────────────────────────────────────────
+async def create_payjoin_descriptor(
+    user_id: str, descriptor: str, network: str, label: Optional[str] = None
+) -> PayjoinDescriptor:
+    parsed = parse_descriptor(descriptor)
+    # Prevent duplicate imports: same user + same account xpub (covers re-pasting
+    # the same descriptor, with or without a trailing checksum / whitespace diff).
+    existing = await db.fetchall(
+        "SELECT id FROM silnt.payjoin_descriptors WHERE user_id = :uid AND xpub = :xpub",
+        {"uid": user_id, "xpub": parsed["xpub"]},
+    )
+    if existing:
+        raise ValueError("This wallet (xpub) is already imported.")
+    did = urlsafe_short_hash()
+    await db.execute(
+        """
+        INSERT INTO silnt.payjoin_descriptors
+            (id, user_id, label, descriptor, xpub, master_fp, account_path,
+             script_type, network)
+        VALUES
+            (:id, :user_id, :label, :descriptor, :xpub, :master_fp, :account_path,
+             :script_type, :network)
+        """,
+        {
+            "id": did, "user_id": user_id, "label": label,
+            "descriptor": descriptor.strip(), "xpub": parsed["xpub"],
+            "master_fp": parsed["master_fp"], "account_path": parsed["account_path"],
+            "script_type": parsed["script_type"], "network": network,
+        },
+    )
+    return await get_payjoin_descriptor(did)
+
+
+async def get_payjoin_descriptor(did: str) -> Optional[PayjoinDescriptor]:
+    row = await db.fetchone(
+        "SELECT * FROM silnt.payjoin_descriptors WHERE id = :id", {"id": did}
+    )
+    return PayjoinDescriptor(**row) if row else None
+
+
+async def list_payjoin_descriptors(user_id: str) -> list[PayjoinDescriptor]:
+    rows = await db.fetchall(
+        "SELECT * FROM silnt.payjoin_descriptors WHERE user_id = :uid ORDER BY created_at DESC",
+        {"uid": user_id},
+    )
+    return [PayjoinDescriptor(**r) for r in rows]
+
+async def list_payjoin_descriptor_user_ids(exclude_user_id: Optional[str] = None) -> list[str]:
+    """Distinct user_ids that have imported at least one PayJoin descriptor
+    (i.e. can actually receive a PayJoin). Optionally exclude the caller."""
+    rows = await db.fetchall(
+        "SELECT DISTINCT user_id FROM silnt.payjoin_descriptors", {}
+    )
+    ids = [r["user_id"] for r in rows]
+    if exclude_user_id:
+        ids = [i for i in ids if i != exclude_user_id]
+    return ids
+
+async def delete_payjoin_descriptor(did: str, user_id: str) -> None:
+    await db.execute(
+        "DELETE FROM silnt.payjoin_descriptors WHERE id = :id AND user_id = :uid",
+        {"id": did, "uid": user_id},
+    )
+
+
+async def get_reserved_outpoints(user_id: str) -> set:
+    """
+    Outpoints (txid:vout) reserved by this user's PENDING PayJoins — as sender
+    (sender_inputs) or receiver (receiver_input). 'Pending' = not terminal
+    (BROADCAST/CANCELLED). Used to soft-lock UTXOs so they can't be double-
+    selected in another siLNt PayJoin. (Watch-only: this is siLNt-scope only;
+    it can't stop the user spending the coins directly in their own wallet.)
+    """
+    rows = await db.fetchall(
+        """
+        SELECT sender_inputs, receiver_input FROM silnt.payjoin_requests
+        WHERE (sender_user_id = :uid OR receiver_user_id = :uid)
+          AND status IN ('PROPOSED','ACCEPTED','CONTRIBUTED','FINALIZING')
+        """,
+        {"uid": user_id},
+    )
+    reserved = set()
+    for r in rows:
+        for col in ("sender_inputs", "receiver_input"):
+            raw = r[col]
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+            items = data if isinstance(data, list) else [data]
+            for u in items:
+                if isinstance(u, dict) and "txid" in u and "vout" in u:
+                    reserved.add(f"{u['txid']}:{u['vout']}")
+    return reserved
+
+# ── requests CRUD ─────────────────────────────────────────────────────────────
+async def create_payjoin_request(
+    sender_user_id: str, sender_username: str, sender_descriptor_id: str,
+    receiver_username: str, amount_sats: int, fee_rate: float,
+    payment_address: str, sender_inputs: list[dict],
+    receiver_user_id: Optional[str] = None, expiry_seconds: int = 3600,
+) -> PayjoinRequest:
+    rid = urlsafe_short_hash()
+    # expires_at as a real datetime (TIMESTAMP column). Match however your other
+    # CRUD writes datetimes — if they pass datetime objects, this is correct; if
+    # they use db.timestamp_now + interval SQL, adapt accordingly.    
+    expires_at = int(time.time()) + expiry_seconds
+    await db.execute(
+        """
+        INSERT INTO silnt.payjoin_requests
+            (id, status, sender_user_id, sender_username, sender_descriptor_id,
+             receiver_user_id, receiver_username, amount_sats, fee_rate,
+             payment_address, sender_inputs, expires_at)
+        VALUES
+            (:id, 'PROPOSED', :suid, :suser, :sdid, :ruid, :ruser, :amount,
+             :fee_rate, :pay_addr, :sinputs, :expires)
+        """,
+        {
+            "id": rid, "suid": sender_user_id, "suser": sender_username,
+            "sdid": sender_descriptor_id, "ruid": receiver_user_id,
+            "ruser": receiver_username, "amount": amount_sats, "fee_rate": fee_rate,
+            "pay_addr": payment_address, "sinputs": json.dumps(sender_inputs),
+            "expires": expires_at,
+        },
+    )
+    return await get_payjoin_request(rid)
+
+
+async def get_payjoin_request(rid: str) -> Optional[PayjoinRequest]:
+    row = await db.fetchone(
+        "SELECT * FROM silnt.payjoin_requests WHERE id = :id", {"id": rid}
+    )
+    return PayjoinRequest(**row) if row else None
+
+
+async def list_payjoin_requests_for_receiver(
+    receiver_user_id: str, status: Optional[str] = None
+) -> list[PayjoinRequest]:
+    if status:
+        rows = await db.fetchall(
+            "SELECT * FROM silnt.payjoin_requests WHERE receiver_user_id = :uid "
+            "AND status = :st ORDER BY created_at DESC",
+            {"uid": receiver_user_id, "st": status},
+        )
+    else:
+        rows = await db.fetchall(
+            "SELECT * FROM silnt.payjoin_requests WHERE receiver_user_id = :uid "
+            "ORDER BY created_at DESC",
+            {"uid": receiver_user_id},
+        )
+    return [PayjoinRequest(**r) for r in rows]
+
+
+async def list_payjoin_requests_for_sender(sender_user_id: str) -> list[PayjoinRequest]:
+    rows = await db.fetchall(
+        "SELECT * FROM silnt.payjoin_requests WHERE sender_user_id = :uid "
+        "ORDER BY created_at DESC",
+        {"uid": sender_user_id},
+    )
+    return [PayjoinRequest(**r) for r in rows]
+
+
+async def update_payjoin_request(rid: str, **fields) -> Optional[PayjoinRequest]:
+    """
+    Generic field updater. Always bumps updated_at. Pass only columns that exist.
+    e.g. update_payjoin_request(rid, status='CONTRIBUTED', psbt=..., fee_sats=...)
+    """
+    if not fields:
+        return await get_payjoin_request(rid)
+    fields_sql = ", ".join(f"{k} = :{k}" for k in fields)
+    params = {**fields, "id": rid}
+    await db.execute(
+        f"UPDATE silnt.payjoin_requests SET {fields_sql}, "
+        f"updated_at = {db.timestamp_now} WHERE id = :id",
+        params,
+    )
+    return await get_payjoin_request(rid)
+
+async def list_expired_payjoin_requests(now_ts: Optional[int] = None) -> list[PayjoinRequest]:
+    """Non-terminal requests past their expiry — for the sweep. expires_at is
+    Unix seconds (int)."""
+    now_ts = now_ts if now_ts is not None else int(time.time())
+    rows = await db.fetchall(
+        "SELECT * FROM silnt.payjoin_requests "
+        "WHERE status IN ('PROPOSED','CONTRIBUTED') AND expires_at IS NOT NULL "
+        "AND expires_at < :now",
+        {"now": now_ts},
+    )
+    return [PayjoinRequest(**r) for r in rows]

@@ -201,3 +201,117 @@ async def m010_bitmail_per_address(db):
         "CREATE INDEX IF NOT EXISTS bip353_requests_addr "
         "ON silnt.bip353_requests(wallet_id, address_id, status)"
     )
+
+async def m011_payjoin_requests(db):
+    """
+    PayJoin (BIP-84, watch-only, external Sparrow signing) coordination.
+
+    Two users of this instance PayJoin each other. siLNt holds ONLY xpubs + PSBTs
+    — never seeds/keys. This table carries one PayJoin attempt through its state
+    machine and stores the in-progress PSBT (base64).
+
+    State machine:
+      PROPOSED    sender proposed; siLNt built the sender-only draft PSBT
+      CONTRIBUTED receiver accepted; siLNt added receiver input + bumped payment
+                  output; receiver signed their input. Final unsigned PSBT exists.
+      FINALIZING  sender signed the final PSBT; siLNt combining + finalizing
+      BROADCAST   network tx broadcast; confirmation tracked by send-watch
+      CANCELLED   declined / cancelled / expired (terminal)
+    """
+    await db.execute(
+        f"""
+        CREATE TABLE silnt.payjoin_requests (
+            id                  TEXT PRIMARY KEY,
+            status              TEXT NOT NULL DEFAULT 'PROPOSED',
+
+            -- parties (on-instance, addressed by username per decision)
+            sender_user_id      TEXT NOT NULL,
+            sender_username     TEXT NOT NULL,
+            receiver_user_id    TEXT,
+            receiver_username   TEXT NOT NULL,
+
+            -- which imported BIP-84 wallets are involved (refs payjoin_descriptors)
+            sender_descriptor_id   TEXT NOT NULL,
+            receiver_descriptor_id TEXT,
+
+            -- economics (sender pays fee per decision)
+            amount_sats         {db.big_int} NOT NULL,
+            fee_rate            REAL NOT NULL,
+            payment_address     TEXT NOT NULL,      -- receiver's payment address
+            receiver_input_sats {db.big_int},       -- R, once contributed
+            fee_sats            {db.big_int},        -- computed at contribute time
+
+            -- the in-progress artifact (base64). One column, overwritten as the
+            -- PSBT advances: draft -> final-unsigned -> partially-signed -> final
+            psbt                TEXT,
+            -- the two parties' signed copies are merged by siLNt; we keep the
+            -- latest combined PSBT in `psbt` and the broadcast tx hex here:
+            unsigned_psbt       TEXT,
+            -- receiver's signed copy (their partial_sig) stored at /contribute;
+            -- sender's signed copy arrives at /finalize and is combined with it.
+            receiver_signed_psbt TEXT,
+            tx_hex              TEXT,
+            txid                TEXT,
+
+            -- selected inputs (JSON): sender inputs at propose, receiver input at
+            -- contribute. Outpoints + (chain,index) for derivation/validation.
+            sender_inputs       TEXT,               -- JSON array
+            receiver_input      TEXT,               -- JSON object
+
+            reject_reason       TEXT,
+            created_at          TIMESTAMP NOT NULL DEFAULT {db.timestamp_now},
+            updated_at          TIMESTAMP NOT NULL DEFAULT {db.timestamp_now},
+            -- expiry stored as Unix seconds (BIGINT) rather than TIMESTAMP: the
+            -- codebase only ever uses db.timestamp_now for defaults and never
+            -- writes computed timestamps, so an int avoids datetime-serialization
+            -- ambiguity across Postgres/SQLite.
+            expires_at          {db.big_int}
+        );
+        """
+    )
+    # Lookups: receiver's incoming queue, sender's outgoing, expiry sweep.
+    await db.execute(
+        "CREATE INDEX idx_payjoin_receiver ON silnt.payjoin_requests (receiver_user_id, status);"
+    )
+    await db.execute(
+        "CREATE INDEX idx_payjoin_sender ON silnt.payjoin_requests (sender_user_id, status);"
+    )
+    await db.execute(
+        "CREATE INDEX idx_payjoin_status ON silnt.payjoin_requests (status, expires_at);"
+    )
+
+
+# Companion table: a user's imported watch-only BIP-84 wallet, imported as an
+# OUTPUT DESCRIPTOR (single copy-paste from Sparrow). embit parses it, so siLNt
+# extracts fingerprint + path + xpub from the descriptor itself — no separate
+# fingerprint field for the user to find, and the key-origin used in PSBTs
+# matches exactly what the wallet declared (avoids Sparrow-recognition issues).
+async def m012_payjoin_descriptors(db):
+    """
+    Imported watch-only BIP-84 accounts for PayJoin, as output descriptors.
+    User pastes e.g.  wpkh([bc7a6fe7/84h/1h/0h]tpub.../<0;1>/*)
+    siLNt stores the raw descriptor plus the fields embit parses out of it.
+    siLNt stores ONLY public data (descriptor/xpub/fingerprint). No keys/seeds.
+    """
+    await db.execute(
+        f"""
+        CREATE TABLE silnt.payjoin_descriptors (
+            id              TEXT PRIMARY KEY,
+            user_id         TEXT NOT NULL,
+            label           TEXT,
+            descriptor      TEXT NOT NULL,          -- raw output descriptor (as pasted)
+            -- parsed from the descriptor by embit at import (cached for queries):
+            xpub            TEXT NOT NULL,          -- account xpub (tpub/xpub)
+            master_fp       TEXT NOT NULL,          -- 8 hex chars, from [origin]
+            account_path    TEXT NOT NULL,          -- e.g. "84h/1h/0h"
+            script_type     TEXT NOT NULL DEFAULT 'wpkh',  -- validated == wpkh
+            network         TEXT NOT NULL,          -- mainnet/signet/regtest
+            last_sync_at    TIMESTAMP,
+            created_at      TIMESTAMP NOT NULL DEFAULT {db.timestamp_now}
+        );
+        """
+    )
+
+    await db.execute(
+        "CREATE INDEX idx_payjoin_descriptors_user ON silnt.payjoin_descriptors (user_id);"
+    )

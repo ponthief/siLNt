@@ -768,7 +768,7 @@ async def scan_wallet(
     logger.info(
         f"Scan done: {blocks_scanned} blocks, {total_found} UTXOs, balance={balance}"
     )
-    set_scan_progress(wallet_id, total_blocks, total_blocks, total_found, active=False)
+    set_scan_progress(wallet_id, blocks_scanned, total_blocks, total_found, active=False)
     return {
         "utxos_found": total_found,
         "blocks_scanned": blocks_scanned,

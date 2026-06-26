@@ -1,6 +1,7 @@
 from typing import Optional, List
 from fastapi import Query
 from pydantic import BaseModel, Field
+from datetime import datetime
 import re
 
 USERNAME_PATTERN = re.compile(r"^[a-z0-9_\-]{3,20}$")
@@ -281,3 +282,75 @@ class RefundRequest(BaseModel):
 
 class FundedRequest(BaseModel):
     lockup_txid: str         # the SP-send tx that paid the Boltz lockup address
+
+class PayjoinDescriptor(BaseModel):
+    id: str
+    user_id: str
+    label: Optional[str] = None
+    descriptor: str            # raw output descriptor as pasted
+    xpub: str                  # parsed account xpub
+    master_fp: str             # 8 hex chars
+    account_path: str          # e.g. "84h/1h/0h"
+    script_type: str = "wpkh"
+    network: str
+    last_sync_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+
+class PayjoinRequest(BaseModel):
+    id: str
+    status: str = "PROPOSED"
+    sender_user_id: str
+    sender_username: str
+    receiver_user_id: Optional[str] = None
+    receiver_username: str
+    sender_descriptor_id: str
+    receiver_descriptor_id: Optional[str] = None
+    amount_sats: int
+    fee_rate: float
+    payment_address: str
+    receiver_input_sats: Optional[int] = None
+    fee_sats: Optional[int] = None
+    psbt: Optional[str] = None
+    unsigned_psbt: Optional[str] = None
+    receiver_signed_psbt: Optional[str] = None
+    tx_hex: Optional[str] = None
+    txid: Optional[str] = None
+    sender_inputs: Optional[str] = None     # JSON string
+    receiver_input: Optional[str] = None    # JSON string
+    reject_reason: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    expires_at: Optional[int] = None
+
+
+# ── request bodies (FastAPI) ──────────────────────────────────────────────────
+class ImportDescriptorData(BaseModel):
+    descriptor: str
+    label: Optional[str] = None
+
+
+class ProposePayjoinData(BaseModel):
+    sender_descriptor_id: str
+    receiver_username: str
+    amount_sats: int
+    fee_rate: float
+    # sender's selected input outpoints to spend (from their synced UTXOs):
+    sender_inputs: list[dict]   # [{txid, vout, value, chain, index}, ...]
+
+class AcceptPayjoinData(BaseModel):
+    receiver_descriptor_id: str
+    # the receiver's chosen contributed input:
+    receiver_input: dict 
+
+class ContributePayjoinData(BaseModel):
+    receiver_descriptor_id: str
+    # the receiver's chosen contributed input:
+    receiver_input: dict        # {txid, vout, value, chain, index}
+    # receiver's signed copy of the final unsigned PSBT (base64):
+    signed_psbt: str
+
+
+class FinalizePayjoinData(BaseModel):
+    # sender's signed copy of the final unsigned PSBT (base64):
+    signed_psbt: str
