@@ -250,6 +250,20 @@ def _sync_chain(client: ElectrumClient, derive_fn, network: str, chain: int,
     return addrs, utxos, confirmed, unconfirmed
 
 
+def next_unused_receive_index(descriptor_or_zpub: str, network: str, host: str, port: int,
+                              use_tls: bool = False, gap_limit: int = GAP_LIMIT) -> int:
+    """
+    Return the next unused RECEIVE-chain (chain 0) index for a descriptor, by
+    syncing and taking one past the highest used receive index. Avoids address
+    reuse when issuing a payment address (e.g. PayJoin accept). Returns 0 if the
+    receive chain has no history yet.
+    """
+    res = sync_wallet(descriptor_or_zpub, network, host, port,
+                      use_tls=use_tls, gap_limit=gap_limit)
+    used_recv = [a.index for a in res.addresses if a.chain == RECEIVE_CHAIN]
+    return (max(used_recv) + 1) if used_recv else 0
+
+
 def sync_wallet(descriptor_or_zpub: str, network: str, host: str, port: int,
                 use_tls: bool = False, gap_limit: int = GAP_LIMIT) -> SyncResult:
     """

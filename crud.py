@@ -19,7 +19,7 @@ from .models import (
     BoltzSwapRecord
 )
 
-from .models import PayjoinDescriptor, PayjoinRequest
+from .models import PayjoinDescriptor, PayjoinRequest, PayjoinContact
 from embit.descriptor import Descriptor, Key
 from embit.descriptor.arguments import AllowedDerivation
 from embit.networks import NETWORKS
@@ -1487,7 +1487,7 @@ async def get_reserved_outpoints(user_id: str) -> set:
         """
         SELECT sender_inputs, receiver_input FROM silnt.payjoin_requests
         WHERE (sender_user_id = :uid OR receiver_user_id = :uid)
-          AND status IN ('PROPOSED','ACCEPTED','CONTRIBUTED','FINALIZING')
+          AND status IN ('OPEN','CLAIMED','PROPOSED','ACCEPTED','CONTRIBUTED','FINALIZING')
         """,
         {"uid": user_id},
     )
@@ -1545,6 +1545,222 @@ async def get_payjoin_request(rid: str) -> Optional[PayjoinRequest]:
         "SELECT * FROM silnt.payjoin_requests WHERE id = :id", {"id": rid}
     )
     return PayjoinRequest(**row) if row else None
+
+
+async def create_payjoin_invoice(
+    payee_user_id: str, payee_username: str, payee_descriptor_id: str,
+    payee_input: dict, payment_address: str,
+    payer_user_id: str, payer_username: str,
+    amount_sats: int, fee_rate: float, memo: Optional[str] = None,
+    expiry_seconds: int = 86400,
+) -> PayjoinRequest:
+    """
+    A (payee) creates a directed invoice for payer B. Reuses payjoin_requests:
+    receiver_* = payee A (set now, incl. A's one contributed input);
+    sender_*   = payer B (identity set now; B's inputs filled when B pays).
+    Status OPEN. Payment address is A's (next-unused) receive address.
+    """
+    rid = urlsafe_short_hash()
+    expires_at = int(time.time()) + expiry_seconds
+    await db.execute(
+        """
+        INSERT INTO silnt.payjoin_requests
+            (id, status, sender_user_id, sender_username, sender_descriptor_id,
+             receiver_user_id, receiver_username, receiver_descriptor_id,
+             receiver_input, receiver_input_sats, amount_sats, fee_rate,
+             payment_address, memo, expires_at)
+        VALUES
+            (:id, 'OPEN', :buid, :buser, :bdid, :auid, :auser, :adid,
+             :ainput, :ain_sats, :amount, :fee_rate, :pay_addr, :memo, :expires)
+        """,
+        {
+            "id": rid,
+            "buid": payer_user_id, "buser": payer_username, "bdid": "",
+            "auid": payee_user_id, "auser": payee_username, "adid": payee_descriptor_id,
+            "ainput": json.dumps(payee_input), "ain_sats": int(payee_input["value"]),
+            "amount": amount_sats, "fee_rate": fee_rate,
+            "pay_addr": payment_address, "memo": memo, "expires": expires_at,
+        },
+    )
+    return await get_payjoin_request(rid)
+
+
+async def list_payjoin_invoices_for_payer(payer_user_id: str) -> list[PayjoinRequest]:
+    """OPEN invoices directed to this user (as payer B)."""
+    rows = await db.fetchall(
+        "SELECT * FROM silnt.payjoin_requests "
+        "WHERE sender_user_id = :uid AND status = 'OPEN' ORDER BY created_at DESC",
+        {"uid": payer_user_id},
+    )
+    return [PayjoinRequest(**r) for r in rows]
+
+
+# ── connections (consent-based curated list) ──────────────────────────────────
+async def get_account_id_by_email(email: str):
+    """
+    Resolve an email -> (user_id, username) using the LNbits core accounts table.
+    Prefers the core helper if present, else queries the core DB directly.
+    Returns (user_id, username) or (None, None) if no such account. Email match
+    is case-insensitive. Never raises on 'not found' (so callers can stay neutral
+    and avoid an email-existence oracle).
+    """
+    em = (email or "").strip().lower()
+    if not em or "@" not in em:
+        return (None, None)
+    # try core helper first
+    try:
+        from lnbits.core.crud import get_account_by_email  # may not exist in all versions
+        acct = await get_account_by_email(em)
+        if acct:
+            return (acct.id, getattr(acct, "username", None) or em)
+    except Exception:
+        pass
+    # fallback: direct query against the core accounts table
+    try:
+        from lnbits.core.db import db as core_db
+        row = await core_db.fetchone(
+            "SELECT id, username FROM accounts WHERE LOWER(email) = :em",
+            {"em": em},
+        )
+        if row:
+            return (row["id"], row["username"] or em)
+    except Exception:
+        pass
+    return (None, None)
+
+
+async def create_payjoin_contact(requester_user_id: str, target_user_id: str) -> "PayjoinContact":
+    """Create a PENDING connection request (or return the existing row if one
+    already exists between these two users in either direction). Stores only
+    user_ids — usernames are resolved on demand for display."""
+    existing = await db.fetchone(
+        """SELECT * FROM silnt.payjoin_contacts
+           WHERE (requester_user_id = :a AND target_user_id = :b)
+              OR (requester_user_id = :b AND target_user_id = :a)""",
+        {"a": requester_user_id, "b": target_user_id},
+    )
+    if existing:
+        return PayjoinContact(**existing)
+    cid = urlsafe_short_hash()
+    await db.execute(
+        """INSERT INTO silnt.payjoin_contacts
+           (id, status, requester_user_id, target_user_id)
+           VALUES (:id, 'PENDING', :ruid, :tuid)""",
+        {"id": cid, "ruid": requester_user_id, "tuid": target_user_id},
+    )
+    return await get_payjoin_contact(cid)
+
+
+async def get_payjoin_contact(cid: str) -> Optional["PayjoinContact"]:
+    row = await db.fetchone("SELECT * FROM silnt.payjoin_contacts WHERE id = :id", {"id": cid})
+    return PayjoinContact(**row) if row else None
+
+
+async def set_payjoin_contact_status(cid: str, status: str) -> None:
+    await db.execute(
+        f"UPDATE silnt.payjoin_contacts SET status = :s, updated_at = {db.timestamp_now} WHERE id = :id",
+        {"s": status, "id": cid},
+    )
+
+
+async def delete_payjoin_contact(cid: str) -> None:
+    await db.execute("DELETE FROM silnt.payjoin_contacts WHERE id = :id", {"id": cid})
+    # also drop any private labels attached to it
+    await db.execute("DELETE FROM silnt.payjoin_contact_labels WHERE contact_id = :id", {"id": cid})
+
+
+async def set_payjoin_contact_label(contact_id: str, labeler_user_id: str, label: str) -> None:
+    """Set/clear a private per-side label for a connection (only the labeler sees
+    it). Blank label clears it."""
+    lbl = (label or "").strip()
+    if not lbl:
+        await db.execute(
+            "DELETE FROM silnt.payjoin_contact_labels WHERE contact_id = :cid AND labeler_user_id = :uid",
+            {"cid": contact_id, "uid": labeler_user_id},
+        )
+        return
+    existing = await db.fetchone(
+        "SELECT 1 FROM silnt.payjoin_contact_labels WHERE contact_id = :cid AND labeler_user_id = :uid",
+        {"cid": contact_id, "uid": labeler_user_id},
+    )
+    if existing:
+        await db.execute(
+            f"UPDATE silnt.payjoin_contact_labels SET label = :lbl, updated_at = {db.timestamp_now} "
+            "WHERE contact_id = :cid AND labeler_user_id = :uid",
+            {"lbl": lbl, "cid": contact_id, "uid": labeler_user_id},
+        )
+    else:
+        await db.execute(
+            "INSERT INTO silnt.payjoin_contact_labels (contact_id, labeler_user_id, label) "
+            "VALUES (:cid, :uid, :lbl)",
+            {"cid": contact_id, "uid": labeler_user_id, "lbl": lbl},
+        )
+
+
+async def get_payjoin_contact_labels(labeler_user_id: str) -> dict:
+    """Map {contact_id: label} of this user's private labels."""
+    rows = await db.fetchall(
+        "SELECT contact_id, label FROM silnt.payjoin_contact_labels WHERE labeler_user_id = :uid",
+        {"uid": labeler_user_id},
+    )
+    return {r["contact_id"]: r["label"] for r in rows}
+
+
+async def list_payjoin_contacts(user_id: str) -> dict:
+    """All connections touching this user, grouped. Returns raw rows with the
+    counterparty_user_id annotated; the endpoint resolves usernames for display
+    (so usernames are never stored, only resolved on demand)."""
+    rows = await db.fetchall(
+        """SELECT * FROM silnt.payjoin_contacts
+           WHERE requester_user_id = :uid OR target_user_id = :uid
+           ORDER BY updated_at DESC""",
+        {"uid": user_id},
+    )
+    accepted, incoming, outgoing, declined = [], [], [], []
+    for r in rows:
+        c = PayjoinContact(**r)
+        other_id = c.requester_user_id if c.target_user_id == user_id else c.target_user_id
+        d = c.dict()
+        d["counterparty_user_id"] = other_id
+        if c.status == "ACCEPTED":
+            accepted.append(d)
+        elif c.status == "PENDING" and c.target_user_id == user_id:
+            incoming.append(d)
+        elif c.status == "PENDING" and c.requester_user_id == user_id:
+            outgoing.append(d)
+        elif c.status == "DECLINED" and c.requester_user_id == user_id:
+            declined.append(d)
+    return {"accepted": accepted, "incoming": incoming, "outgoing": outgoing, "declined": declined}
+
+
+async def list_accepted_contacts_with_ids(user_id: str) -> list[dict]:
+    """ACCEPTED connections: [{contact_id, user_id}] where user_id is the
+    counterparty. Lets the endpoint attach this user's private label + username."""
+    rows = await db.fetchall(
+        """SELECT * FROM silnt.payjoin_contacts
+           WHERE status = 'ACCEPTED' AND (requester_user_id = :uid OR target_user_id = :uid)""",
+        {"uid": user_id},
+    )
+    out = []
+    for r in rows:
+        c = PayjoinContact(**r)
+        other = c.target_user_id if c.requester_user_id == user_id else c.requester_user_id
+        out.append({"contact_id": c.id, "user_id": other})
+    return out
+
+
+async def list_accepted_contact_user_ids(user_id: str) -> list[str]:
+    """user_ids of this user's ACCEPTED connections (counterparties)."""
+    rows = await db.fetchall(
+        """SELECT * FROM silnt.payjoin_contacts
+           WHERE status = 'ACCEPTED' AND (requester_user_id = :uid OR target_user_id = :uid)""",
+        {"uid": user_id},
+    )
+    out = []
+    for r in rows:
+        c = PayjoinContact(**r)
+        out.append(c.target_user_id if c.requester_user_id == user_id else c.requester_user_id)
+    return out
 
 
 async def list_payjoin_requests_for_receiver(

@@ -78,4 +78,3 @@ def combine_and_finalize(psbt_b64_list: list[str]) -> dict:
         "finalized": True,
         "tx_hex": tx_hex,
     }
-

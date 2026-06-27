@@ -315,3 +315,68 @@ async def m012_payjoin_descriptors(db):
     await db.execute(
         "CREATE INDEX idx_payjoin_descriptors_user ON silnt.payjoin_descriptors (user_id);"
     )
+
+async def m013_payjoin_invoice_fields(db):
+    """
+    Invoice model (payee-initiated, directed PayJoin): add a memo and a second
+    order-independent signature slot to payjoin_requests.
+      receiver_* = payee A (set at invoice creation, incl. A's contributed input)
+      sender_*   = payer B (B's inputs set when B pays)
+    Runtime statuses: 'OPEN' (A posted invoice) -> 'CLAIMED' (B paid, PSBT built,
+    awaiting both signatures) -> 'BROADCAST' / 'CANCELLED'. status is TEXT, so no
+    enum to alter. Fulcrum config needs NO migration (BlindbitConfig is stored as
+    JSON in blindbit_config.json_data).
+    """
+    await db.execute("ALTER TABLE silnt.payjoin_requests ADD COLUMN memo TEXT;")
+    await db.execute("ALTER TABLE silnt.payjoin_requests ADD COLUMN sender_signed_psbt TEXT;")
+
+
+async def m014_payjoin_contacts(db):
+    """
+    Consent-based connections between two users on this instance, so a payee can
+    keep a private, curated list of payers (and vice-versa) WITHOUT exposing the
+    global user base. One row per connection:
+      status PENDING  -> requester asked target; awaiting target's approval
+      status ACCEPTED -> mutual connection; each may invoice/pay the other and
+                         sees the other in their invoice payer-picker
+    Either party can delete the row (sever the connection). No enumeration: a
+    request is only created by exact known username (resolve-payer check).
+    """
+    await db.execute(
+        f"""
+        CREATE TABLE silnt.payjoin_contacts (
+            id                 TEXT PRIMARY KEY,
+            status             TEXT NOT NULL DEFAULT 'PENDING',
+            requester_user_id  TEXT NOT NULL,
+            target_user_id     TEXT NOT NULL,
+            created_at         TIMESTAMP NOT NULL DEFAULT {db.timestamp_now},
+            updated_at         TIMESTAMP NOT NULL DEFAULT {db.timestamp_now}
+        );
+        """
+    )
+    await db.execute(
+        "CREATE INDEX idx_payjoin_contacts_req ON silnt.payjoin_contacts (requester_user_id, status);"
+    )
+    await db.execute(
+        "CREATE INDEX idx_payjoin_contacts_tgt ON silnt.payjoin_contacts (target_user_id, status);"
+    )
+
+
+async def m015_payjoin_contact_labels(db):
+    """
+    Per-side private labels for connections. Each user can label a connection
+    independently; the label is visible only to the labeler (not shared with the
+    counterparty). Keyed by (contact_id, labeler_user_id). Separate table because
+    the connection row itself is shared by both parties.
+    """
+    await db.execute(
+        f"""
+        CREATE TABLE silnt.payjoin_contact_labels (
+            contact_id      TEXT NOT NULL,
+            labeler_user_id TEXT NOT NULL,
+            label           TEXT NOT NULL,
+            updated_at      TIMESTAMP NOT NULL DEFAULT {db.timestamp_now},
+            PRIMARY KEY (contact_id, labeler_user_id)
+        );
+        """
+    )

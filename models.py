@@ -28,6 +28,11 @@ class BlindbitConfig(BaseModel):
     max_wallets_per_user: int = 1   # 0 = unlimited
     dust_threshold_sats:    int = 5000
     boltz_url: str = ""
+    fulcrum_host: str = ""
+    fulcrum_port: int = 50001
+    fulcrum_tls: bool = False
+    login_scan_enabled: bool = True            # auto catch-up scan on wallet open
+    login_scan_auto_threshold: int = 432       # gap < this => scan silently; >= => prompt
 
 class CreateWallet(BaseModel):
     mnemonic: str = None
@@ -314,6 +319,8 @@ class PayjoinRequest(BaseModel):
     psbt: Optional[str] = None
     unsigned_psbt: Optional[str] = None
     receiver_signed_psbt: Optional[str] = None
+    sender_signed_psbt: Optional[str] = None
+    memo: Optional[str] = None
     tx_hex: Optional[str] = None
     txid: Optional[str] = None
     sender_inputs: Optional[str] = None     # JSON string
@@ -354,3 +361,44 @@ class ContributePayjoinData(BaseModel):
 class FinalizePayjoinData(BaseModel):
     # sender's signed copy of the final unsigned PSBT (base64):
     signed_psbt: str
+
+# ── invoice model (payee-initiated, directed PayJoin) ─────────────────────────
+class CreateInvoiceData(BaseModel):
+    # A (payee) creates a directed invoice for a specific payer B.
+    receiver_descriptor_id: str       # A's wallet that receives the payment
+    receiver_input: dict              # A's ONE contributed input {txid,vout,value,chain,index}
+    payer_username: str               # B, chosen from the dropdown
+    amount_sats: int                  # what B owes A
+    fee_rate: float
+    memo: Optional[str] = None
+
+
+class PayInvoiceData(BaseModel):
+    # B (payer) pays an invoice: commits their wallet + inputs. siLNt then builds
+    # the merged PSBT. No signature yet — both sign the returned unsigned PSBT.
+    sender_descriptor_id: str         # B's wallet to spend from
+    sender_inputs: list[dict]         # B's selected inputs
+
+
+class SignPayjoinData(BaseModel):
+    # either party submits their signed copy of the pristine unsigned PSBT;
+    # siLNt combines + broadcasts once BOTH are present (order-independent).
+    signed_psbt: str
+
+
+# ── connections (consent-based curated payer/payee list) ──────────────────────
+class PayjoinContact(BaseModel):
+    id: str
+    status: str
+    requester_user_id: str
+    target_user_id: str
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class CreateContactData(BaseModel):
+    email: str    # exact email of the user to connect with (resolved neutrally)
+
+
+class ContactLabelData(BaseModel):
+    label: str = ""   # private label for a connection (blank clears it)

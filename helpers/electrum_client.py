@@ -218,3 +218,26 @@ class ElectrumClient:
             raise RuntimeError(f"listunspent error: {r['error']}")
         return r.get("result", [])
 
+    def broadcast(self, tx_hex: str) -> str:
+        """blockchain.transaction.broadcast -> returns txid (or raises with the
+        node's reject reason, e.g. 'witness program hash mismatch')."""
+        r = self._call("blockchain.transaction.broadcast", [tx_hex])
+        if "error" in r and r["error"]:
+            raise RuntimeError(f"broadcast rejected: {r['error']}")
+        return r.get("result", "")
+
+    def get_transaction(self, txid: str, verbose: bool = True) -> dict:
+        r = self._call("blockchain.transaction.get", [txid, verbose])
+        if "error" in r and r["error"]:
+            raise RuntimeError(f"get tx error: {r['error']}")
+        return r.get("result", {})
+
+    def server_height(self) -> int:
+        """Current chain tip height as Fulcrum sees it (blockchain.headers.subscribe
+        returns the tip header with its height). Used for health/sync checks."""
+        r = self._call("blockchain.headers.subscribe", [])
+        if "error" in r and r["error"]:
+            raise RuntimeError(f"headers.subscribe error: {r['error']}")
+        res = r.get("result", {})
+        # result is {height, hex} for the current tip
+        return int(res.get("height", 0))
