@@ -17,12 +17,16 @@ from ..crud import (
     get_wallet_addresses,
     insert_utxos_for_wallet,
     update_balance,
+    ensure_labeled_address_row
 )
 from .dust_check import evaluate_dust_for_wallet
+from .wallet import generate_labeled_sp_address, get_spend_pub_from_secret
+
 _scan_progress: dict[str, dict] = {}
 _scan_stop: dict[str, bool] = {}
 SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 BIP352_CHANGE_LABEL_INDEX = 1
+BIP352_LABELED_ADDRESS_INDICES=[2,3]
 
 @dataclass
 class Label:
@@ -61,7 +65,8 @@ class OwnedUTXO:
             "utxo_state": self.utxo_state,
             "timestamp": self.timestamp,
             "wallet_id": wallet_id,
-            "label": self.label_text
+            "label": self.label_text,
+            "label_index": self.label.m if self.label else None
         }
 
 
@@ -143,7 +148,7 @@ def create_label(scan_key: bytes, m: int) -> Label:
 
 
 def create_labels(scan_key: bytes, indices: list[int]) -> list[Label]:
-    all_indices = sorted(set([0, BIP352_CHANGE_LABEL_INDEX] + list(indices)))
+    all_indices = sorted(set([0, BIP352_CHANGE_LABEL_INDEX] + BIP352_LABELED_ADDRESS_INDICES  + list(indices)))
     return [create_label(scan_key, m) for m in all_indices]
 
 
@@ -720,6 +725,21 @@ async def scan_wallet(
                 for owned in result:
                     if owned.label and owned.label.m in addr_label_map:
                         owned.label_text = addr_label_map[owned.label.m]
+                    elif owned.label and owned.label.m >= 2:
+                        try:
+                            hrp = "sp" if (wallet.network == "mainnet") else "tsp"
+                            spend_pub_hex = get_spend_pub_from_secret(spend_secret_hex)
+                            labeled_addr = generate_labeled_sp_address(
+                                scan_secret_hex=scan_secret_hex,
+                                spend_pub_hex=spend_pub_hex,
+                                m=owned.label.m,
+                                hrp=hrp,
+                            )
+                            await ensure_labeled_address_row(
+                                wallet_id, labeled_addr, owned.label.m
+                            )
+                        except Exception as e:
+                            logger.warning(f"Could not restore labeled address m={owned.label.m}: {e}")    
                 try:
                     await insert_utxos_for_wallet(wallet_id, result)
                     total_found += len(result)

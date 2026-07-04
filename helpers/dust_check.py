@@ -14,6 +14,7 @@ from ..crud import (
     get_silnt_wallet
 )
 
+BIP352_CHANGE_LABEL_INDEX = 1
 
 async def _funding_tx_inputs_match_owned(
     txid: str,
@@ -85,12 +86,15 @@ async def evaluate_dust_for_wallet(wallet_id: str) -> int:
         if amount > threshold:
             should_be_dust = False
         else:
-            is_self_send = await is_own_sent_tx(wallet_id, utxo_txid)
-            if not is_self_send:
-                is_self_send = await _funding_tx_inputs_match_owned(
-                    utxo_txid, owned_outpoints, mempool
-                )
-            should_be_dust = not is_self_send
+            if u.get("label_index") == BIP352_CHANGE_LABEL_INDEX:
+                should_be_dust = False
+            else:
+                is_self_send = await is_own_sent_tx(wallet_id, utxo_txid)
+                if not is_self_send:
+                    is_self_send = await _funding_tx_inputs_match_owned(
+                        utxo_txid, owned_outpoints, mempool
+                    )
+                should_be_dust = not is_self_send
 
         logger.info(
             f"  utxo {utxo_txid[:12]}:{utxo_vout} amount={amount} "

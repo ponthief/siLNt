@@ -4,11 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Thrilla — Silent Payments & BitMail, self-custodial</title>
-<meta name="description" content="Thrilla brings BIP-352 Silent Payments and email-style BitMail addresses to multiple users on top of LNbits and BlindBit. Your seeds never touch the server.">
+<meta name="description" content="Thrilla brings Silent Payments, collaborative PayJoin, and email-style BitMail addresses to a trusted circle of users on top of LNbits, BlindBit, and Fulcrum. Your seeds never touch the server.">
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="apple-touch-icon" href="thrilla-icon.png">
 <meta property="og:title" content="Thrilla — Silent Payments & BitMail">
-<meta property="og:description" content="Self-custodial Bitcoin payments with reusable, unlinkable addresses and email-style BitMail names. Your keys never touch the server.">
+<meta property="og:description" content="A self-custodial friends-and-family Bitcoin wallet: private Silent Payments to the outside world, collaborative PayJoin within your circle. Your keys never touch the server.">
 <meta property="og:image" content="thrilla-icon.png">
 <meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -82,13 +82,21 @@
   .nav-links { display: flex; gap: 26px; align-items: center; font-size: 13.5px; }
   .nav-links a { color: var(--dim); text-decoration: none; transition: color .2s; }
   .nav-links a:hover { color: var(--ink); }
+  .nav-social { font-size: 15px; line-height: 1; display: inline-flex; align-items: center; }
   .nav-links .cta {
     color: var(--green); border: 1px solid var(--border-bright);
     padding: 8px 16px; border-radius: 8px; background: var(--green-dim);
     transition: all .2s;
   }
   .nav-links .cta:hover { border-color: var(--green); box-shadow: 0 0 24px rgba(63,185,80,.2); }
+  .nav-ghost-btn {
+    color: var(--dim); border: 1px solid var(--border-bright);
+    padding: 8px 16px; border-radius: 8px; background: rgba(255,255,255,.02);
+    transition: all .2s; white-space: nowrap;
+  }
+  .nav-ghost-btn:hover { color: var(--ink); border-color: var(--dim); background: rgba(255,255,255,.05); }
   @media (max-width: 640px){ .nav-links a:not(.cta){ display:none; } }
+  @media (max-width: 640px){ .nav-links a.nav-social{ display:inline-flex; } }
 
   /* hero mascot */
   .hero-mascot {
@@ -257,14 +265,43 @@
   .caveats li::before { content: "—"; position: absolute; left: 0; color: var(--faint); }
   .caveats li strong { color: var(--ink); font-weight: 500; }
 
-  /* funding steps */
-  .fund-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px,1fr)); gap: 18px; }
-  .fund-step { display: flex; gap: 16px; align-items: flex-start; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); padding: 22px; transition: border-color .25s; }
-  .fund-step:hover { border-color: var(--border-bright); }
-  .fund-step .n { flex-shrink: 0; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; font-weight: 600; font-size: 15px; color: var(--green); background: var(--green-dim); border: 1px solid var(--border-bright); }
-  .fund-step h4 { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
-  .fund-step p { font-size: 13.5px; color: var(--dim); line-height: 1.55; }
-  .btn-sm-fund { margin-top: 14px; font-size: 13px; padding: 9px 16px; }
+  /* friends & family callout */
+  .ff {
+    margin-top: 8px; border: 1px solid var(--border-bright); border-radius: var(--radius);
+    padding: 28px 30px;
+    background: linear-gradient(180deg, rgba(247,147,26,.05), var(--panel));
+  }
+  .ff .ff-tag { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--orange); margin-bottom: 12px; }
+  .ff h3 { font-family: var(--display); font-weight: 500; font-size: 24px; letter-spacing: -.01em; margin-bottom: 12px; }
+  .ff p { font-size: 14px; color: var(--dim); line-height: 1.62; max-width: 760px; }
+  .ff p + p { margin-top: 12px; }
+  .ff strong { color: var(--ink); font-weight: 500; }
+
+  /* onboarding / account steps */
+  .onboard-note {
+    margin-top: 22px; border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 22px 26px; background: var(--panel); display: flex; gap: 16px; align-items: flex-start;
+  }
+  .onboard-note .ic { flex-shrink: 0; width: 40px; height: 40px; border-radius: 10px; background: var(--green-dim); border: 1px solid var(--border-bright); display: grid; place-items: center; font-size: 19px; }
+  .onboard-note h4 { font-size: 15px; font-weight: 600; margin-bottom: 7px; }
+  .onboard-note p { font-size: 13.5px; color: var(--dim); line-height: 1.58; }
+  .onboard-note p + p { margin-top: 9px; }
+  .onboard-note strong { color: var(--ink); font-weight: 500; }
+  .mailref { color: var(--green); }
+
+  /* coming-soon badge */
+  .soon { display:inline-block; margin-left:8px; font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:var(--faint); border:1px solid var(--border); padding:2px 8px; border-radius:5px; vertical-align:middle; }
+
+  /* contact */
+  /* social links */
+  .social-line { margin-top: 16px; display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
+  .social-line a {
+    font-size: 13px; color: var(--dim); text-decoration: none;
+    border: 1px solid var(--border-bright); border-radius: 8px;
+    padding: 7px 14px; background: rgba(255,255,255,.02);
+    display: inline-flex; align-items: center; gap: 7px; transition: all .2s;
+  }
+  .social-line a:hover { color: var(--ink); border-color: var(--dim); background: rgba(255,255,255,.05); }
 
   /* reveal on load */
   .reveal { opacity: 0; transform: translateY(16px); animation: rise .7s cubic-bezier(.2,.7,.2,1) forwards; }
@@ -289,6 +326,9 @@
       <a href="#" onclick="showTab('home');return false">Home</a>
       <a href="#" onclick="showTab('privacy');return false">Privacy</a>
       <a href="#" onclick="showTab('how');return false">How it works</a>
+      <a class="nav-social" href="https://x.com/thrillabtc" target="_blank" rel="noopener noreferrer" title="Thrilla on X" aria-label="Thrilla on X">𝕏</a>
+      <a class="nav-social" href="https://t.me/thrilla_btc" target="_blank" rel="noopener noreferrer" title="Thrilla on Telegram" aria-label="Thrilla on Telegram">✈</a>
+      <a class="nav-ghost-btn" href="https://github.com/ponthief/siLNt/tree/master" target="_blank" rel="noopener noreferrer">View it in GitHub</a>
       <a class="cta" href="https://signet.thrilla.me">Try on Signet →</a>
     </div>
   </nav>
@@ -304,14 +344,14 @@
 <div class="tab-panel active" id="tab-home">
 <header class="wrap tab-home">
   <img class="hero-mascot reveal d1" src="thrilla-icon.png" alt="Thrilla mascot — a celebrating Bitcoin coin">
-  <div class="eyebrow reveal d1"><span class="dot"></span> Self-custodial · BIP-352 · Lightning · Multi-user</div>
-  <h1 class="reveal d2">Private Bitcoin payments<br>with an address you can <em>actually say out loud.</em></h1>
-  <p class="lead reveal d3">Thrilla is a self-custodial wallet that gives multiple users <strong>Silent Payments</strong>, a built-in <strong>Lightning wallet</strong>, and human-readable <strong>BitMail</strong> addresses — reusable, unlinkable, and easy to share. Built on LNbits and powered by a BlindBit oracle, your keys stay on your device and never reach the server.</p>
+  <div class="eyebrow reveal d1"><span class="dot"></span> Self-custodial · Silent Payments · PayJoin · Friends &amp; family</div>
+  <h1 class="reveal d2">A friends-and-family wallet<br>with an address you can <em>actually say out loud.</em></h1>
+  <p class="lead reveal d3">Thrilla is a self-custodial <strong>friends-and-family</strong> wallet built on LNbits. Inside your circle you transact with <strong>collaborative PayJoin</strong>; to the outside world you receive with maximum-privacy <strong>Silent Payments</strong> and share a human-readable <strong>BitMail</strong> name. Powered by a BlindBit Oracle and a Fulcrum electrum server — your keys stay on your device and never reach the server.</p>
   <div class="hero-actions reveal d4">
     <a class="btn btn-primary" href="https://signet.thrilla.me">Launch the Signet demo <span class="arrow">→</span></a>
     <a class="btn btn-ghost" href="#" onclick="showTab('privacy');return false">Why it matters <span class="arrow">→</span></a>
   </div>
-  <div class="signet-note reveal d4"><span class="signet-badge">SIGNET</span> Test it with worthless coins first — no real funds required.</div>
+  <div class="signet-note reveal d4"><span class="signet-badge">SIGNET</span> Test it with worthless coins first — no real funds required. Active development is ongoing, so the platform may briefly go offline from time to time.</div>
 
   <div class="demo reveal d5">
     <div class="demo-bar"><span class="d"></span><span class="d"></span><span class="d"></span><span>thrilla — receive</span></div>
@@ -329,18 +369,35 @@
     </div>
   </div>
 </header>
+
+<section class="wrap" id="circle">
+  <div class="ff reveal">
+    <div class="ff-tag">Who it's for</div>
+    <h3>A friends-and-family wallet — trust inside, privacy outside</h3>
+    <p>Thrilla is designed for a <strong>known circle</strong> — friends, family, a small community — sharing one LNbits instance. Within that circle there's an expected level of trust, so members can transact <strong>collaboratively via PayJoin</strong>: two people co-sign a single transaction that improves privacy and consolidates coins, without a middleman.</p>
+    <p>Toward the <strong>outside world</strong>, you present your <strong>Silent Payment</strong> address — reusable, unlinkable, and safe to publish — so the public ledger never becomes a map of who pays you. Friendly trust on the inside, maximum privacy on the outside.</p>
+    <p><strong>Your keys are your responsibility.</strong> Thrilla is self-custodial: every member generates and holds their own keys on their own device. No one — not other members, not the server operator — can move your Silent Payment funds for you, and no one can recover them if you lose your backup.</p>
+  </div>
+</section>
+
 <section class="wrap" id="what">
   <div class="sec-head">
     <div class="sec-tag">What it does</div>
     <div class="sec-title">Reusable addresses without the privacy tax</div>
-    <p class="sec-sub">Traditional Bitcoin forces a trade-off: reuse one address and leak your whole history, or generate endless new ones and drown in bookkeeping. Silent Payments end that compromise — and Lightning gives you an instant, low-fee way to move between layers.</p>
+    <p class="sec-sub">Traditional Bitcoin forces a trade-off: reuse one address and leak your whole history, or generate endless new ones and drown in bookkeeping. Silent Payments end that compromise — and collaborative PayJoin lets your circle transact together with better privacy.</p>
   </div>
   <div class="grid">
     <div class="card">
       <span class="icon">🔇</span>
       <h3>Silent Payments</h3>
-      <p>Publish a single static address. Senders derive a unique on-chain output for each payment using shared-secret cryptography (BIP-352), so nothing on the blockchain links your payments together — yet only you can find and spend them.</p>
-      <span class="tag">BIP-352</span>
+      <p>Publish a single static address. Senders derive a unique on-chain output for each payment using shared-secret cryptography, so nothing on the blockchain links your payments together — yet only you can find and spend them.</p>
+      <span class="tag">Reusable &amp; unlinkable</span>
+    </div>
+    <div class="card">
+      <span class="icon">🤝</span>
+      <h3>Collaborative PayJoin</h3>
+      <p>Pay another member of your instance with a transaction you <strong>both</strong> contribute inputs to. This breaks the common "all inputs share one owner" assumption that chain-analysis relies on, and can consolidate UTXOs at the same time. Designed for the trusted circle — both sides co-sign one transaction, no third party in between.</p>
+      <span class="tag">Within your circle</span>
     </div>
     <div class="card">
       <span class="icon">✉️</span>
@@ -350,24 +407,42 @@
     </div>
     <div class="card">
       <span class="icon">⚡</span>
-      <h3>Lightning wallet</h3>
-      <p>Every account comes with a built-in Lightning wallet. Create invoices to receive, paste a bolt11 to send, and watch payments settle instantly. The natural pairing: <strong>Silent Payments for private receiving, Lightning for instant, low-fee spending</strong> — both in one place.</p>
-      <span class="tag">Send & receive over LN</span>
+      <h3>Lightning wallet <span class="soon">On mainnet</span></h3>
+      <p>Each account will include a built-in Lightning wallet for instant, low-fee spending — the natural pairing with Silent Payments for private receiving. <strong>Arriving when Thrilla launches on mainnet;</strong> the current Signet release focuses on Silent Payments and PayJoin.</p>
+      <span class="tag">Coming at mainnet launch</span>
     </div>
     <div class="card">
       <span class="icon">🔁</span>
-      <h3>On-chain ↔ Lightning swaps</h3>
-      <p>Move your Silent Payment funds into Lightning without an exchange. Thrilla creates a non-custodial submarine swap through <strong>Boltz</strong>: you fund an on-chain address from your SP wallet, Boltz pays your Lightning invoice, and a failed swap is refundable to an address you control.</p>
-      <span class="tag">Powered by Boltz</span>
+      <h3>On-chain ↔ Lightning swaps <span class="soon">On mainnet</span></h3>
+      <p>Move Silent Payment funds into Lightning without an exchange, via non-custodial submarine swaps through <strong>Boltz</strong>. <strong>This will become available once Thrilla launches on mainnet</strong> alongside the Lightning wallet.</p>
+      <span class="tag">Coming at mainnet launch</span>
     </div>
     <div class="card">
       <span class="icon">👥</span>
       <h3>Multi-user by design</h3>
-      <p>One deployment serves many independent users, each with their own wallet, addresses, and device trust. Thrilla rides on LNbits' account model, so onboarding a new person is just another login.</p>
+      <p>One deployment serves a circle of independent users, each with their own wallet, addresses, and device trust. Thrilla rides on LNbits' account model, so onboarding a new person is just another login.</p>
       <span class="tag">One instance, many wallets</span>
     </div>
   </div>
 </section>
+
+<section class="wrap" id="account">
+  <div class="sec-head">
+    <div class="sec-tag" style="color:var(--green)">Before you start</div>
+    <div class="sec-title">Create an account to secure your device</div>
+    <p class="sec-sub">Thrilla ties each wallet to securely authenticated devices. Creating an account is what makes that possible — and it only takes a moment.</p>
+  </div>
+
+  <div class="onboard-note reveal">
+    <div class="ic">📧</div>
+    <div>
+      <h4>Account creation is required</h4>
+      <p>To use Thrilla you must <strong>create an account</strong>. This is what lets the app <strong>securely authenticate your device</strong>: each new device is confirmed via an email link before it can access a wallet, so a password alone is never enough to reach your funds from an unknown machine.</p>
+      <p>The confirmation email comes from <strong><span class="mailref" data-user="thrilla" data-domain="bitaurus.net"></span></strong>. If you don't see it within a minute, <strong>check your spam or junk folder</strong> and mark it as "not spam" so future messages arrive in your inbox.</p>
+    </div>
+  </div>
+</section>
+
 <section class="wrap" id="fund">
   <div class="sec-head">
     <div class="sec-tag" style="color:var(--green)">Get started</div>
@@ -375,43 +450,49 @@
     <p class="sec-sub">Signet coins have no monetary value — they exist purely for testing. Grab some from a faucet and send your first Silent Payment in minutes.</p>
   </div>
 
-  <div class="fund-steps">
-    <div class="fund-step">
-      <div class="n">1</div>
+  <div class="fund-steps" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;">
+    <div class="fund-step" style="display:flex;gap:16px;align-items:flex-start;border:1px solid var(--border);border-radius:var(--radius);background:var(--panel);padding:22px;">
+      <div class="n" style="flex-shrink:0;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-weight:600;font-size:15px;color:var(--green);background:var(--green-dim);border:1px solid var(--border-bright);">1</div>
       <div>
-        <h4>Open Thrilla &amp; create a wallet</h4>
-        <p>Launch the app on Signet and generate a Silent Payment wallet. Copy your <span class="mono text-orange">sp1q…</span> address from the receive screen.</p>
+        <h4 style="font-size:15px;font-weight:600;margin-bottom:6px;">Create an account &amp; confirm your device</h4>
+        <p style="font-size:13.5px;color:var(--dim);line-height:1.55;">Sign up, then click the confirmation link emailed from <span class="mailref" data-user="thrilla" data-domain="bitaurus.net"></span> (check spam if needed). Generate a Silent Payment wallet and copy your <span style="color:var(--orange)">sp1q…</span> address.</p>
       </div>
     </div>
-    <div class="fund-step">
-      <div class="n">2</div>
+    <div class="fund-step" style="display:flex;gap:16px;align-items:flex-start;border:1px solid var(--border);border-radius:var(--radius);background:var(--panel);padding:22px;">
+      <div class="n" style="flex-shrink:0;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-weight:600;font-size:15px;color:var(--green);background:var(--green-dim);border:1px solid var(--border-bright);">2</div>
       <div>
-        <h4>Claim coins from the Signet faucet</h4>
-        <p>Paste your address into the faucet and request test coins. They'll arrive on-chain shortly — scan your wallet to detect them.</p>
-        <a class="btn btn-ghost btn-sm-fund" href="https://silentpayments.dev/faucet/signet" target="_blank" rel="noopener noreferrer">
+        <h4 style="font-size:15px;font-weight:600;margin-bottom:6px;">Claim coins from the Signet faucet</h4>
+        <p style="font-size:13.5px;color:var(--dim);line-height:1.55;">Paste your address into the faucet and request test coins. They'll arrive on-chain shortly — scan your wallet to detect them.</p>
+        <a class="btn btn-ghost" style="margin-top:14px;font-size:13px;padding:9px 16px;" href="https://silentpayments.dev/faucet/signet" target="_blank" rel="noopener noreferrer">
           Open the Signet faucet <span class="arrow">→</span>
         </a>
       </div>
     </div>
-    <div class="fund-step">
-      <div class="n">3</div>
+    <div class="fund-step" style="display:flex;gap:16px;align-items:flex-start;border:1px solid var(--border);border-radius:var(--radius);background:var(--panel);padding:22px;">
+      <div class="n" style="flex-shrink:0;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-weight:600;font-size:15px;color:var(--green);background:var(--green-dim);border:1px solid var(--border-bright);">3</div>
       <div>
-        <h4>Send, receive, swap &amp; explore</h4>
-        <p>Try a payment, claim a BitMail name, swap some sats to Lightning, and watch unlinkable outputs land — all risk-free with worthless coins.</p>
+        <h4 style="font-size:15px;font-weight:600;margin-bottom:6px;">Send, receive, PayJoin &amp; explore</h4>
+        <p style="font-size:13.5px;color:var(--dim);line-height:1.55;">Try a payment, claim a BitMail name, do a collaborative PayJoin with another member, and watch unlinkable outputs land — all risk-free with worthless coins.</p>
       </div>
     </div>
   </div>
   <div class="signet-note" style="margin-top:22px"><span class="signet-badge">SIGNET</span> The faucet at silentpayments.dev dispenses test coins only — never send real Bitcoin to a Signet address.</div>
 </section>
+
 <section class="wrap">
   <div class="final">
     <h2>Try Thrilla on Signet</h2>
-    <p>Spin up a wallet, generate a Silent Payment address, claim a BitMail name, send over Lightning, and swap between layers — all with worthless test coins. No risk, no real funds.</p>
+    <p>Create an account, generate a Silent Payment address, claim a BitMail name, and try a collaborative PayJoin with a friend — all with worthless test coins. No risk, no real funds.</p>
     <a class="btn btn-primary" href="https://signet.thrilla.me" style="font-size:15px;padding:16px 30px;">Open signet.thrilla.me <span class="arrow">→</span></a>
     <div style="margin-top:18px">
       <a href="https://silentpayments.dev/faucet/signet" target="_blank" rel="noopener noreferrer" style="color:var(--green);font-size:13.5px;text-decoration:none;border-bottom:1px solid var(--border-bright);padding-bottom:2px">Need test coins? Use the Signet faucet →</a>
     </div>
-    <div class="signet-note" style="justify-content:center;margin-top:18px;"><span class="signet-badge">SIGNET</span> Test network · coins have no monetary value</div>
+    <div class="social-line">
+      <a href="https://x.com/thrillabtc" target="_blank" rel="noopener noreferrer">𝕏 @thrillabtc</a>
+      <a href="https://t.me/thrilla_btc" target="_blank" rel="noopener noreferrer">✈ Telegram</a>
+      <a href="https://github.com/ponthief/siLNt/tree/master" target="_blank" rel="noopener noreferrer">&lt;/&gt; Source on GitHub</a>
+    </div>
+    <div class="signet-note" style="justify-content:center;margin-top:18px;"><span class="signet-badge">SIGNET</span> Test network · Lightning &amp; Boltz swaps arrive at mainnet launch · coins have no monetary value</div>
   </div>
 </section>
 </div>
@@ -456,6 +537,10 @@
       <p>Two payments to the same Silent Payment address produce outputs that look entirely unrelated to any third party — there's no common key or address joining them.</p>
     </div>
     <div class="pp">
+      <h4>Collaborative PayJoin inside the circle</h4>
+      <p>When members pay each other, both contribute inputs to one transaction. That defeats the "single owner of all inputs" heuristic chain-analysis leans on — privacy that comes from cooperation, not just cryptography.</p>
+    </div>
+    <div class="pp">
       <h4>Receiver-side privacy</h4>
       <p>You don't have to interact with the sender or hand out a new address each time. No address-request dance, no leaking which invoice belongs to whom.</p>
     </div>
@@ -464,26 +549,22 @@
       <p>Put your address — or your BitMail name — on a profile, an invoice, or a donation page. Public exposure no longer means a public spending history.</p>
     </div>
     <div class="pp">
-      <h4>No on-chain metadata leak</h4>
-      <p>Because detection happens off-chain via your scan key, the blockchain carries no marker that an output is a Silent Payment to you specifically.</p>
-    </div>
-    <div class="pp">
       <h4>Resistant to chain analysis</h4>
-      <p>Clustering heuristics rely on address reuse and linkable outputs. Silent Payments remove both signals, breaking the usual surveillance assumptions.</p>
+      <p>Clustering heuristics rely on address reuse and linkable, single-owner inputs. Silent Payments and PayJoin remove both signals, breaking the usual surveillance assumptions.</p>
     </div>
   </div>
 
   <div class="caveats">
     <div class="ch">
-      <span class="t">What Silent Payments don't do</span>
+      <span class="t">What Silent Payments &amp; PayJoin don't do</span>
       <span class="badge">Straight talk</span>
     </div>
     <ul>
-      <li>They protect the <strong>receiving</strong> side. The coins you spend still carry their own prior history, so good coin selection and labeling still matter.</li>
+      <li>Silent Payments protect the <strong>receiving</strong> side. The coins you spend still carry their own prior history, so good coin selection and labeling still matter.</li>
       <li>They <strong>aren't a mixer.</strong> Amounts and the timing of transactions remain visible on-chain, even if the links between your received outputs aren't.</li>
+      <li>PayJoin assumes a <strong>trusted counterparty</strong> in your circle — it's a friends-and-family feature, and the other member sees their side of the transaction.</li>
       <li>Network-level privacy is <strong>separate.</strong> Who broadcasts a transaction and from what IP isn't covered here — pair with Tor or your own node for that layer.</li>
-      <li>Swaps involve a <strong>third party.</strong> Boltz sees both legs of a swap, and a Lightning payment carries its own routing metadata — the swap is non-custodial, but it isn't anonymous.</li>
-      <li>The <strong>Lightning wallet is server-managed.</strong> Unlike your Silent Payment keys, the LN balance is held by the LNbits backend — treat it as a hot wallet for spending, not long-term storage. Your SP funds are where the self-custody guarantee applies.</li>
+      <li>Your <strong>keys are your responsibility.</strong> Self-custody means there's no password reset for your funds — lose your backup and the coins are gone; no one can recover them for you.</li>
       <li>BitMail resolves over <strong>DNS</strong>, so the resolver and the domain operator can see which name was looked up. The payment itself stays private; the lookup is a normal DNS query.</li>
       <li>Privacy depends on <strong>how you use it.</strong> Linking an output to your identity elsewhere (an exchange, a public post) can still de-anonymize that specific payment.</li>
     </ul>
@@ -497,28 +578,28 @@
   <div class="sec-head">
     <div class="sec-tag">How it works</div>
     <div class="sec-title">Layers doing one job</div>
-    <p class="sec-sub">Thrilla is the interface. The cryptography, scanning, and swaps are handled by open components underneath it.</p>
+    <p class="sec-sub">Thrilla is the interface. The cryptography, scanning, and collaborative transactions are handled by open components underneath it.</p>
   </div>
   <div class="stack">
     <div class="step">
       <div class="layer">Layer 01 · Interface</div>
       <h4>Thrilla — the wallet you see</h4>
-      <p>A fast web app that builds and signs Silent Payment transactions locally, manages your BitMail address and Lightning wallet, and shows balances and activity. All signing happens in your browser; the server only ever sees what it strictly needs to.</p>
+      <p>A fast web app that builds and signs Silent Payment and PayJoin transactions locally, manages your BitMail address, and shows balances and activity. All signing happens in your browser; the server only ever sees what it strictly needs to.</p>
     </div>
     <div class="step">
       <div class="layer">Layer 02 · Backend</div>
-      <h4>LNbits — accounts & orchestration</h4>
-      <p>Thrilla runs as an LNbits extension. LNbits provides the multi-user account system, authentication, the Lightning wallet, and the API surface, letting a single self-hosted instance serve many people securely and independently.</p>
+      <h4>LNbits — accounts &amp; orchestration</h4>
+      <p>Thrilla runs as an LNbits extension. LNbits provides the multi-user account system, authentication, and device confirmation, letting a single self-hosted instance serve a whole circle securely and independently. (The built-in Lightning wallet activates at mainnet launch.)</p>
     </div>
     <div class="step">
       <div class="layer">Layer 03 · Indexing</div>
-      <h4>BlindBit — the silent-payment oracle</h4>
-      <p>Finding your Silent Payment outputs means scanning the chain with your scan key. A BlindBit oracle precomputes the tweak and UTXO indexes so your wallet can detect incoming payments quickly — without your spend key ever leaving your device.</p>
+      <h4>BlindBit &amp; Fulcrum — indexing the chain</h4>
+      <p>Finding your Silent Payment outputs means scanning the chain with your scan key. A BlindBit Oracle precomputes the tweak and UTXO indexes so your wallet can detect incoming payments quickly, and a Fulcrum electrum server supplies fast address and transaction lookups — all without your spend key ever leaving your device.</p>
     </div>
     <div class="step">
-      <div class="layer">Layer 04 · Swaps</div>
+      <div class="layer">Layer 04 · Swaps <span class="soon">On mainnet</span></div>
       <h4>Boltz — on-chain ↔ Lightning</h4>
-      <p>When you swap, Thrilla talks directly to a Boltz submarine-swap backend. You fund a lockup address from your SP wallet, Boltz pays your Lightning invoice, and the swap stays non-custodial — a failed swap is refundable on-chain with a key only your wallet holds.</p>
+      <p>Once Thrilla launches on mainnet, swaps will talk directly to a Boltz submarine-swap backend: you fund a lockup address from your SP wallet, Boltz pays your Lightning invoice, and the swap stays non-custodial — a failed swap is refundable on-chain with a key only your wallet holds.</p>
     </div>
   </div>
 </section>
@@ -527,49 +608,49 @@
     <div class="sec-head">
       <div class="sec-tag" style="color:var(--green)">Security model</div>
       <div class="sec-title">The server never holds your keys</div>
-      <p class="sec-sub">Self-custody isn't a slogan here — it's enforced by where the secrets physically live. Thrilla is built so that a full server compromise still can't move your coins.</p>
+      <p class="sec-sub">Self-custody isn't a slogan here — it's enforced by where the secrets physically live. Thrilla is built so that a full server compromise still can't move your Silent Payment coins. Those keys are yours to hold and yours to back up.</p>
     </div>
     <div class="vault">
       <div class="vault-item">
         <div class="ic">🔑</div>
         <div>
           <h4>Seeds are never stored server-side</h4>
-          <p>Your mnemonic and the keys derived from it are generated and held client-side, encrypted in your own browser. The server derives keys transiently during setup and discards them — there is no seed column in the database to leak.</p>
+          <p>Your mnemonic and the keys derived from it are generated and held client-side, encrypted in your own browser. The server derives keys transiently during setup and discards them — there is no seed column in the database to leak. Backing up your seed is your responsibility.</p>
         </div>
       </div>
       <div class="vault-item">
         <div class="ic">📱</div>
         <div>
-          <h4>Device confirmation</h4>
-          <p>New devices must be explicitly confirmed via an email link before they can access a wallet. Each trusted device carries its own per-user token, so a stolen password alone can't reach your funds from an unknown machine.</p>
+          <h4>Account + device confirmation</h4>
+          <p>Using Thrilla requires creating an account. New devices must then be explicitly confirmed via an email link (sent from <span class="mailref" data-user="thrilla" data-domain="bitaurus.net"></span> — check spam) before they can access a wallet, so a stolen password alone can't reach your funds from an unknown machine.</p>
         </div>
       </div>
       <div class="vault-item">
         <div class="ic">✍️</div>
         <div>
           <h4>Local signing</h4>
-          <p>Transactions are constructed and signed in your browser using keys that never travel over the wire. The backend only broadcasts the finished, signed transaction — it can't author one on your behalf.</p>
+          <p>Transactions — including collaborative PayJoins — are constructed and signed in your browser using keys that never travel over the wire. The backend only broadcasts the finished, signed transaction — it can't author one on your behalf.</p>
         </div>
       </div>
       <div class="vault-item">
-        <div class="ic">🔁</div>
+        <div class="ic">🤝</div>
         <div>
-          <h4>Non-custodial swaps</h4>
-          <p>Swaps run through Boltz as atomic submarine swaps. Your funds are only ever in your wallet or in a time-locked contract you can reclaim — a failed swap refunds on-chain to an address you control, using a refund key your wallet generated.</p>
+          <h4>Collaborative, not custodial</h4>
+          <p>A PayJoin between members is co-signed by both parties on a single transaction. Each side signs locally with their own keys; neither the other member nor the server can spend on your behalf.</p>
         </div>
       </div>
       <div class="vault-item">
         <div class="ic">🏠</div>
         <div>
           <h4>Self-hostable, end to end</h4>
-          <p>Run your own LNbits, BlindBit oracle, and Boltz backend and the entire stack is yours — no third party sits between you and the chain, and no analytics company profiles your spending.</p>
+          <p>Run your own LNbits, BlindBit Oracle, and Fulcrum server (and, at mainnet, a Boltz backend) and the entire stack is yours — no third party sits between you and the chain, and no analytics company profiles your spending.</p>
         </div>
       </div>
       <div class="vault-item">
         <div class="ic">🔍</div>
         <div>
           <h4>Verifiable, open components</h4>
-          <p>Thrilla, LNbits, BlindBit, and Boltz are open and inspectable. The cryptography follows the published BIP-352 standard rather than a proprietary scheme you'd have to take on trust.</p>
+          <p>Thrilla, LNbits, BlindBit, and Fulcrum are open and inspectable. The cryptography follows the open Silent Payments standard rather than a proprietary scheme you'd have to take on trust.</p>
         </div>
       </div>
     </div>
@@ -583,19 +664,19 @@
   <div class="foundation">
     <div class="pill">
       <div class="name">LNbits <span class="badge">accounts + API</span></div>
-      <div class="role">Multi-user, self-hosted Bitcoin & Lightning backend. Thrilla ships as an LNbits extension, inheriting its battle-tested auth, account model, and Lightning wallet.</div>
+      <div class="role">Multi-user, self-hosted Bitcoin &amp; Lightning backend. Thrilla ships as an LNbits extension, inheriting its battle-tested auth, account model, and device confirmation.</div>
     </div>
     <div class="pill">
-      <div class="name">BlindBit <span class="badge">SP oracle</span></div>
+      <div class="name">BlindBit <span class="badge">SP Oracle</span></div>
       <div class="role">A Silent Payments indexer that precomputes tweak and UTXO data, so wallets can scan for incoming payments fast — without exposing spend keys.</div>
     </div>
     <div class="pill">
-      <div class="name">Boltz <span class="badge">swaps</span></div>
-      <div class="role">A non-custodial submarine-swap service. Thrilla talks to a Boltz backend directly to move funds between on-chain Silent Payments and Lightning, trust-minimized.</div>
+      <div class="name">Boltz <span class="badge">swaps · on mainnet</span></div>
+      <div class="role">A non-custodial submarine-swap service. At mainnet launch, Thrilla will talk to a Boltz backend directly to move funds between on-chain Silent Payments and Lightning, trust-minimized.</div>
     </div>
     <div class="pill">
-      <div class="name">BIP-352 <span class="badge">standard</span></div>
-      <div class="role">The open Silent Payments specification. Reusable static addresses with per-payment unlinkability, defined in the open and implemented to spec.</div>
+      <div class="name">Fulcrum <span class="badge">electrum server</span></div>
+      <div class="role">A fast electrum server providing address and transaction lookups, so your wallet can verify balances and build transactions without trusting a third-party explorer.</div>
     </div>
   </div>
 </section>
@@ -604,8 +685,13 @@
 <div class="wrap">
   <footer>
     <div>
-      <div style="margin-bottom:8px;color:var(--dim)">Thrilla · self-custodial Silent Payments, Lightning & BitMail</div>
-      <div class="disclaim">Thrilla is experimental software for the Signet test network. Self-custody means you are solely responsible for safeguarding your keys and backups. Nothing here is financial advice.</div>
+      <div style="margin-bottom:8px;color:var(--dim)">Thrilla · self-custodial Silent Payments, PayJoin &amp; BitMail</div>
+      <div class="disclaim">Thrilla is experimental software currently on the Signet test network. Because it's under active testing, the platform may go down for short periods without notice. It is a friends-and-family wallet: self-custody means you are solely responsible for safeguarding your own keys and backups. Lightning and Boltz swaps arrive at mainnet launch. Nothing here is financial advice.</div>
+      <div class="social-line" style="margin-top:10px;justify-content:flex-start;">
+        <a href="https://x.com/thrillabtc" target="_blank" rel="noopener noreferrer">𝕏 @thrillabtc</a>
+        <a href="https://t.me/thrilla_btc" target="_blank" rel="noopener noreferrer">✈ Telegram</a>
+        <a href="https://github.com/ponthief/siLNt/tree/master" target="_blank" rel="noopener noreferrer">&lt;/&gt; GitHub</a>
+      </div>
     </div>
     <div style="display:flex;gap:22px;align-items:flex-start;">
       <a href="#" onclick="showTab('home');return false">Home</a>
@@ -625,6 +711,31 @@
     document.querySelectorAll('.tab-btn[data-tab="' + name + '"]').forEach(b => b.classList.add('active'));
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
+
+  // Crawler-resistant email: assembled in JS from split data-* attributes so the
+  // address never appears verbatim in the HTML source for scrapers to scrape.
+  (function () {
+    function buildEmails() {
+      document.querySelectorAll('.mailref').forEach(function (el) {
+        var u = el.getAttribute('data-user');
+        var d = el.getAttribute('data-domain');
+        if (!u || !d) return;
+        var addr = u + String.fromCharCode(64) + d;   // 64 = '@'
+        var a = document.createElement('a');
+        a.href = 'mailto:' + addr;
+        a.textContent = addr;
+        a.style.color = 'var(--green)';
+        a.style.textDecoration = 'none';
+        el.textContent = '';
+        el.appendChild(a);
+      });
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', buildEmails);
+    } else {
+      buildEmails();
+    }
+  })();
 </script>
 
 </body>

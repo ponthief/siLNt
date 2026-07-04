@@ -12,6 +12,7 @@ from .models import (
     UTXORecord,
     WalletAddress,
     CloudflareConfig,
+    NtfyConfig,
     UpdateUtxoLabel,
     TrustedDevice,
     UserPrefs,
@@ -30,6 +31,8 @@ db = Database("ext_silnt")
 # Singleton row ID for the global blindbit config
 BLINDBIT_CONFIG_ID = "blindbit"
 CF_CONFIG_ID = "cloudflare_config"
+NTFY_CONFIG_ID = "ntfy_config"
+HEALTH_STATE_ID = "service_health_state"
 BIP352_CHANGE_LABEL_INDEX = 1
 
 async def create_silnt_wallet(wallet: WalletAccount) -> WalletAccount:
@@ -155,11 +158,15 @@ async def get_utxos_for_wallet(wallet_id: str) -> list[UTXORecord]:
 
 async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> None:
     for utxo in utxos:
+        row = utxo.to_db_row(wallet_id)
+        # Tolerate rows from a to_db_row() that predates the label_index column
+        # (avoids a missing-bind-parameter error if scan.py isn't updated yet).
+        row.setdefault("label_index", None)
         await db.execute(
             """INSERT INTO silnt.utxos
-                 (txid, vout, amount, priv_key_tweak, pub_key, utxo_state, timestamp, wallet_id, label)
+                 (txid, vout, amount, priv_key_tweak, pub_key, utxo_state, timestamp, wallet_id, label, label_index)
                VALUES
-                 (:txid, :vout, :amount, :priv_key_tweak, :pub_key, :utxo_state, :timestamp, :wallet_id, :label)
+                 (:txid, :vout, :amount, :priv_key_tweak, :pub_key, :utxo_state, :timestamp, :wallet_id, :label, :label_index)
                ON CONFLICT (txid, vout, wallet_id) DO UPDATE SET
                  amount         = EXCLUDED.amount,
                  priv_key_tweak = EXCLUDED.priv_key_tweak,
@@ -169,9 +176,10 @@ async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> None:
                      THEN silnt.utxos.utxo_state
                      ELSE EXCLUDED.utxo_state
                  END,
-                 label = COALESCE(silnt.utxos.label, EXCLUDED.label)
+                 label = COALESCE(silnt.utxos.label, EXCLUDED.label),
+                 label_index = COALESCE(silnt.utxos.label_index, EXCLUDED.label_index)
             """,
-            utxo.to_db_row(wallet_id),
+            row,
         )
 
 
@@ -316,6 +324,81 @@ async def update_cloudflare_config(config: CloudflareConfig) -> CloudflareConfig
         )
     return config
 
+
+async def get_ntfy_config() -> NtfyConfig:
+    row = await db.fetchone(
+        "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
+        {"id": NTFY_CONFIG_ID},
+    )
+    return NtfyConfig(**json.loads(row["json_data"])) if row else NtfyConfig()
+
+
+async def update_ntfy_config(config: NtfyConfig) -> NtfyConfig:
+    json_data = config.json()
+    existing = await db.fetchone(
+        "SELECT id FROM silnt.blindbit_config WHERE id = :id",
+        {"id": NTFY_CONFIG_ID},
+    )
+    if existing:
+        await db.execute(
+            "UPDATE silnt.blindbit_config SET json_data = :json_data WHERE id = :id",
+            {"json_data": json_data, "id": NTFY_CONFIG_ID},
+        )
+    else:
+        await db.execute(
+            "INSERT INTO silnt.blindbit_config (id, json_data) VALUES (:id, :json_data)",
+            {"id": NTFY_CONFIG_ID, "json_data": json_data},
+        )
+    return config
+
+
+async def send_ntfy_notification(
+    title: str, message: str, tags: Optional[list] = None, priority: Optional[str] = None
+) -> dict:
+    """
+    Publish a notification to all configured ntfy topics. Best-effort: never
+    raises — returns a small summary so callers/endpoints can report status.
+    Does nothing (and reports disabled) when ntfy is off or misconfigured.
+    """
+    import httpx
+
+    cfg = await get_ntfy_config()
+    if not cfg.enabled:
+        return {"sent": 0, "skipped": "disabled"}
+    server = (cfg.server_url or "https://ntfy.bitaurus.net").rstrip("/")
+    topics = [t.strip() for t in (cfg.topics or []) if t and t.strip()]
+    if not server or not topics:
+        return {"sent": 0, "skipped": "not_configured"}
+
+    headers = {"Title": title, "Priority": priority or cfg.priority or "default"}
+    if tags:
+        headers["Tags"] = ",".join(tags)
+    # Auth: HTTP Basic (username/password) for self-hosted servers that require
+    # it; fall back to a bearer access token if that's how the server is set up.
+    auth = None
+    if cfg.username:
+        auth = (cfg.username, cfg.password or "")
+    elif cfg.access_token:
+        headers["Authorization"] = f"Bearer {cfg.access_token}"
+
+    sent, errors = 0, []
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        for topic in topics:
+            try:
+                r = await c.post(
+                    f"{server}/{topic}",
+                    content=message.encode("utf-8"),
+                    headers=headers,
+                    auth=auth,
+                )
+                if r.status_code < 300:
+                    sent += 1
+                else:
+                    errors.append(f"{topic}: HTTP {r.status_code}")
+            except Exception as e:
+                errors.append(f"{topic}: {e}")
+    return {"sent": sent, "topics": len(topics), "errors": errors}
+
 async def count_silnt_wallets(user: str, network: Optional[str] = None) -> int:
     if network:
         row = await db.fetchone(
@@ -388,6 +471,49 @@ async def label_index_taken(wallet_id: str, label_index: int) -> bool:
         {"wid": wallet_id, "idx": label_index},
     )
     return row is not None
+
+
+async def ensure_labeled_address_row(
+    wallet_id: str, sp_address: str, label_index: int
+) -> bool:
+    """
+    Idempotently ensure a wallet_addresses row exists for a labeled address that
+    a scan actually found funds on. Used to restore labeled-address rows after a
+    seed reimport WITHOUT over-creating: only labels the wallet genuinely used
+    (received on) come back, so count_wallet_addresses stays accurate and the
+    per-wallet address limit isn't falsely tripped. Returns True if a new row was
+    inserted. Never touches the change label (m=1) or base (m=0).
+
+    NOTE: wallet_addresses' primary key is sp_address ALONE, so the same SP
+    address can exist only once table-wide. An SP address is deterministic from
+    the seed, so after a delete+reimport the same labeled address re-derives while
+    a stale row (old wallet_id) may still exist. We therefore check by sp_address
+    globally and, if a row exists under a different wallet_id, re-point it to this
+    wallet rather than attempting a duplicate insert (which would violate the PK).
+    """
+    if label_index is None or label_index <= BIP352_CHANGE_LABEL_INDEX:
+        return False
+    existing = await db.fetchone(
+        "SELECT wallet_id, label_index FROM silnt.wallet_addresses WHERE sp_address = :addr",
+        {"addr": sp_address},
+    )
+    if existing is not None:
+        # Heal a stale row from a previous incarnation: re-point it to the
+        # current wallet (and set the label index if it was missing). Preserves
+        # any user-set label already on the row.
+        if existing["wallet_id"] != wallet_id or existing["label_index"] != label_index:
+            await db.execute(
+                """UPDATE silnt.wallet_addresses
+                      SET wallet_id = :wid, label_index = :idx
+                    WHERE sp_address = :addr""",
+                {"wid": wallet_id, "idx": label_index, "addr": sp_address},
+            )
+        return False
+    # No row anywhere for this address, and the index isn't already used here.
+    if await label_index_taken(wallet_id, label_index):
+        return False
+    await insert_wallet_address(wallet_id, sp_address, label_index, urlsafe_short_hash())
+    return True
 
 async def save_wallet_address(
     wallet_id: str,
@@ -494,7 +620,7 @@ async def update_address_label(addr_id: str, label: Optional[str]) -> int:
 
 async def get_wallet_unspent_utxos_for_dust_check(wallet_id: str) -> list[dict]:
     rows = await db.fetchall(
-        """SELECT txid, vout, amount, suspected_dust
+        """SELECT txid, vout, amount, suspected_dust, label_index
            FROM silnt.utxos
            WHERE wallet_id = :wid AND utxo_state = 'unspent'""",
         {"wid": wallet_id},
@@ -1145,13 +1271,29 @@ async def delete_all_silnt_data_for_user(user_id: str) -> dict:
         await db.execute("DELETE FROM silnt.utxos WHERE wallet_id = :wid", {"wid": wid})
         await db.execute("DELETE FROM silnt.wallet_addresses WHERE wallet_id = :wid", {"wid": wid})
         await db.execute("DELETE FROM silnt.wallets WHERE id = :wid", {"wid": wid})
-        await db.execute("DELETE FROM silnt.wallets WHERE id = :wid", {"wid": wid})
 
     # Per-user data (keyed by user_id, not wallet_id) — these must be cleaned even
     # if the user somehow had no wallets, so do them unconditionally.
     await db.execute("DELETE FROM silnt.bip353_requests WHERE user_id = :uid", {"uid": user_id})
     await db.execute("DELETE FROM silnt.trusted_devices  WHERE user_id = :uid", {"uid": user_id})
     await db.execute("DELETE FROM silnt.user_prefs        WHERE user_id = :uid", {"uid": user_id})
+    # Boltz swaps for the user's wallets.
+    for wid in wallet_ids:
+        await db.execute("DELETE FROM silnt.boltz_swaps WHERE silnt_wallet_id = :wid", {"wid": wid})
+    # PayJoin: requests where the user is either side, their imported descriptors,
+    # connection rows where they're requester or target, and their private labels.
+    await db.execute(
+        "DELETE FROM silnt.payjoin_requests WHERE sender_user_id = :uid OR receiver_user_id = :uid",
+        {"uid": user_id},
+    )
+    await db.execute("DELETE FROM silnt.payjoin_descriptors WHERE user_id = :uid", {"uid": user_id})
+    await db.execute(
+        "DELETE FROM silnt.payjoin_contacts WHERE requester_user_id = :uid OR target_user_id = :uid",
+        {"uid": user_id},
+    )
+    await db.execute("DELETE FROM silnt.payjoin_contact_labels WHERE labeler_user_id = :uid", {"uid": user_id})
+    # SP send contacts (private address book).
+    await db.execute("DELETE FROM silnt.sp_contacts WHERE user_id = :uid", {"uid": user_id})
 
     return {"wallets_deleted": len(wallet_ids), "wallet_ids": wallet_ids}
 
@@ -1381,6 +1523,102 @@ def _prepare_descriptor(descriptor: str) -> str:
     """Checksum-stripped + multipath-normalized string for embit parsing."""
     return _normalize_multipath(descriptor)
 
+# ── At-rest encryption for PayJoin descriptors/xpubs ──────────────────────────
+# An account xpub is privacy-sensitive: anyone holding it can derive all of a
+# wallet's addresses and reconstruct its full balance/history (watch-only, not
+# spend). The PayJoin flow needs the descriptor server-side to coordinate, so we
+# encrypt it AT REST. This protects a leaked DB dump/backup; it does NOT protect
+# against a full host compromise (the attacker would also obtain the key). The
+# key is the per-instance LNbits auth_secret.
+def _payjoin_enc_key() -> str:
+    """Resolve a stable per-instance secret to key at-rest encryption.
+
+    LNbits has renamed this across versions, so probe the known attribute names,
+    then environment variables, then derive a stable fallback from instance-level
+    values. Encryption protects a leaked DB dump/backup, not a full host
+    compromise (which would also expose the key)."""
+    import os
+    try:
+        from lnbits.settings import settings as _s
+    except Exception:
+        _s = None
+    if _s is not None:
+        for attr in (
+            "auth_secret_key",   # confirmed name on this instance (see device_auth.py)
+            "auth_secret", "secret", "secret_key",
+            "lnbits_secret",
+        ):
+            v = getattr(_s, attr, None)
+            if v:
+                return str(v)
+    for env in ("LNBITS_AUTH_SECRET", "AUTH_SECRET", "LNBITS_SECRET_KEY", "SECRET_KEY"):
+        v = os.environ.get(env)
+        if v:
+            return v
+    # Last-resort stable fallback: derive from instance-level values that persist
+    # across restarts (data dir + superuser id). Not as strong as a dedicated
+    # secret, but deterministic so encrypted rows remain decryptable.
+    import hashlib
+    seed = ""
+    if _s is not None:
+        seed = (str(getattr(_s, "lnbits_data_folder", "") or "")
+                + "|" + str(getattr(_s, "super_user", "") or ""))
+    seed = seed or os.environ.get("LNBITS_DATA_FOLDER", "") or "silnt-static-fallback"
+    return hashlib.sha256(("silnt-pj-enc|" + seed).encode()).hexdigest()
+
+def _pj_encrypt(plaintext: str) -> str:
+    from lnbits.utils.crypto import AESCipher
+    return AESCipher(key=_payjoin_enc_key()).encrypt(plaintext.encode())
+
+def _pj_decrypt(ciphertext: str) -> str:
+    from lnbits.utils.crypto import AESCipher
+    return AESCipher(key=_payjoin_enc_key()).decrypt(ciphertext)
+
+def _xpub_fingerprint_hash(xpub: str) -> str:
+    """Deterministic, non-reversible tag for dedup/equality lookups without
+    storing the xpub in plaintext. SHA256 of an xpub can't be turned back into
+    the xpub (so no address derivation), but equal xpubs map to equal tags."""
+    import hashlib
+    return hashlib.sha256(xpub.strip().encode()).hexdigest()
+
+def _looks_encrypted(val: str) -> bool:
+    """Heuristic: a stored value is ciphertext (base64 from AESCipher) rather than
+    a plaintext descriptor/xpub. Real descriptors contain '(' and key-prefixes;
+    xpubs start with x/t/y/z-pub. Base64 ciphertext does not."""
+    if not val:
+        return False
+    v = val.strip()
+    # Plaintext descriptor markers
+    if "(" in v or v[:4] in ("wpkh", "pkh(", "tr(", "sh(", "combo", "addr", "raw("):
+        return False
+    # Plaintext xpub markers
+    if v[:4].lower() in ("xpub", "tpub", "ypub", "zpub", "vpub", "upub"):
+        return False
+    return True
+
+def _decrypt_descriptor_row(row: dict) -> dict:
+    """Return a row dict with descriptor/xpub decrypted for model construction.
+    Tolerates legacy plaintext rows (pre-encryption). If a value LOOKS encrypted
+    but cannot be decrypted (e.g. encrypted under a now-unreachable key), raise —
+    never hand raw base64 ciphertext downstream, which corrupts the descriptor
+    parser with an 'invalid character' error."""
+    out = dict(row)
+    for field in ("descriptor", "xpub"):
+        val = out.get(field)
+        if not val:
+            continue
+        try:
+            out[field] = _pj_decrypt(val)
+        except Exception:
+            if _looks_encrypted(val):
+                raise RuntimeError(
+                    f"PayJoin {field} is encrypted but could not be decrypted with the "
+                    f"current key. The instance secret (auth_secret_key) likely changed "
+                    f"since it was encrypted. Re-import this wallet descriptor."
+                )
+            # Otherwise it's genuine legacy plaintext — leave as-is.
+    return out
+
 def parse_descriptor(descriptor: str) -> dict:
     """
     Parse + validate a BIP-84 output descriptor (Sparrow export).
@@ -1415,27 +1653,32 @@ async def create_payjoin_descriptor(
     user_id: str, descriptor: str, network: str, label: Optional[str] = None
 ) -> PayjoinDescriptor:
     parsed = parse_descriptor(descriptor)
-    # Prevent duplicate imports: same user + same account xpub (covers re-pasting
-    # the same descriptor, with or without a trailing checksum / whitespace diff).
+    # Dedup on a non-reversible hash of the xpub (the xpub itself is stored
+    # encrypted, so a plaintext equality match isn't possible).
+    xhash = _xpub_fingerprint_hash(parsed["xpub"])
     existing = await db.fetchall(
-        "SELECT id FROM silnt.payjoin_descriptors WHERE user_id = :uid AND xpub = :xpub",
-        {"uid": user_id, "xpub": parsed["xpub"]},
+        "SELECT id FROM silnt.payjoin_descriptors WHERE user_id = :uid AND xpub_sha256 = :xh",
+        {"uid": user_id, "xh": xhash},
     )
     if existing:
         raise ValueError("This wallet (xpub) is already imported.")
     did = urlsafe_short_hash()
+    # Encrypt the privacy-sensitive fields at rest. master_fp/account_path are
+    # low-sensitivity (fingerprint + derivation path) and left as-is for display.
+    enc_descriptor = _pj_encrypt(descriptor.strip())
+    enc_xpub = _pj_encrypt(parsed["xpub"])
     await db.execute(
         """
         INSERT INTO silnt.payjoin_descriptors
-            (id, user_id, label, descriptor, xpub, master_fp, account_path,
+            (id, user_id, label, descriptor, xpub, xpub_sha256, master_fp, account_path,
              script_type, network)
         VALUES
-            (:id, :user_id, :label, :descriptor, :xpub, :master_fp, :account_path,
+            (:id, :user_id, :label, :descriptor, :xpub, :xpub_sha256, :master_fp, :account_path,
              :script_type, :network)
         """,
         {
             "id": did, "user_id": user_id, "label": label,
-            "descriptor": descriptor.strip(), "xpub": parsed["xpub"],
+            "descriptor": enc_descriptor, "xpub": enc_xpub, "xpub_sha256": xhash,
             "master_fp": parsed["master_fp"], "account_path": parsed["account_path"],
             "script_type": parsed["script_type"], "network": network,
         },
@@ -1447,7 +1690,7 @@ async def get_payjoin_descriptor(did: str) -> Optional[PayjoinDescriptor]:
     row = await db.fetchone(
         "SELECT * FROM silnt.payjoin_descriptors WHERE id = :id", {"id": did}
     )
-    return PayjoinDescriptor(**row) if row else None
+    return PayjoinDescriptor(**_decrypt_descriptor_row(row)) if row else None
 
 
 async def list_payjoin_descriptors(user_id: str) -> list[PayjoinDescriptor]:
@@ -1455,7 +1698,7 @@ async def list_payjoin_descriptors(user_id: str) -> list[PayjoinDescriptor]:
         "SELECT * FROM silnt.payjoin_descriptors WHERE user_id = :uid ORDER BY created_at DESC",
         {"uid": user_id},
     )
-    return [PayjoinDescriptor(**r) for r in rows]
+    return [PayjoinDescriptor(**_decrypt_descriptor_row(r)) for r in rows]
 
 async def list_payjoin_descriptor_user_ids(exclude_user_id: Optional[str] = None) -> list[str]:
     """Distinct user_ids that have imported at least one PayJoin descriptor
@@ -1477,17 +1720,29 @@ async def delete_payjoin_descriptor(did: str, user_id: str) -> None:
 
 async def get_reserved_outpoints(user_id: str) -> set:
     """
-    Outpoints (txid:vout) reserved by this user's PENDING PayJoins — as sender
-    (sender_inputs) or receiver (receiver_input). 'Pending' = not terminal
-    (BROADCAST/CANCELLED). Used to soft-lock UTXOs so they can't be double-
-    selected in another siLNt PayJoin. (Watch-only: this is siLNt-scope only;
-    it can't stop the user spending the coins directly in their own wallet.)
+    Outpoints (txid:vout) reserved by this user's PayJoins, so they can't be
+    double-selected in another siLNt PayJoin and so the Create/Pay pickers agree
+    with the wallet balance.
+
+    Includes:
+      - In-progress PayJoins (OPEN/CLAIMED/PROPOSED/ACCEPTED/CONTRIBUTED/FINALIZING).
+      - BROADCAST PayJoins whose spend is still UNCONFIRMED. Fulcrum's listunspent
+        keeps a being-spent UTXO until the spend confirms, while the wallet
+        balance already subtracts it (unconfirmed). Without reserving these, the
+        Create tab would still list the in-flight UTXO as available and show the
+        pre-PayJoin amount — disagreeing with the Wallets balance. Once the spend
+        confirms, Fulcrum drops the UTXO from listunspent, so it no longer appears
+        regardless of status; over-reserving a confirmed-spent outpoint is
+        therefore harmless (it isn't listed anymore).
+
+    (Watch-only: this is siLNt-scope only; it can't stop the user spending the
+    coins directly in their own wallet.)
     """
     rows = await db.fetchall(
         """
         SELECT sender_inputs, receiver_input FROM silnt.payjoin_requests
         WHERE (sender_user_id = :uid OR receiver_user_id = :uid)
-          AND status IN ('OPEN','CLAIMED','PROPOSED','ACCEPTED','CONTRIBUTED','FINALIZING')
+          AND status IN ('OPEN','CLAIMED','PROPOSED','ACCEPTED','CONTRIBUTED','FINALIZING','BROADCAST')
         """,
         {"uid": user_id},
     )
@@ -1817,3 +2072,173 @@ async def list_expired_payjoin_requests(now_ts: Optional[int] = None) -> list[Pa
         {"now": now_ts},
     )
     return [PayjoinRequest(**r) for r in rows]
+
+# ── SP send contacts (per-user private address book) ──────────────────────────
+def _spc_hash(value: str) -> str:
+    import hashlib
+    return hashlib.sha256(value.strip().lower().encode()).hexdigest()
+
+def _classify_recipient(value: str) -> str:
+    """'bitmail' if it's a name@domain, else 'sp' (raw SP address)."""
+    return "bitmail" if "@" in (value or "") else "sp"
+
+def _decrypt_sp_contact_row(row: dict) -> dict:
+    out = dict(row)
+    if out.get("value"):
+        try:
+            out["value"] = _pj_decrypt(out["value"])
+        except Exception:
+            pass  # legacy/plaintext tolerance
+    return out
+
+async def create_sp_contact(user_id: str, label: str, value: str) -> "SpContact":
+    from .models import SpContact
+    value = (value or "").strip()
+    if not value:
+        raise ValueError("Recipient is required.")
+    label = (label or "").strip() or value
+    kind = _classify_recipient(value)
+    vhash = _spc_hash(value)
+    # Dedup: same user + same recipient (case-insensitive) — update label instead.
+    existing = await db.fetchone(
+        "SELECT id FROM silnt.sp_contacts WHERE user_id = :uid AND value_sha256 = :h",
+        {"uid": user_id, "h": vhash},
+    )
+    if existing:
+        await db.execute(
+            "UPDATE silnt.sp_contacts SET label = :l WHERE id = :id",
+            {"l": label, "id": existing["id"]},
+        )
+        return await get_sp_contact(existing["id"])
+    cid = urlsafe_short_hash()
+    await db.execute(
+        """
+        INSERT INTO silnt.sp_contacts (id, user_id, label, kind, value, value_sha256)
+        VALUES (:id, :uid, :label, :kind, :value, :h)
+        """,
+        {"id": cid, "uid": user_id, "label": label, "kind": kind,
+         "value": _pj_encrypt(value), "h": vhash},
+    )
+    return await get_sp_contact(cid)
+
+async def get_sp_contact(cid: str) -> Optional["SpContact"]:
+    from .models import SpContact
+    row = await db.fetchone("SELECT * FROM silnt.sp_contacts WHERE id = :id", {"id": cid})
+    return SpContact(**_decrypt_sp_contact_row(row)) if row else None
+
+async def list_sp_contacts(user_id: str) -> list:
+    from .models import SpContact
+    rows = await db.fetchall(
+        "SELECT * FROM silnt.sp_contacts WHERE user_id = :uid ORDER BY last_used_at DESC NULLS LAST, label ASC",
+        {"uid": user_id},
+    )
+    return [SpContact(**_decrypt_sp_contact_row(r)) for r in rows]
+
+async def update_sp_contact_label(cid: str, user_id: str, label: str) -> None:
+    await db.execute(
+        "UPDATE silnt.sp_contacts SET label = :l WHERE id = :id AND user_id = :uid",
+        {"l": (label or "").strip(), "id": cid, "uid": user_id},
+    )
+
+async def touch_sp_contact(user_id: str, value: str) -> None:
+    """Bump last_used_at when a saved recipient is sent to (for ordering)."""
+    await db.execute(
+        "UPDATE silnt.sp_contacts SET last_used_at = :ts WHERE user_id = :uid AND value_sha256 = :h",
+        {"ts": int(time.time()), "uid": user_id, "h": _spc_hash(value)},
+    )
+
+async def delete_sp_contact(cid: str, user_id: str) -> None:
+    await db.execute(
+        "DELETE FROM silnt.sp_contacts WHERE id = :id AND user_id = :uid",
+        {"id": cid, "uid": user_id},
+    )
+
+
+async def list_silnt_user_ids() -> list[str]:
+    """Distinct user_ids known to siLNt — anyone with a wallet, trusted device,
+    imported PayJoin descriptor, or BitMail request. Used by the admin Accountsf
+    page to enumerate deletable users (scoped to siLNt users, not every LNbits
+    account)."""
+    ids: set[str] = set()
+    # (query, column-name-as-returned) — read by real column name, matching how
+    # the rest of this module reads db.fetchall rows (dict-like mappings).
+    for sql, col in (
+        ('SELECT DISTINCT "user" FROM silnt.wallets WHERE "user" IS NOT NULL', "user"),
+        ("SELECT DISTINCT user_id FROM silnt.trusted_devices", "user_id"),
+        ("SELECT DISTINCT user_id FROM silnt.payjoin_descriptors", "user_id"),
+        ("SELECT DISTINCT user_id FROM silnt.bip353_requests", "user_id"),
+    ):
+        try:
+            rows = await db.fetchall(sql, {})
+        except Exception:
+            continue  # a table may be absent on older schemas — skip that source
+        for r in rows:
+            v = r[col]
+            if v:
+                ids.add(v)
+    return sorted(ids)
+
+
+async def notify_service_health_change(service: str, is_up: bool, detail: str = "") -> None:
+    """
+    Fire an ntfy notification ONLY when a service's up/down state changes
+    (up→down or down→up), so a persistently-down service doesn't spam on every
+    health poll. State is stored per-service in the config table. Best-effort —
+    never raises.
+    """
+    
+    # Per-service row id, so BlindBit and Fulcrum checks (which run as separate,
+    # near-concurrent requests) never do a racy read-modify-write on ONE shared
+    # row and clobber each other's state — which silently swallows a service's
+    # up/down transitions (the cause of Fulcrum's recovery ntfy going missing).
+    state_id = f"{HEALTH_STATE_ID}:{service}"
+    try:
+        row = await db.fetchone(
+            "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
+            {"id": state_id},
+        )
+        prev = json.loads(row["json_data"]).get("up") if row else None
+    except Exception:
+        prev = None
+
+    if prev is not None and prev == is_up:
+        return                          # no change → no notification
+
+    # Persist the new state first (so a send failure doesn't cause repeat sends).
+    try:
+        payload = json.dumps({"up": is_up})
+        exists = await db.fetchone(
+            "SELECT id FROM silnt.blindbit_config WHERE id = :id", {"id": state_id}
+        )
+        if exists:
+            await db.execute(
+                "UPDATE silnt.blindbit_config SET json_data = :j WHERE id = :id",
+                {"j": payload, "id": state_id},
+            )
+        else:
+            await db.execute(
+                "INSERT INTO silnt.blindbit_config (id, json_data) VALUES (:id, :j)",
+                {"id": state_id, "j": payload},
+            )
+    except Exception:
+        pass
+
+    # First-ever observation (prev is None): stay quiet if UP (normal startup),
+    # but DO alert if it's already DOWN.
+    if prev is None and is_up:
+        return
+
+    if is_up:
+        await send_ntfy_notification(
+            title=f"{service} recovered",
+            message=f"{service} is reachable again." + (f" {detail}" if detail else ""),
+            tags=["white_check_mark"],
+            priority="default",
+        )
+    else:
+        await send_ntfy_notification(
+            title=f"{service} is DOWN",
+            message=f"{service} is not reachable." + (f" {detail}" if detail else ""),
+            tags=["rotating_light"],
+            priority="high",
+        )

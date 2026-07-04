@@ -135,6 +135,16 @@ class CloudflareConfig(BaseModel):
     domain: str = ""
 
 
+class NtfyConfig(BaseModel):
+    enabled: bool = False
+    server_url: str = "https://ntfy.bitaurus.net"   # base URL of the ntfy server
+    topics: List[str] = []                # one or more topics to publish to
+    access_token: str = ""                # optional bearer token for protected topics
+    username: str = ""                    # HTTP Basic auth username (self-hosted servers)
+    password: str = ""                    # HTTP Basic auth password
+    priority: str = "default"             # ntfy priority: min|low|default|high|urgent
+
+
 class SetupBip353Request(BaseModel):
     username: str  # e.g. "alice" → alice@yourdomain.com
     ttl: int = 300  # DNS TTL in seconds
@@ -292,8 +302,9 @@ class PayjoinDescriptor(BaseModel):
     id: str
     user_id: str
     label: Optional[str] = None
-    descriptor: str            # raw output descriptor as pasted
-    xpub: str                  # parsed account xpub
+    descriptor: str            # raw output descriptor (encrypted at rest)
+    xpub: str                  # parsed account xpub (encrypted at rest)
+    xpub_sha256: Optional[str] = None   # non-reversible dedup tag
     master_fp: str             # 8 hex chars
     account_path: str          # e.g. "84h/1h/0h"
     script_type: str = "wpkh"
@@ -402,3 +413,29 @@ class CreateContactData(BaseModel):
 
 class ContactLabelData(BaseModel):
     label: str = ""   # private label for a connection (blank clears it)
+
+
+class SpContact(BaseModel):
+    id: str
+    user_id: str
+    label: str
+    kind: str                      # 'bitmail' | 'sp'
+    value: str                     # recipient (bitmail name or sp address); decrypted on read
+    value_sha256: Optional[str] = None
+    created_at: Optional[datetime] = None
+    last_used_at: Optional[datetime] = None
+
+
+class CreateSpContactData(BaseModel):
+    label: str
+    value: str                     # 'name@domain' or 'sp1...'/'tsp1...'
+
+
+class UpdateSpContactData(BaseModel):
+    label: str
+
+
+class AdminDeleteAccountData(BaseModel):
+    identifier: str            # username or email of the account to delete
+    confirm_username: str      # must match the resolved username (typed confirmation)
+    delete_bitmail: bool = True

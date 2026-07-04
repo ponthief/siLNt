@@ -19,35 +19,19 @@ Assumptions (per decisions):
   m/84'/<coin>'/0', where coin = 0 mainnet, 1 signet/testnet.
 - Chains: receive (0/*) AND change (1/*). Gap limit 20.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 from embit import bip32, script
 from embit.networks import NETWORKS
-
-try:
-    # When imported as part of the siLNt helpers package (normal runtime).
-    from .electrum_client import ElectrumClient, electrum_scripthash  # Stage 0
-except ImportError:
-    # When run standalone for the Stage-1 test (python payjoin_wallet.py ...),
-    # there is no package context, so fall back to a flat import.
-    from electrum_client import ElectrumClient, electrum_scripthash
-
+from .electrum_client import ElectrumClient, electrum_scripthash
+import base58
 
 GAP_LIMIT = 20
 RECEIVE_CHAIN = 0
 CHANGE_CHAIN = 1
 
-
-# ── zpub handling ─────────────────────────────────────────────────────────────
-# embit's HDKey.from_string understands xpub/tpub. Some zpub/vpub (SLIP-132)
-# version bytes may not be recognized directly, so normalize the version bytes to
-# the standard xpub/tpub that embit accepts, then derive. The KEY material and
-# chain code are identical across SLIP-132 variants — only the 4 version bytes
-# differ — so re-versioning is loss-less and does not change derived addresses.
-import base58  # available in the siLNt env (used elsewhere)
 
 _SLIP132_TO_STD = {
     # zpub (mainnet BIP-84) -> xpub

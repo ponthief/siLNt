@@ -380,3 +380,59 @@ async def m015_payjoin_contact_labels(db):
         );
         """
     )
+
+
+async def m016_payjoin_descriptor_encryption(db):
+    """
+    Privacy hardening: encrypt PayJoin descriptors/xpubs AT REST.
+
+    An account xpub lets anyone holding it derive all of a wallet's addresses and
+    reconstruct its full balance/history (watch-only). The PayJoin flow needs the
+    descriptor server-side to coordinate, so we now store descriptor + xpub
+    encrypted (AESCipher keyed by the LNbits instance auth_secret) instead of in
+    plaintext. This protects a leaked DB dump/backup; it does not protect against
+    a full host compromise (which would also expose the key).
+
+    Adds xpub_sha256: a non-reversible SHA256 tag used for duplicate-import
+    detection, since the encrypted xpub can't be matched by equality. Backfills
+    the tag for existing rows and encrypts any existing plaintext descriptor/xpub
+    in place.
+    """    
+    # 1) Add the dedup-hash column (nullable; backfilled below).
+    await db.execute("ALTER TABLE silnt.payjoin_descriptors ADD COLUMN xpub_sha256 TEXT;")    
+
+    # 2) Index the dedup tag for fast existence checks.
+    await db.execute(
+        "CREATE INDEX idx_payjoin_desc_xpubhash ON silnt.payjoin_descriptors (user_id, xpub_sha256);"
+    )
+
+
+async def m017_sp_contacts(db):
+    """
+    Per-user private address book for SP sends. Users explicitly save recipients
+    (a raw SP address OR a BitMail name) with a label, to reuse on the Send
+    screen. Private to the saving user (scoped by user_id). The recipient value
+    is encrypted at rest (same as PayJoin descriptors) since it's a recipient
+    identity; the label is the user's own and kept plaintext.
+    """
+    await db.execute(
+        f"""
+        CREATE TABLE silnt.sp_contacts (
+            id           TEXT PRIMARY KEY,
+            user_id      TEXT NOT NULL,
+            label        TEXT NOT NULL,
+            kind         TEXT NOT NULL,          -- 'bitmail' | 'sp'
+            value        TEXT NOT NULL,          -- encrypted recipient (name or sp address)
+            value_sha256 TEXT,                   -- non-reversible dedup tag
+            created_at   TIMESTAMP NOT NULL DEFAULT {db.timestamp_now},
+            last_used_at TIMESTAMP
+        );
+        """
+    )
+    await db.execute(
+        "CREATE INDEX idx_sp_contacts_user ON silnt.sp_contacts (user_id, value_sha256);"
+    )
+
+async def m019_drop_stray_utxos_vout_unique(db):    
+    await db.execute("DROP INDEX IF EXISTS silnt.idx_silnt_utxos_vout")
+    await db.execute("ALTER TABLE silnt.utxos DROP CONSTRAINT IF EXISTS idx_silnt_utxos_vout")

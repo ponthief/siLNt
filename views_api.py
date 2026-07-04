@@ -57,6 +57,7 @@ from .helpers.fee_rates_backend import  get_recommended_fees, get_btc_usd_rate
 from .helpers.payjoin_wallet import sync_wallet, next_unused_receive_index
 from .helpers.payjoin_merge import build_merged_payjoin
 from .helpers.psbt_combine import combine_and_finalize
+from .helpers.electrum_client import ElectrumClient
 from .crud import (
     get_silnt_wallets,
     create_silnt_wallet,
@@ -125,7 +126,7 @@ from .crud import (
     address_has_approved_bitmail,
     update_label_hr_address,
     clear_label_hr_address,
-    mark_utxos_confirmed_spent_by_tx,
+    mark_utxos_confirmed_spent_by_tx,    
     cancel_pending_request_for_address,
     cancel_all_pending_requests_for_wallet,
     list_all_bip353_requests,
@@ -138,9 +139,25 @@ from .crud import (
     get_reserved_outpoints,
     create_payjoin_invoice, list_payjoin_invoices_for_payer,
     get_account_id_by_email,
-    create_payjoin_contact, get_payjoin_contact, set_payjoin_contact_status,
-    delete_payjoin_contact, list_payjoin_contacts, list_accepted_contact_user_ids,
-    list_accepted_contacts_with_ids, set_payjoin_contact_label, get_payjoin_contact_labels,
+    create_payjoin_contact,
+    get_payjoin_contact,
+    set_payjoin_contact_status,
+    delete_payjoin_contact,
+    list_payjoin_contacts,
+    list_accepted_contact_user_ids,
+    list_accepted_contacts_with_ids,
+    set_payjoin_contact_label,
+    get_payjoin_contact_labels,
+    create_sp_contact,
+    list_sp_contacts,
+    update_sp_contact_label,
+    delete_sp_contact,
+    touch_sp_contact,
+    list_silnt_user_ids,
+    get_ntfy_config,
+    update_ntfy_config,
+    send_ntfy_notification,
+    notify_service_health_change
 )
 
 from .models import (
@@ -177,6 +194,10 @@ from .models import (
     SignPayjoinData,
     CreateContactData,
     ContactLabelData,
+    CreateSpContactData,
+    UpdateSpContactData,    
+    AdminDeleteAccountData,
+    NtfyConfig,
     USERNAME_PATTERN,
     RESERVED_USERNAMES,
     RECENT_REJECT_COOLDOWN,
@@ -186,6 +207,7 @@ MAX_ADDRESSES_PER_WALLET = 2
 BIP352_CHANGE_LABEL_INDEX = 1
 BITMAIL_MAX_ACQUISITIONS = 3
 BLINDBIT_SYNC_TOLERANCE = 2
+FULCRUM_SYNC_TOLERANCE = 2
 
 silnt_api_router = APIRouter()
 
@@ -298,6 +320,10 @@ async def api_wallet_create(
             raise ValueError(
                 f"Wallet '{data.title}' cannot be created with given mnemonic!"
             )
+
+        _stable_seed = f"{data.network}:{sp_address}".encode()
+        wallet_id = "sp" + hashlib.sha256(_stable_seed).hexdigest()[:20]
+        new_wallet.id = wallet_id
 
         wallets = await get_silnt_wallets(key_info.wallet.user, data.network)
         if any(w.sp_address == sp_address for w in wallets):
@@ -722,7 +748,7 @@ async def api_scan_wallet(
                 spend_secret_hex=data.spend_key,
                 from_height=data.from_height,
                 to_height=data.to_height,
-            )
+            )            
         except ValueError as e:
             logger.error(f"Scan value error for {wallet_id}: {e}"); _mark_scan_failed(wallet_id)
         except RuntimeError as e:
@@ -836,6 +862,7 @@ async def api_build_transaction(
                     f"to this wallet. Unfreeze them or remove from selection."
                 ),
             )
+        _orig_recipient = data.recipient.strip()
         if "@" in data.recipient:
             user, domain = data.recipient.strip().split("@")
             if user and domain:
@@ -846,7 +873,7 @@ async def api_build_transaction(
                         status_code=HTTPStatus.BAD_REQUEST,
                         detail="Address must resolve to Silent Payment address (sp1).",
                     )
-                data.recipient = result
+                data.recipient = result                
         
         result = build_transaction(
             spend_key_hex=data.spend_key,
@@ -857,6 +884,10 @@ async def api_build_transaction(
             utxos=data.utxos,
             network=wallet.network,
         )
+        try:
+            await touch_sp_contact(key_info.wallet.user, _orig_recipient)
+        except Exception:
+            pass
         return result
     except HTTPException:
         raise
@@ -1217,13 +1248,15 @@ async def api_set_utxo_frozen(
     utxos = await get_utxos_by_txid(txid)
     if not utxos:
         raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="UTXO not found.")
-    matching = next((u for u in utxos if u.vout == vout), None)
+    owned_wallet_ids = {w.id for w in await get_silnt_wallets(key_info.wallet.user)}
+    matching = next(
+        (u for u in utxos if u.vout == vout and u.wallet_id in owned_wallet_ids),
+        None,
+    )
     if not matching:
+        if any(u.vout == vout for u in utxos):
+            raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
         raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="UTXO not found at that vout.")
-
-    wallet = await get_silnt_wallet(matching.wallet_id)
-    if not wallet or wallet.user != key_info.wallet.user:
-        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
 
     if data.frozen:
         await set_utxo_freeze_manual(txid, vout)
@@ -1506,7 +1539,7 @@ async def api_update_user_prefs(
                 detail="dust_threshold_sats too large (max 10000).",
             )
 
-    await upsert_user_prefs(user_id, dts)
+    await upsert_user_prefs(user_id, dts)    
     blindbit = await get_blindbit_config()
     return {
         "user_id":                    user_id,
@@ -1591,6 +1624,15 @@ async def api_create_bip353_request(
             message            = data.message,
             address_id         = address_id,
         )
+    # Notify admins there's a new BitMail request awaiting review (best-effort).
+    try:
+        await send_ntfy_notification(
+            title="New BitMail request",
+            message=f"@{username} requested a BitMail address and is awaiting approval.",
+            tags=["email"],
+        )
+    except Exception as e:
+        logger.warning(f"ntfy notify (new bitmail request) failed: {e}")     
     return req
 
 @silnt_api_router.get("/api/v1/bip353/requests")
@@ -1996,11 +2038,13 @@ async def api_blindbit_health(
             r = await c.get(f"{bb_url}/info")
         latency_ms = int((_time.monotonic() - started) * 1000)
         if r.status_code != 200:
+            await notify_service_health_change("BlindBit Oracle", False, f"HTTP {r.status_code}")
             return {"ok": False, "in_sync": False, "error": f"Oracle returned HTTP {r.status_code}.",
                     "blindbit_height": None, "tip_height": None, "behind_by": None, "latency_ms": latency_ms}
         bb_height = int(r.json().get("height"))
     except Exception as exc:
         latency_ms = int((_time.monotonic() - started) * 1000)
+        await notify_service_health_change("BlindBit Oracle", False, str(exc)[:120])
         return {"ok": False, "in_sync": False, "error": str(exc)[:200],
                 "blindbit_height": None, "tip_height": None, "behind_by": None, "latency_ms": latency_ms}
 
@@ -2017,12 +2061,14 @@ async def api_blindbit_health(
             tip_height = None
 
     if tip_height is None:
+        await notify_service_health_change("BlindBit Oracle", True)
         # BlindBit is up but we couldn't fetch the tip to compare.
         return {"ok": True, "in_sync": None, "error": "Could not fetch chain tip to compare.",
                 "blindbit_height": bb_height, "tip_height": None, "behind_by": None, "latency_ms": latency_ms}
 
     behind_by = tip_height - bb_height           # positive = BlindBit is behind
     in_sync = behind_by <= BLINDBIT_SYNC_TOLERANCE   # ahead or within tolerance = healthy
+    await notify_service_health_change("BlindBit Oracle", True)
     return {
         "ok": True,
         "in_sync": in_sync,
@@ -2082,7 +2128,7 @@ async def _fulcrum_cfg():
     cfg = await get_blindbit_config()
     return (
         getattr(cfg, "fulcrum_host", "127.0.0.1"),
-        int(getattr(cfg, "fulcrum_port", 50003)),
+        int(getattr(cfg, "fulcrum_port", 50001)),
         bool(getattr(cfg, "fulcrum_tls", False)),
         getattr(cfg, "network", None) or "signet",
     )
@@ -2155,6 +2201,7 @@ async def api_payjoin_utxos(
     for u in res.utxos:
         d2 = dict(u.__dict__)
         d2["reserved"] = f"{u.txid}:{u.vout}" in reserved
+        d2["unconfirmed"] = int(getattr(u, "height", 0) or 0) <= 0
         utxos_out.append(d2)
     return {
         "confirmed_sats": res.confirmed_sats,
@@ -2424,6 +2471,22 @@ async def api_payjoin_requests(
     uid = key_info.wallet.user
     incoming = await list_payjoin_requests_for_receiver(uid)
     outgoing = await list_payjoin_requests_for_sender(uid)
+    try:
+        blindbit = await get_blindbit_config()
+        mempool_base = blindbit.mempool_url or "https://mempool.space"
+        seen = set()
+        for r in [*incoming, *outgoing]:
+            if r.status == "BROADCAST" and r.txid and r.id not in seen:
+                seen.add(r.id)
+                try:
+                    st = await get_tx_status(mempool_base, r.txid)
+                    if st and st.get("confirmed"):
+                        await update_payjoin_request(r.id, status="CONFIRMED")
+                        r.status = "CONFIRMED"
+                except Exception:
+                    pass  # explorer hiccup — leave as BROADCAST, retry next fetch
+    except Exception:
+        pass  # config/explorer unavailable — non-fatal, statuses unchanged
     return {
         "incoming": [r.dict() for r in incoming],
         "outgoing": [r.dict() for r in outgoing],
@@ -2508,11 +2571,6 @@ async def api_payjoin_cancel(
     return {"status": "CANCELLED"}
 
 
-# ── Fulcrum admin health (mirrors /admin/blindbit/health) ─────────────────────
-# Add `import time as _time` and `httpx` at top of views_api.py (both already
-# imported in your file). Reuses get_blindbit_config (fulcrum_* fields) + mempool_url.
-FULCRUM_SYNC_TOLERANCE = 2
-
 @silnt_api_router.get("/api/v1/admin/fulcrum/health")
 async def api_fulcrum_health(
     key_info: WalletTypeInfo = Depends(require_admin_key),
@@ -2520,15 +2578,15 @@ async def api_fulcrum_health(
     """
     Health = Fulcrum reachable AND in sync with the chain tip (mempool/esplora).
     Mirrors the BlindBit health check. Returns up/down + whether heights diverge.
-    """
-    from .helpers.electrum_client import ElectrumClient
+    """    
     cfg = await get_blindbit_config()
     host = getattr(cfg, "fulcrum_host", "") or ""
-    port = int(getattr(cfg, "fulcrum_port", 50001) or 50001)
+    port = int(getattr(cfg, "fulcrum_port", 50003) or 50003)
     tls = bool(getattr(cfg, "fulcrum_tls", False))
     mp_url = (getattr(cfg, "mempool_url", "") or "").rstrip("/")
 
     if not host:
+        await notify_service_health_change("Fulcrum", False, "Fulcrum host not configured.")
         return {"ok": False, "in_sync": False, "error": "Fulcrum host not configured.",
                 "fulcrum_height": None, "tip_height": None, "behind_by": None, "latency_ms": None}
 
@@ -2542,9 +2600,20 @@ async def api_fulcrum_health(
         latency_ms = int((_time.monotonic() - started) * 1000)
     except Exception as exc:
         latency_ms = int((_time.monotonic() - started) * 1000)
+        await notify_service_health_change("Fulcrum", False, str(exc)[:120])
         return {"ok": False, "in_sync": False, "error": str(exc)[:200],
                 "fulcrum_height": None, "tip_height": None, "behind_by": None,
                 "latency_ms": latency_ms}
+    try:
+        fh_int = int(fh)
+    except (TypeError, ValueError):
+        fh_int = 0
+    if not fh_int or fh_int <= 0:
+        await notify_service_health_change("Fulcrum", False, "No block height returned.")
+        return {"ok": False, "in_sync": False, "error": "Fulcrum returned no block height.",
+                "fulcrum_height": fh, "tip_height": None, "behind_by": None,
+                "latency_ms": latency_ms}
+    fh = fh_int
 
     # chain tip from mempool/esplora for the sync comparison
     tip_height = None
@@ -2558,14 +2627,241 @@ async def api_fulcrum_health(
             tip_height = None
 
     if tip_height is None:
+        await notify_service_health_change("Fulcrum", True)
         return {"ok": True, "in_sync": None, "error": "Could not fetch chain tip to compare.",
                 "fulcrum_height": fh, "tip_height": None, "behind_by": None,
                 "latency_ms": latency_ms, "server_version": ver}
 
     behind_by = tip_height - fh
     in_sync = behind_by <= FULCRUM_SYNC_TOLERANCE
+    await notify_service_health_change("Fulcrum", True)
     return {
         "ok": True, "in_sync": in_sync, "error": None,
         "fulcrum_height": fh, "tip_height": tip_height, "behind_by": behind_by,
         "latency_ms": latency_ms, "server_version": ver,
     }
+
+# ── SP send contacts (per-user private address book) ──────────────────────────
+@silnt_api_router.get("/api/v1/contacts")
+async def api_sp_contacts_list(
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    rows = await list_sp_contacts(key_info.wallet.user)
+    return {"contacts": [c.dict() for c in rows]}
+
+
+@silnt_api_router.post("/api/v1/contacts")
+async def api_sp_contacts_create(
+    data: CreateSpContactData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    value = (data.value or "").strip()
+    if not value:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Recipient is required.")
+    if "@" in value:
+        user, _, domain = value.partition("@")
+        if not user or not domain or "." not in domain:
+            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Invalid BitMail name.")
+    elif not (value.startswith("sp1") or value.startswith("tsp1")):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Recipient must be a BitMail name (name@domain) or an SP address (sp1…/tsp1…).",
+        )
+    c = await create_sp_contact(key_info.wallet.user, data.label, value)
+    return c.dict()
+
+@silnt_api_router.patch("/api/v1/contacts/{cid}")
+async def api_sp_contacts_update(
+    cid: str,
+    data: UpdateSpContactData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    await update_sp_contact_label(cid, key_info.wallet.user, data.label)
+    return {"ok": True}
+
+
+@silnt_api_router.delete("/api/v1/contacts/{cid}")
+async def api_sp_contacts_delete(
+    cid: str,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    await delete_sp_contact(cid, key_info.wallet.user)
+    return {"ok": True}
+
+# ── Admin: delete a user account ──────────────────────────────────────────────
+async def _resolve_account(identifier: str):
+    """Resolve a username-or-email to (user_id, username). (None, None) if not found."""
+    ident = (identifier or "").strip()
+    if not ident:
+        return (None, None)
+    try:
+        acct = await get_account_by_username(ident)
+        if acct:
+            return (acct.id, getattr(acct, "username", None) or ident)
+    except Exception:
+        pass
+    if "@" in ident:
+        uid, uname = await get_account_id_by_email(ident)
+        if uid:
+            return (uid, uname or ident)
+    return (None, None)
+
+
+@silnt_api_router.get(
+    "/api/v1/admin/account/lookup",
+    dependencies=[Depends(require_trusted_device_admin)],
+)
+async def api_admin_account_lookup(
+    identifier: str,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    require_admin(key_info)
+    user_id, username = await _resolve_account(identifier)
+    if not user_id:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="No such account.")
+    wallets = await get_silnt_wallets(user_id)
+    hr_addresses = await get_user_hr_addresses(user_id)
+    return {
+        "user_id": user_id,
+        "username": username,
+        "wallet_count": len(wallets),
+        "bitmail_addresses": hr_addresses,
+        "is_self": user_id == key_info.wallet.user,
+    }
+
+
+@silnt_api_router.post(
+    "/api/v1/admin/account/delete",
+    dependencies=[Depends(require_trusted_device_admin)],
+)
+async def api_admin_account_delete(
+    data: AdminDeleteAccountData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    require_admin(key_info)
+    user_id, username = await _resolve_account(data.identifier)
+    if not user_id:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="No such account.")
+    if (data.confirm_username or "").strip() != (username or ""):
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                            detail="Confirmation does not match the account username.")
+    if user_id == key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                            detail="You can't delete your own admin account from here.")
+    try:
+        if user_id == getattr(lnbits_settings, "super_user", None):
+            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                                detail="The superuser account can't be deleted.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    if data.delete_bitmail:
+        try:
+            cf = await get_cloudflare_config()
+            if cf and getattr(cf, "api_token", "") and getattr(cf, "zone_id", ""):
+                for hr in await get_user_hr_addresses(user_id):
+                    if "@" in hr:
+                        try:
+                            await delete_bip353_record(cf.api_token, cf.zone_id, cf.domain, hr.split("@", 1)[0])
+                        except Exception as e:
+                            logger.warning(f"admin delete: BitMail DNS cleanup failed for {hr}: {e}")
+        except Exception as e:
+            logger.warning(f"admin delete: BitMail cleanup skipped: {e}")
+    try:
+        stats = await delete_all_silnt_data_for_user(user_id)
+    except Exception as e:
+        logger.error(f"admin delete: siLNt data removal failed for {user_id}: {e}")
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                            detail="Could not remove the user's wallet data. Account not deleted.")
+    try:
+        await delete_account(user_id)
+    except Exception as e:
+        logger.error(f"admin delete: LNbits account removal failed for {user_id}: {e}")
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                            detail="Wallet data removed, but the account could not be fully deleted.")
+    logger.info(f"admin {key_info.wallet.user} deleted account {user_id} ({username}): {stats}")
+    return {"deleted": True, "username": username, "wallet_ids": stats.get("wallet_ids", [])}
+
+# ── Admin: delete a user account ──────────────────────────────────────────────
+@silnt_api_router.get(
+    "/api/v1/admin/accounts",
+    dependencies=[Depends(require_trusted_device_admin)],
+)
+async def api_admin_accounts_list(
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    require_admin(key_info)
+    out = []
+    for uid in await list_silnt_user_ids():
+        acct = await get_account(uid)
+        # Skip orphaned references: siLNt rows whose LNbits account no longer
+        # exists (deleted user leaving stale device/descriptor rows).
+        if not acct:
+            continue
+        # get_account may return an object or a mapping depending on LNbits
+        # version — read defensively so an odd shape can't 500 the page.
+        uname = getattr(acct, "username", None)
+        email = getattr(acct, "email", None)
+        if uname is None and isinstance(acct, dict):
+            uname = acct.get("username")
+            email = acct.get("email")
+        wallets = await get_silnt_wallets(uid)
+        out.append({
+            "user_id": uid,
+            "username": uname or uid,
+            "email": email or "",
+            "wallet_count": len(wallets),
+            "bitmail_addresses": await get_user_hr_addresses(uid),
+            "is_self": uid == key_info.wallet.user,
+        })
+    out.sort(key=lambda a: (a["username"] or "").lower())
+    return {"accounts": out}
+
+# ── Ntfy notifications config (admin only) ───────────────────────────────────
+@silnt_api_router.get("/api/v1/ntfy/config")
+async def api_get_ntfy_config(
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+) -> NtfyConfig:
+    require_admin(key_info)
+    return await get_ntfy_config()
+
+
+@silnt_api_router.put("/api/v1/ntfy/config")
+async def api_update_ntfy_config(
+    data: NtfyConfig,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+) -> NtfyConfig:
+    require_admin(key_info)
+    # Normalize: trim server URL, clean the topic list, validate priority.
+    data.server_url = (data.server_url or "https://ntfy.bitaurus.net").strip().rstrip("/")
+    data.topics = [t.strip() for t in (data.topics or []) if t and t.strip()]
+    if data.priority not in ("min", "low", "default", "high", "urgent"):
+        data.priority = "default"
+    if data.enabled and (not data.server_url or not data.topics):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="A server URL and at least one topic are required to enable ntfy.",
+        )
+    return await update_ntfy_config(data)
+
+
+@silnt_api_router.post("/api/v1/ntfy/test")
+async def api_test_ntfy(
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    require_admin(key_info)
+    cfg = await get_ntfy_config()
+    if not cfg.enabled:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Ntfy is disabled.")
+    result = await send_ntfy_notification(
+        title="siLNt test notification",
+        message="If you can read this, ntfy notifications are working.",
+        tags=["white_check_mark"],
+    )
+    if not result.get("sent"):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_GATEWAY,
+            detail=f"No notifications delivered. {result.get('errors') or result.get('skipped') or ''}",
+        )
+    return result
