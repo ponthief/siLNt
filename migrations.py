@@ -436,3 +436,28 @@ async def m017_sp_contacts(db):
 async def m019_drop_stray_utxos_vout_unique(db):    
     await db.execute("DROP INDEX IF EXISTS silnt.idx_silnt_utxos_vout")
     await db.execute("ALTER TABLE silnt.utxos DROP CONSTRAINT IF EXISTS idx_silnt_utxos_vout")
+
+async def m020_admin_alerts(db):
+    """
+    Admin-visible alerts surfaced in the Admin console (e.g. BitMail tampering
+    detected on a send: the DNS TXT for a siLNt-issued BitMail resolved to an SP
+    address that does NOT match the one siLNt recorded — a possible hijack).
+    """
+    await db.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS silnt.admin_alerts (
+            id          TEXT PRIMARY KEY,
+            kind        TEXT NOT NULL,
+            severity    TEXT NOT NULL DEFAULT 'warning',
+            title       TEXT NOT NULL,
+            detail      TEXT NOT NULL DEFAULT '',
+            meta        TEXT,
+            acknowledged BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at  INTEGER NOT NULL
+        );
+        """
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_admin_alerts_open "
+        "ON silnt.admin_alerts (acknowledged, created_at)"
+    )

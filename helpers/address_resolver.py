@@ -101,7 +101,7 @@ def bip353_resolve(address: str) -> dict:
                 detail=f"TXT record does not contain a valid bitcoin: URI: {result}",
             )
 
-        logger.info(f"BIP353 resolved {address} → {result} (DNSSEC validated)")
+        # logger.info(f"BIP353 resolved {address} → {result} (DNSSEC validated)")
         return {
             "address": address,
             "dns_domain": dns_domain,

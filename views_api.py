@@ -157,7 +157,18 @@ from .crud import (
     get_ntfy_config,
     update_ntfy_config,
     send_ntfy_notification,
-    notify_service_health_change
+    notify_service_health_change,
+    create_admin_alert,
+    list_admin_alerts,
+    count_open_admin_alerts,
+    acknowledge_admin_alert,
+    get_issued_bitmail_sp_address,
+    list_approved_bitmails,
+    open_alert_exists_for,
+    open_tamper_notified,
+    mark_tamper_notified,
+    resolve_open_alerts_for,
+    tamper_signature_alerted
 )
 
 from .models import (
@@ -553,7 +564,7 @@ async def api_delete_wallet_address(
 
     # 1. Cancel any pending BitMail request for this address.
     try:
-        await cancel_pending_request_for_address(wallet_id, address_id)
+        await cancel_pending_request_for_address(wallet_id, address_id, sp_address=(getattr(addr, "sp_address", None) if addr else None))
     except Exception as e:
         logger.warning(f"Could not cancel pending request for deleted address {address_id}: {e}")
 
@@ -873,6 +884,55 @@ async def api_build_transaction(
                         status_code=HTTPStatus.BAD_REQUEST,
                         detail="Address must resolve to Silent Payment address (sp1).",
                     )
+                 # Tampering guard: if this BitMail is one WE issued on OUR
+                # configured domain, the DNS TXT must still resolve to the SP
+                # address we recorded. A mismatch means the record was altered to
+                # redirect funds — block the send, alert the admin, and ntfy.
+                try:
+                    cf = await get_cloudflare_config()
+                    our_domain = (getattr(cf, "domain", "") or "").strip().lower()
+                except Exception:
+                    our_domain = ""
+                if our_domain and domain.strip().lower() == our_domain:
+                    expected = await get_issued_bitmail_sp_address(user.strip())
+                    if expected and expected.strip().lower() != result.strip().lower():
+                        detail = (
+                            f"BitMail {user}@{domain} resolved to {result} but siLNt "
+                            f"issued it for {expected}. The DNS record may have been "
+                            f"tampered with to redirect funds. Send blocked."
+                        )
+                        try:
+                            await create_admin_alert(
+                                kind="bitmail_tamper",
+                                severity="critical",
+                                title=f"BitMail tampering: {user}@{domain}",
+                                detail=detail,
+                                meta=json.dumps({
+                                    "bitmail": f"{user}@{domain}",
+                                    "resolved_sp": result,
+                                    "expected_sp": expected,
+                                }),
+                            )
+                        except Exception as e:
+                            logger.error(f"could not record bitmail-tamper alert: {e}")
+                        try:
+                            await send_ntfy_notification(
+                                title="⚠ BitMail tampering detected",
+                                message=detail,
+                                tags=["rotating_light"],
+                                priority="urgent",
+                            )
+                        except Exception as e:
+                            logger.warning(f"ntfy (bitmail tamper) failed: {e}")
+                        raise HTTPException(
+                            status_code=HTTPStatus.BAD_REQUEST,
+                            detail=(
+                                "This BitMail resolves to an address that does not match "
+                                "what was registered. The send has been blocked and an "
+                                "administrator has been alerted. Do not retry — verify the "
+                                "recipient address out of band."
+                            ),
+                        )
                 data.recipient = result                
         
         result = build_transaction(
@@ -2865,3 +2925,199 @@ async def api_test_ntfy(
             detail=f"No notifications delivered. {result.get('errors') or result.get('skipped') or ''}",
         )
     return result
+
+# ── Admin alerts (e.g. BitMail tampering) ────────────────────────────────────
+@silnt_api_router.get("/api/v1/admin/alerts")
+async def api_admin_alerts_list(
+    include_acknowledged: bool = False,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    require_admin(key_info)
+    alerts = await list_admin_alerts(include_acknowledged=include_acknowledged)
+    return {
+        "alerts": [a.dict() for a in alerts],
+        "open_count": await count_open_admin_alerts(),
+    }
+
+
+@silnt_api_router.post("/api/v1/admin/alerts/{alert_id}/ack")
+async def api_admin_alert_ack(
+    alert_id: str,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    require_admin(key_info)
+    ok = await acknowledge_admin_alert(alert_id)
+    if not ok:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Alert not found.")
+    return {"acknowledged": True, "id": alert_id}
+
+_tamper_sweep_lock = asyncio.Lock()
+
+
+async def _notify_and_mark_tamper(bitmail: str, detail: str) -> None:
+    """Send the tamper ntfy once and, on success, mark the open alert notified so
+    subsequent sweeps stay quiet. Kept separate so ntfy count tracks alert rows."""
+    try:
+        _ntfy_res = await send_ntfy_notification(
+            title="BitMail tampering detected",
+            message=detail,
+            tags=["rotating_light"],
+            priority="urgent",
+        )
+        logger.warning(f"tamper sweep: ntfy result for {bitmail}: {_ntfy_res}")
+        if _ntfy_res and _ntfy_res.get("sent"):
+            await mark_tamper_notified("bitmail_tamper", bitmail)
+    except Exception as e:
+        logger.warning(f"tamper sweep: ntfy failed for {bitmail}: {e}")
+
+async def run_bitmail_tamper_sweep() -> dict:
+    """
+    Check EVERY BitMail siLNt issued: resolve its DNS TXT and compare to the SP
+    address we recorded. Any mismatch → an admin alert (once, until acknowledged)
+    + an urgent ntfy. This detects tampering with any user's BitMail proactively,
+    independent of whether anyone is sending to it. Best-effort — never raises.
+    Returns a small summary.
+    """
+    # Prevent overlapping sweeps (scheduled loop + manual endpoint, or a slow
+    # run) from racing the check-then-create dedup and producing duplicate
+    # alerts/ntfys for the same bitmail. If one is already running, skip — it
+    # covers the same BitMails.
+    if _tamper_sweep_lock.locked():
+        return {"checked": 0, "mismatches": 0, "skipped": "already_running"}
+    async with _tamper_sweep_lock:
+        return await _run_bitmail_tamper_sweep_inner()
+
+async def _run_bitmail_tamper_sweep_inner() -> dict:
+    try:
+        cf = await get_cloudflare_config()
+        our_domain = (getattr(cf, "domain", "") or "").strip().lower()
+    except Exception:
+        our_domain = ""
+    if not our_domain:
+        return {"checked": 0, "mismatches": 0, "skipped": "no_domain"}
+
+    try:
+        issued = await list_approved_bitmails()
+    except Exception as e:
+        logger.error(f"tamper sweep: could not list issued BitMails: {e}")
+        return {"checked": 0, "mismatches": 0, "error": str(e)[:120]}
+
+    checked = 0
+    mismatches = 0
+    for row in issued:
+        uname = (row.get("final_username") or "").strip()
+        expected = (row.get("sp_address") or "").strip()
+        if not uname or not expected:
+            continue
+        bitmail = f"{uname}@{our_domain}"
+        checked += 1
+        try:
+            resolved = bip353_resolve(bitmail)
+            result = (resolved.get("result", "") or "").replace("bitcoin:?sp=", "").replace("sp=", "").strip()
+        except Exception:
+            # A resolution failure is not proof of tampering (DNS hiccup, record
+            # removed by the owner, etc.) — don't alert on it here.
+            continue
+        if not result:
+            continue
+        if result.lower() == expected.lower():
+            # Resolves correctly — clear any stale open tamper alert for this
+            # bitmail (e.g. the DNS record was corrected after a prior alert).
+            try:
+                cleared = await resolve_open_alerts_for("bitmail_tamper", bitmail)
+                if cleared:
+                    logger.warning(f"tamper sweep: cleared {cleared} stale alert(s) for {bitmail} (now matches)")
+            except Exception as e:
+                logger.warning(f"tamper sweep: could not clear stale alert for {bitmail}: {e}")
+            continue
+        if result.lower() != expected.lower():
+            mismatches += 1
+            detail = (
+                f"{bitmail} resolves to {result} but siLNt issued it for {expected}. "
+                f"The DNS record may have been tampered with to redirect funds."
+            )
+            # De-dupe on the tamper SIGNATURE (bitmail  rogue address), including
+            # acknowledged rows, so dismissing an ongoing tamper doesn't resurrect it.
+            if await tamper_signature_alerted(bitmail, result):
+                continue
+            # No alert yet — create exactly one row, then notify for it.
+            try:
+                await create_admin_alert(
+                    kind="bitmail_tamper",
+                    severity="critical",
+                    title=f"BitMail tampering: {bitmail}",
+                    detail=detail,
+                    meta=json.dumps({
+                        "bitmail": bitmail,
+                        "resolved_sp": result,
+                        "expected_sp": expected,
+                        "user_id": row.get("user_id"),
+                        "wallet_id": row.get("wallet_id"),
+                    }),
+                )
+            except Exception as e:
+                logger.error(f"tamper sweep: could not record alert for {bitmail}: {e}")
+            await _notify_and_mark_tamper(bitmail, detail)
+    return {"checked": checked, "mismatches": mismatches}
+
+async def probe_blindbit_health() -> None:
+    """Reachability probe for the BlindBit Oracle, callable from a background
+    loop (no auth). Fires the down/up ntfy via notify_service_health_change on a
+    state change. Best-effort — never raises."""
+    try:
+        blindbit = await get_blindbit_config()
+        bb_url = (blindbit.blindbit_url or "").rstrip("/")
+        if not bb_url:
+            await notify_service_health_change("BlindBit Oracle", False, "URL not configured.")
+            return
+        try:
+            async with httpx.AsyncClient(timeout=8.0, verify=False) as c:
+                r = await c.get(f"{bb_url}/info")
+            if r.status_code != 200:
+                await notify_service_health_change("BlindBit Oracle", False, f"HTTP {r.status_code}")
+                return
+            int(r.json().get("height"))          # ensure it's a sane response
+            await notify_service_health_change("BlindBit Oracle", True)
+        except Exception as exc:
+            await notify_service_health_change("BlindBit Oracle", False, str(exc)[:120])
+    except Exception as e:
+        logger.warning(f"probe_blindbit_health error: {e}")
+
+
+async def probe_fulcrum_health() -> None:
+    """Reachability probe for Fulcrum, callable from a background loop (no auth).
+    Fires the down/up ntfy on a state change. Best-effort — never raises."""
+    try:
+        from .helpers.electrum_client import ElectrumClient
+        cfg = await get_blindbit_config()
+        host = getattr(cfg, "fulcrum_host", "") or ""
+        port = int(getattr(cfg, "fulcrum_port", 50001) or 50001)
+        tls = bool(getattr(cfg, "fulcrum_tls", False))
+        if not host:
+            await notify_service_health_change("Fulcrum", False, "Fulcrum host not configured.")
+            return
+        try:
+            c = ElectrumClient(host, port, use_tls=tls)
+            c.connect()
+            c.server_version()
+            fh = c.server_height()
+            c.close()
+        except Exception as exc:
+            await notify_service_health_change("Fulcrum", False, str(exc)[:120])
+            return
+        try:
+            fh_int = int(fh)
+        except (TypeError, ValueError):
+            fh_int = 0
+        if not fh_int or fh_int <= 0:
+            await notify_service_health_change("Fulcrum", False, "No block height returned.")
+            return
+        await notify_service_health_change("Fulcrum", True)
+    except Exception as e:
+        logger.warning(f"probe_fulcrum_health error: {e}")
+
+
+async def run_health_probes() -> None:
+    """Run both service probes once (for the background monitor loop)."""
+    await probe_blindbit_health()
+    await probe_fulcrum_health()

@@ -439,3 +439,13 @@ class AdminDeleteAccountData(BaseModel):
     identifier: str            # username or email of the account to delete
     confirm_username: str      # must match the resolved username (typed confirmation)
     delete_bitmail: bool = True
+
+class AdminAlert(BaseModel):
+    id:           str
+    kind:         str
+    severity:     str = "warning"
+    title:        str
+    detail:       str = ""
+    meta:         Optional[str] = None
+    acknowledged: bool = False
+    created_at:   int

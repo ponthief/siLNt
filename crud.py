@@ -16,6 +16,7 @@ from .models import (
     UpdateUtxoLabel,
     TrustedDevice,
     UserPrefs,
+    AdminAlert,
     Bip353Request,
     BoltzSwapRecord
 )
@@ -31,9 +32,9 @@ db = Database("ext_silnt")
 # Singleton row ID for the global blindbit config
 BLINDBIT_CONFIG_ID = "blindbit"
 CF_CONFIG_ID = "cloudflare_config"
-NTFY_CONFIG_ID = "ntfy_config"
-HEALTH_STATE_ID = "service_health_state"
 BIP352_CHANGE_LABEL_INDEX = 1
+HEALTH_STATE_ID = "service_health_state"
+NTFY_CONFIG_ID = "ntfy_config"
 
 async def create_silnt_wallet(wallet: WalletAccount) -> WalletAccount:
     await db.insert("silnt.wallets", wallet)
@@ -370,7 +371,8 @@ async def send_ntfy_notification(
     if not server or not topics:
         return {"sent": 0, "skipped": "not_configured"}
 
-    headers = {"Title": title, "Priority": priority or cfg.priority or "default"}
+    safe_title = (title or "").encode("ascii", "ignore").decode("ascii").strip() or "siLNt"
+    headers = {"Title": safe_title, "Priority": priority or cfg.priority or "default"}
     if tags:
         headers["Tags"] = ",".join(tags)
     # Auth: HTTP Basic (username/password) for self-hosted servers that require
@@ -398,6 +400,84 @@ async def send_ntfy_notification(
             except Exception as e:
                 errors.append(f"{topic}: {e}")
     return {"sent": sent, "topics": len(topics), "errors": errors}
+
+
+async def notify_service_health_change(service: str, is_up: bool, detail: str = "") -> None:
+    """
+    Fire an ntfy notification ONLY when a service's up/down state changes
+    (up→down or down→up), so a persistently-down service doesn't spam on every
+    health poll. Last-known state is stored as a small JSON blob in the config
+    table. Best-effort — never raises.
+    """
+    try:
+        from loguru import logger as _logger
+        _logger.warning(f"[health] {service} reported {'UP' if is_up else 'DOWN'} (detail={detail!r})")
+    except Exception:
+        pass
+    # Per-service row id, so BlindBit and Fulcrum checks (which run as separate,
+    # near-concurrent requests) never do a racy read-modify-write on ONE shared
+    # row and clobber each other's state — which silently swallows a service's
+    # up/down transitions (the cause of Fulcrum's recovery ntfy going missing).
+    state_id = f"{HEALTH_STATE_ID}:{service}"
+    try:
+        row = await db.fetchone(
+            "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
+            {"id": state_id},
+        )
+        prev = json.loads(row["json_data"]).get("up") if row else None
+    except Exception:
+        prev = None
+
+    if prev is not None and prev == is_up:
+        return                          # no change → no notification
+
+    # Persist the new state first (so a send failure doesn't cause repeat sends).
+    try:
+        payload = json.dumps({"up": is_up})
+        exists = await db.fetchone(
+            "SELECT id FROM silnt.blindbit_config WHERE id = :id", {"id": state_id}
+        )
+        if exists:
+            await db.execute(
+                "UPDATE silnt.blindbit_config SET json_data = :j WHERE id = :id",
+                {"j": payload, "id": state_id},
+            )
+        else:
+            await db.execute(
+                "INSERT INTO silnt.blindbit_config (id, json_data) VALUES (:id, :j)",
+                {"id": state_id, "j": payload},
+            )
+    except Exception:
+        pass
+
+    # First-ever observation (prev is None): stay quiet if UP (normal startup),
+    # but DO alert if it's already DOWN.
+    if prev is None and is_up:
+        return
+
+    if is_up:
+        await send_ntfy_notification(
+            title=f"{service} recovered",
+            message=f"{service} is reachable again." + (f" {detail}" if detail else ""),
+            tags=["white_check_mark"],
+            priority="default",
+        )
+    else:
+        await send_ntfy_notification(
+            title=f"{service} is DOWN",
+            message=f"{service} is not reachable." + (f" {detail}" if detail else ""),
+            tags=["rotating_light"],
+            priority="high",
+        )
+
+
+async def reset_service_health_state() -> None:
+    """Delete the stored service health-state row so up/down tracking restarts
+    clean (the next health check is treated as a first observation). Called when
+    ntfy config is saved, so stale state can't permanently suppress alerts."""
+    await db.execute(
+        "DELETE FROM silnt.blindbit_config WHERE id = :id", {"id": HEALTH_STATE_ID}
+    )
 
 async def count_silnt_wallets(user: str, network: Optional[str] = None) -> int:
     if network:
@@ -443,17 +523,23 @@ async def get_utxos_by_txid(txid: str) -> list:
     return [UTXORecord(**dict(r)) for r in rows]
 
 async def get_next_label_index(wallet_id: str) -> int:
-    row = await db.fetchone(
-        """SELECT COALESCE(MAX(label_index), 0) AS max_idx
-           FROM silnt.wallet_addresses
-           WHERE wallet_id = :wid""",
+    """
+    Return the LOWEST free label index >= 2 for this wallet (m=0 is the base
+    address, m=1 is the BIP-352 change label, both reserved). Using the lowest
+    free index — rather than MAX+1 — means deleting a labeled address (e.g. m=2)
+    frees that slot, so the next generated address reuses it instead of skipping
+    to m=4 and leaving a permanent hole (and drifting past the wallet's small
+    labeled-address range).
+    """
+    rows = await db.fetchall(
+        "SELECT label_index FROM silnt.wallet_addresses WHERE wallet_id = :wid",
         {"wid": wallet_id},
     )
-    next_idx = int((row["max_idx"] or 0)) + 1
-    # Skip the BIP-352 change label
-    if next_idx <= BIP352_CHANGE_LABEL_INDEX:
-        next_idx = BIP352_CHANGE_LABEL_INDEX + 1   # → 2
-    return next_idx
+    used = {int(r["label_index"]) for r in rows if r["label_index"] is not None}
+    idx = BIP352_CHANGE_LABEL_INDEX + 1   # start at 2
+    while idx in used:
+        idx += 1
+    return idx
 
 
 async def address_exists(wallet_id: str, sp_address: str) -> bool:
@@ -999,6 +1085,7 @@ async def upsert_user_prefs(
     )
 
 
+
 async def get_effective_dust_threshold(user_id: str) -> int:
     """
     Resolve the dust threshold for a user.
@@ -1399,25 +1486,36 @@ async def mark_utxos_confirmed_spent_by_tx(wallet_id: str, spending_txid: str) -
     )
     return getattr(result, "rowcount", 0) or 0
 
-async def cancel_pending_request_for_address(wallet_id: str, address_id: Optional[str]) -> int:
+async def cancel_pending_request_for_address(
+    wallet_id: str, address_id: Optional[str], sp_address: Optional[str] = None
+) -> int:
     """Cancel any PENDING BitMail request bound to a specific address (a label,
     or the wallet base when address_id is None). Used when the address/wallet is
     deleted so the request doesn't linger in the admin queue. Approved rows are
     left intact (they preserve the wallet's lifetime cap and keep the username
-    reserved)."""
-    if address_id is None:
+    reserved).
+
+    Matches on address_id AND, when provided, the address's sp_address. The
+    sp_address fallback is important because a labeled-address row can be
+    re-created by a scan with a NEW row id (BIP-352 addresses are deterministic
+    from the seed, but the wallet_addresses.id is random), which would otherwise
+    orphan a request whose stored address_id points at the old row id."""
+    ts = int(time.time())
+    if address_id is None and not sp_address:
         result = await db.execute(
             """UPDATE silnt.bip353_requests
                SET status = 'cancelled', processed_at = :ts
                WHERE wallet_id = :wid AND address_id IS NULL AND status = 'pending'""",
-            {"wid": wallet_id, "ts": int(time.time())},
+            {"wid": wallet_id, "ts": ts},
         )
     else:
         result = await db.execute(
             """UPDATE silnt.bip353_requests
                SET status = 'cancelled', processed_at = :ts
-               WHERE wallet_id = :wid AND address_id = :aid AND status = 'pending'""",
-            {"wid": wallet_id, "aid": address_id, "ts": int(time.time())},
+               WHERE wallet_id = :wid AND status = 'pending'
+                 AND ( (:aid IS NOT NULL AND address_id = :aid)
+                    OR (:sp  IS NOT NULL AND sp_address = :sp) )""",
+            {"wid": wallet_id, "aid": address_id, "sp": sp_address, "ts": ts},
         )
     return getattr(result, "rowcount", 0) or 0
 
@@ -2156,7 +2254,7 @@ async def delete_sp_contact(cid: str, user_id: str) -> None:
 
 async def list_silnt_user_ids() -> list[str]:
     """Distinct user_ids known to siLNt — anyone with a wallet, trusted device,
-    imported PayJoin descriptor, or BitMail request. Used by the admin Accountsf
+    imported PayJoin descriptor, or BitMail request. Used by the admin Accounts
     page to enumerate deletable users (scoped to siLNt users, not every LNbits
     account)."""
     ids: set[str] = set()
@@ -2179,66 +2277,171 @@ async def list_silnt_user_ids() -> list[str]:
     return sorted(ids)
 
 
-async def notify_service_health_change(service: str, is_up: bool, detail: str = "") -> None:
-    """
-    Fire an ntfy notification ONLY when a service's up/down state changes
-    (up→down or down→up), so a persistently-down service doesn't spam on every
-    health poll. State is stored per-service in the config table. Best-effort —
-    never raises.
-    """
-    
-    # Per-service row id, so BlindBit and Fulcrum checks (which run as separate,
-    # near-concurrent requests) never do a racy read-modify-write on ONE shared
-    # row and clobber each other's state — which silently swallows a service's
-    # up/down transitions (the cause of Fulcrum's recovery ntfy going missing).
-    state_id = f"{HEALTH_STATE_ID}:{service}"
-    try:
-        row = await db.fetchone(
-            "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
-            {"id": state_id},
-        )
-        prev = json.loads(row["json_data"]).get("up") if row else None
-    except Exception:
-        prev = None
+# ── Admin alerts ──────────────────────────────────────────────────────────────
+async def create_admin_alert(
+    kind: str, title: str, detail: str = "",
+    severity: str = "warning", meta: Optional[str] = None,
+) -> AdminAlert:
+    """Record an admin-visible alert (surfaced in the Admin console)."""
+    aid = urlsafe_short_hash()
+    now = int(time.time())
+    await db.execute(
+        """INSERT INTO silnt.admin_alerts
+             (id, kind, severity, title, detail, meta, acknowledged, created_at)
+           VALUES (:id, :kind, :sev, :title, :detail, :meta, FALSE, :ts)""",
+        {"id": aid, "kind": kind, "sev": severity, "title": title,
+         "detail": detail, "meta": meta, "ts": now},
+    )
+    return AdminAlert(id=aid, kind=kind, severity=severity, title=title,
+                      detail=detail, meta=meta, acknowledged=False, created_at=now)
 
-    if prev is not None and prev == is_up:
-        return                          # no change → no notification
 
-    # Persist the new state first (so a send failure doesn't cause repeat sends).
-    try:
-        payload = json.dumps({"up": is_up})
-        exists = await db.fetchone(
-            "SELECT id FROM silnt.blindbit_config WHERE id = :id", {"id": state_id}
-        )
-        if exists:
-            await db.execute(
-                "UPDATE silnt.blindbit_config SET json_data = :j WHERE id = :id",
-                {"j": payload, "id": state_id},
-            )
-        else:
-            await db.execute(
-                "INSERT INTO silnt.blindbit_config (id, json_data) VALUES (:id, :j)",
-                {"id": state_id, "j": payload},
-            )
-    except Exception:
-        pass
-
-    # First-ever observation (prev is None): stay quiet if UP (normal startup),
-    # but DO alert if it's already DOWN.
-    if prev is None and is_up:
-        return
-
-    if is_up:
-        await send_ntfy_notification(
-            title=f"{service} recovered",
-            message=f"{service} is reachable again." + (f" {detail}" if detail else ""),
-            tags=["white_check_mark"],
-            priority="default",
+async def list_admin_alerts(include_acknowledged: bool = False, limit: int = 100) -> list[AdminAlert]:
+    if include_acknowledged:
+        rows = await db.fetchall(
+            "SELECT * FROM silnt.admin_alerts ORDER BY created_at DESC LIMIT :lim",
+            {"lim": limit},
         )
     else:
-        await send_ntfy_notification(
-            title=f"{service} is DOWN",
-            message=f"{service} is not reachable." + (f" {detail}" if detail else ""),
-            tags=["rotating_light"],
-            priority="high",
+        rows = await db.fetchall(
+            """SELECT * FROM silnt.admin_alerts WHERE acknowledged = FALSE
+               ORDER BY created_at DESC LIMIT :lim""",
+            {"lim": limit},
         )
+    return [AdminAlert(**dict(r)) for r in rows]
+
+
+async def count_open_admin_alerts() -> int:
+    row = await db.fetchone(
+        "SELECT COUNT(*) AS c FROM silnt.admin_alerts WHERE acknowledged = FALSE"
+    )
+    return int(row["c"]) if row else 0
+
+
+async def acknowledge_admin_alert(alert_id: str) -> bool:
+    result = await db.execute(
+        "UPDATE silnt.admin_alerts SET acknowledged = TRUE WHERE id = :id",
+        {"id": alert_id},
+    )
+    return (getattr(result, "rowcount", 0) or 0) > 0
+
+
+async def get_issued_bitmail_sp_address(username: str) -> Optional[str]:
+    """Return the SP address siLNt recorded for an APPROVED BitMail issued on our
+    own domain, matched by final_username. None if we never issued that name.
+    Used to detect tampering: compare against what DNS resolves to at send time."""
+    row = await db.fetchone(
+        """SELECT sp_address FROM silnt.bip353_requests
+           WHERE LOWER(final_username) = LOWER(:uname) AND status = 'approved'
+           ORDER BY processed_at DESC NULLS LAST LIMIT 1""",
+        {"uname": username},
+    )
+    return row["sp_address"] if row else None
+
+
+async def list_approved_bitmails() -> list[dict]:
+    """Every APPROVED BitMail siLNt issued: its final_username, the SP address we
+    recorded, and the owning user_id/wallet_id. Used by the tamper sweep to
+    resolve each via DNS and compare against the recorded SP."""
+    rows = await db.fetchall(
+        """SELECT final_username, sp_address, user_id, wallet_id
+           FROM silnt.bip353_requests
+           WHERE status = 'approved' AND final_username IS NOT NULL""",
+    )
+    return [dict(r) for r in rows]
+
+
+async def open_alert_exists_for(kind: str, key: str) -> bool:
+    """True if there's already an UNacknowledged alert of this kind whose meta
+    references `key` (e.g. a bitmail). Prevents the sweep from re-alerting the
+    same active tamper on every run — a new alert only fires once the admin
+    acknowledges the previous one (or the tamper clears)."""
+    rows = await db.fetchall(
+        """SELECT meta FROM silnt.admin_alerts
+           WHERE kind = :kind AND acknowledged = FALSE""",
+        {"kind": kind},
+    )
+    for r in rows:
+        m = r["meta"] or ""
+        if key and key in m:
+            return True
+    return False
+
+async def open_tamper_notified(kind: str, key: str) -> bool:
+    """True if there's an open (unacknowledged) alert of this kind referencing
+    `key` that we've ALREADY sent an ntfy for (meta contains '"notified": true')."""
+    rows = await db.fetchall(
+        """SELECT meta FROM silnt.admin_alerts
+           WHERE kind = :kind AND acknowledged = FALSE""",
+        {"kind": kind},
+    )
+    for r in rows:
+        m = r["meta"] or ""
+        if key and key in m and '"notified": true' in m:
+            return True
+    return False
+
+
+async def mark_tamper_notified(kind: str, key: str) -> None:
+    """Mark open alert(s) of this kind referencing `key` as notified, so the
+    sweep doesn't re-send the ntfy on subsequent runs while the tamper persists."""
+    rows = await db.fetchall(
+        """SELECT id, meta FROM silnt.admin_alerts
+           WHERE kind = :kind AND acknowledged = FALSE""",
+        {"kind": kind},
+    )
+    for r in rows:
+        m = r["meta"] or ""
+        if not (key and key in m):
+            continue
+        try:
+            d = json.loads(m) if m else {}
+        except Exception:
+            d = {}
+        d["notified"] = True
+        await db.execute(
+            "UPDATE silnt.admin_alerts SET meta = :meta WHERE id = :id",
+            {"meta": json.dumps(d), "id": r["id"]},
+        )
+
+async def resolve_open_alerts_for(kind: str, key: str) -> int:
+    """Auto-acknowledge open alert(s) of this kind referencing `key`. Used by the
+    tamper sweep when a previously-mismatched BitMail now resolves correctly (the
+    DNS record was fixed), so the stale alert clears itself. Returns count cleared."""
+    rows = await db.fetchall(
+        """SELECT id, meta FROM silnt.admin_alerts
+           WHERE kind = :kind AND acknowledged = FALSE""",
+        {"kind": kind},
+    )
+    cleared = 0
+    for r in rows:
+        m = r["meta"] or ""
+        if not (key and key in m):
+            continue
+        await db.execute(
+            "UPDATE silnt.admin_alerts SET acknowledged = TRUE WHERE id = :id",
+            {"id": r["id"]},
+        )
+        cleared += 1
+    return cleared
+
+async def tamper_signature_alerted(bitmail: str, resolved_sp: str) -> bool:
+    """True if we've ALREADY created an alert for this exact tamper — same
+    bitmail redirected to the same rogue SP address — regardless of whether the
+    admin has acknowledged it. This is the correct dedup for an ONGOING tamper:
+    dismissing the alert must NOT cause the next sweep to re-insert/re-notify.
+    A DIFFERENT rogue address (or a recurrence after the record was fixed) has a
+    different signature, so it still alerts."""
+    rows = await db.fetchall(
+        "SELECT meta FROM silnt.admin_alerts WHERE kind = 'bitmail_tamper'",
+    )
+    for r in rows:
+        m = r["meta"] or ""
+        try:
+            d = json.loads(m) if m else {}
+        except Exception:
+            continue
+        if (d.get("bitmail") == bitmail
+                and (d.get("resolved_sp") or "").lower() == (resolved_sp or "").lower()):
+            return True
+    return False
