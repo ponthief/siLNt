@@ -921,7 +921,8 @@ async def get_wallet_sends(wallet_id: str) -> list[dict]:
             spent_in_txid              AS txid,
             MIN(spent_at)              AS spent_at,
             SUM(amount)                AS input_sum,
-            COUNT(*)                   AS input_count
+            COUNT(*)                   AS input_count,
+            COUNT(*) FILTER (WHERE utxo_state = 'unconfirmed_spent') AS pending_inputs
         FROM silnt.utxos
         WHERE wallet_id = :wid AND spent_in_txid IS NOT NULL
         GROUP BY spent_in_txid
@@ -934,6 +935,7 @@ async def get_wallet_sends(wallet_id: str) -> list[dict]:
             "spent_at":    int(r["spent_at"] or 0),
             "input_sum":   int(r["input_sum"] or 0),
             "input_count": int(r["input_count"] or 0),
+            "pending_inputs": int(r["pending_inputs"] or 0)
         }
         for r in rows
     ]
@@ -1509,13 +1511,24 @@ async def cancel_pending_request_for_address(
             {"wid": wallet_id, "ts": ts},
         )
     else:
+        # Build the OR-match in Python so each bind param only appears in a typed
+        # comparison (col = :param). Using ':param IS NOT NULL' in SQL leaves the
+        # param's type indeterminate for asyncpg → IndeterminateDatatypeError.
+        clauses = []
+        params = {"wid": wallet_id, "ts": ts}
+        if address_id is not None:
+            clauses.append("address_id = :aid")
+            params["aid"] = address_id
+        if sp_address:
+            clauses.append("sp_address = :sp")
+            params["sp"] = sp_address
+        where_match = " OR ".join(clauses)
         result = await db.execute(
-            """UPDATE silnt.bip353_requests
-               SET status = 'cancelled', processed_at = :ts
-               WHERE wallet_id = :wid AND status = 'pending'
-                 AND ( (:aid IS NOT NULL AND address_id = :aid)
-                    OR (:sp  IS NOT NULL AND sp_address = :sp) )""",
-            {"wid": wallet_id, "aid": address_id, "sp": sp_address, "ts": ts},
+            f"""UPDATE silnt.bip353_requests
+                SET status = 'cancelled', processed_at = :ts
+                WHERE wallet_id = :wid AND status = 'pending'
+                  AND ({where_match})""",
+            params,
         )
     return getattr(result, "rowcount", 0) or 0
 

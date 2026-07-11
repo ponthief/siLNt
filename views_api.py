@@ -35,6 +35,7 @@ from .helpers.email_verification import (
     start_registration, complete_registration,
 )
 from mnemonic import Mnemonic
+from .helpers.dust_check import evaluate_dust_for_wallet
 from .helpers.scan_rate_limiter import check_scan_allowed, mark_scan_finished
 from .helpers.forgot_password import request_password_reset
 from .helpers.transactions import get_wallet_transaction_detail, list_wallet_transactions
@@ -865,14 +866,20 @@ async def api_build_transaction(
         ]
         if rejected:
             rejected_str = ", ".join(f"{t[:12]}…:{v}" for t, v in rejected)
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST,
-                detail=(
+            scanning = bool(get_scan_progress(data.wallet_id).get("active"))
+            if scanning:
+                detail = (
+                    f"Cannot spend these UTXOs ({rejected_str}) because a scan is "
+                    f"in progress and their state just changed. Refresh your UTXOs "
+                    f"and reselect, then try again."
+                )
+            else:
+                detail = (
                     f"Cannot spend these UTXOs ({rejected_str}). "
                     f"They are either frozen, already spent, or don't belong "
                     f"to this wallet. Unfreeze them or remove from selection."
-                ),
-            )
+                )
+            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=detail)
         _orig_recipient = data.recipient.strip()
         if "@" in data.recipient:
             user, domain = data.recipient.strip().split("@")
@@ -1599,13 +1606,26 @@ async def api_update_user_prefs(
                 detail="dust_threshold_sats too large (max 10000).",
             )
 
-    await upsert_user_prefs(user_id, dts)    
+    await upsert_user_prefs(user_id, dts)
+    # Re-evaluate existing UTXOs against the new threshold so the change applies
+    # to what's already in the wallet — not just to UTXOs found on the next scan.
+    reevaluated = 0
+    try:
+        for w in await get_silnt_wallets(user_id):
+            try:
+                await evaluate_dust_for_wallet(w.id)
+                reevaluated = 1
+            except Exception as e:
+                logger.warning(f"dust re-eval failed for wallet {w.id}: {e}")
+    except Exception as e:
+        logger.warning(f"dust re-eval skipped after prefs update: {e}")    
     blindbit = await get_blindbit_config()
     return {
         "user_id":                    user_id,
         "dust_threshold_sats":        dts,
         "admin_default_dust":         int(blindbit.dust_threshold_sats or 5000),
         "effective_dust_threshold":   await get_effective_dust_threshold(user_id),
+        "wallets_reevaluated":        reevaluated
     }
 
 @silnt_api_router.post("/api/v1/bip353/request")
@@ -1626,7 +1646,11 @@ async def api_create_bip353_request(
             status_code=HTTPStatus.BAD_REQUEST,
             detail="This username is reserved. Choose another.",
         )
-
+    if await is_username_taken(username):
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail="That BitMail username is already taken. Choose another.",
+        )   
     # Verify wallet ownership FIRST so all checks below are wallet-scoped
     wallet = await get_silnt_wallet(data.wallet_id)
     if not wallet or wallet.user != user_id:
@@ -1685,10 +1709,16 @@ async def api_create_bip353_request(
             address_id         = address_id,
         )
     # Notify admins there's a new BitMail request awaiting review (best-effort).
-    try:
+    try:        
+        acct = await get_account(user_id)
+        requester = (getattr(acct, "username", None) or "").strip() if acct else ""
+        requester_label = requester or user_id
         await send_ntfy_notification(
             title="New BitMail request",
-            message=f"@{username} requested a BitMail address and is awaiting approval.",
+             message=(
+                f"User '{requester_label}' requested the BitMail username "
+                f"'{username}' and is awaiting approval."
+            ),
             tags=["email"],
         )
     except Exception as e:

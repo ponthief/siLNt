@@ -136,12 +136,6 @@ def add_private_keys(sk1: bytes, sk2: bytes) -> bytes:
 
 def create_label(scan_key: bytes, m: int) -> Label:
     tweak = _tagged_hash("BIP0352/Label", scan_key + _ser_u32(m))
-    # """Old broken derivation — little-endian ser32, for recovery only."""
-    # tag = b"BIP0352/Label"
-    # tag_hash = hashlib.sha256(tag).digest()
-    # tweak = hashlib.sha256(
-    #     tag_hash + tag_hash + scan_key + m.to_bytes(4, 'little')
-    # ).digest()
     return Label(
         pub_key=PublicKey.from_secret(tweak).format(compressed=True), tweak=tweak, m=m
     )
@@ -166,18 +160,6 @@ def match_labels(
         if diff[1:] == label.pub_key[1:]:
             return label
     return None
-
-# def match_labels(
-#     tx_output_33: bytes, pk_33: bytes, labels: list[Label]
-# ) -> Optional[Label]:
-#     try:
-#         diff = add_public_keys(tx_output_33, negate_public_key(pk_33))
-#     except Exception:
-#         return None
-#     for label in labels:
-#         if diff[1:] == label.pub_key[1:]:
-#             return label
-#     return None
 
 
 def receiver_scan_transaction_with_shared_secret(
@@ -449,14 +431,21 @@ async def scan_block(
         utxos = await client.get_utxos(height)
         if not utxos:
             return []
-        owned = sync_block(tweaks, utxos, scan_secret_bytes, spend_pub_bytes, labels)
+        # Offload the synchronous EC matching to a worker thread so it doesn't
+        # block the event loop — keeps the API/UI responsive during a scan.
+        loop = asyncio.get_event_loop()
+        owned = await loop.run_in_executor(
+            None, sync_block, tweaks, utxos, scan_secret_bytes, spend_pub_bytes, labels
+        )
         for o in owned:
             if not o.timestamp:
                 o.timestamp = await get_block_ts(o.txid.hex())
         return owned
     compute_data = await client.get_compute_index(height)
     if compute_data:
-        matches = sync_block_from_compute_index(
+        loop = asyncio.get_event_loop()
+        matches = await loop.run_in_executor(
+            None, sync_block_from_compute_index,
             compute_data["index"], scan_secret_bytes, spend_pub_bytes, labels
         )
         if matches:
@@ -481,7 +470,10 @@ async def scan_block(
     utxos = await client.get_utxos(height)
     if not utxos:
         return []
-    return sync_block(tweaks, utxos, scan_secret_bytes, spend_pub_bytes, labels)
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, sync_block, tweaks, utxos, scan_secret_bytes, spend_pub_bytes, labels
+    )
 
 
 async def mark_spent_utxos_batch(heights, client, wallet_id, owned_utxos_lookup):
@@ -570,48 +562,6 @@ async def mark_spent_utxos_batch(heights, client, wallet_id, owned_utxos_lookup)
     # asyncio.gather over heights as before.    
     await asyncio.gather(*[check_height(h) for h in heights])
 
-# async def mark_spent_utxos_batch(heights, client, wallet_id, owned_utxos_lookup):
-#     if not owned_utxos_lookup:
-#         return
-
-#     async def check_height(height: int):
-#         try:
-#             spent_data = await client.get_spent_outputs(height)
-#             if not spent_data:
-#                 return
-#             spent_set = set(spent_data.get("index", []))
-#             if not spent_set:
-#                 return
-
-#             # spent-outputs index contains first 8 bytes of x-only pubkey
-#             # of each spent output — match against our owned UTXOs pub_key
-#             rows = await db.fetchall(
-#                 """SELECT txid, vout, pub_key FROM silnt.utxos
-#                    WHERE wallet_id = :wallet_id
-#                    AND utxo_state IN ('unspent', 'unconfirmed_spent')""",
-#                 {"wallet_id": wallet_id},
-#             )
-#             for row in rows:
-#                 short_pub = row["pub_key"][:16]  # first 8 bytes = 16 hex chars
-#                 if short_pub in spent_set:
-#                     await db.execute(
-#                         """UPDATE silnt.utxos SET utxo_state = 'spent'
-#                            WHERE txid = :txid AND vout = :vout
-#                            AND wallet_id = :wallet_id""",
-#                         {
-#                             "txid": row["txid"],
-#                             "vout": row["vout"],
-#                             "wallet_id": wallet_id,
-#                         },
-#                     )
-#                     logger.info(
-#                         f"Marked {row['txid']}:{row['vout']} spent at block {height}"
-#                     )
-#         except Exception as e:
-#             logger.warning(f"mark_spent_utxos error at block {height}: {e}")
-
-#     await asyncio.gather(*[check_height(h) for h in heights])
-
 
 async def set_last_scan_height(wallet_id: str, height: int) -> None:
     await db.execute(
@@ -676,7 +626,9 @@ async def scan_wallet(
     stopped = False
     clear_scan_stop(wallet_id)
     set_scan_progress(wallet_id, 0, total_blocks, 0)
-    BATCH_SIZE = 10
+    # Smaller batches keep the span of work between event-loop yields short, so
+    # navigation/API calls stay responsive during a scan.
+    BATCH_SIZE = 5
 
     for batch_start in range(0, total_blocks, BATCH_SIZE):
         if should_stop(wallet_id):
@@ -756,6 +708,10 @@ async def scan_wallet(
 
         set_scan_progress(wallet_id, blocks_scanned, total_blocks, total_found)
         await set_last_scan_height(wallet_id, last_scanned_height)
+
+        # Yield to the event loop between batches so other requests (wallet
+        # loads, navigation) get serviced promptly during a long scan.
+        await asyncio.sleep(0)
 
     await set_last_scan_height(wallet_id, last_scanned_height)
     set_scan_progress(

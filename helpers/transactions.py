@@ -32,7 +32,8 @@ async def _fetch_tx_from_mempool(txid: str, mempool_base: str) -> dict | None:
             if r.status_code != 200:
                 return None
             data = r.json()
-            _TX_CACHE[key] = (now, data)
+            if bool(data.get("status", {}).get("confirmed")):
+                _TX_CACHE[key] = (now, data)
             return data
     except Exception as e:
         logger.warning(f"Tx fetch failed for {txid}: {e}")
@@ -75,6 +76,7 @@ async def list_wallet_transactions(
             labels       = rcv["labels"] if rcv else []
             input_count  = snd["input_count"]
             output_count = rcv["output_count"] if rcv else 0
+            confirmed    = snd.get("pending_inputs", 0) == 0
         else:
             # No inputs spent → pure receive.
             input_sum    = 0
@@ -85,6 +87,7 @@ async def list_wallet_transactions(
             labels       = rcv["labels"]
             input_count  = 0
             output_count = rcv["output_count"]
+            confirmed    = True
 
         rows.append({
             "kind":         kind,
