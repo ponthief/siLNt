@@ -173,6 +173,8 @@ class TrustedDevice(BaseModel):
     confirmed_at:  int
     last_seen_at:  int
 
+class DeviceVerifyCodeRequest(BaseModel):
+    code: str
 
 class DeviceCheckResponse(BaseModel):
     status:        str             # 'trusted' | 'pending'
@@ -184,6 +186,7 @@ class DeviceConfirmResponse(BaseModel):
     confirmed:    bool
     device_count: int
     cap:          int
+    device_id:    str | None = None
 
 class DeviceListResponse(BaseModel):
     devices:        List[TrustedDevice]
@@ -408,7 +411,7 @@ class PayjoinContact(BaseModel):
 
 
 class CreateContactData(BaseModel):
-    email: str    # exact email of the user to connect with (resolved neutrally)
+    username: str
 
 
 class ContactLabelData(BaseModel):

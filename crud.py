@@ -2,6 +2,8 @@ import json
 import time
 import secrets
 import os
+import hashlib
+import hmac
 from typing import Optional, Tuple, List
 from lnbits.db import Database
 from lnbits.helpers import urlsafe_short_hash
@@ -33,8 +35,6 @@ db = Database("ext_silnt")
 BLINDBIT_CONFIG_ID = "blindbit"
 CF_CONFIG_ID = "cloudflare_config"
 BIP352_CHANGE_LABEL_INDEX = 1
-HEALTH_STATE_ID = "service_health_state"
-NTFY_CONFIG_ID = "ntfy_config"
 
 async def create_silnt_wallet(wallet: WalletAccount) -> WalletAccount:
     await db.insert("silnt.wallets", wallet)
@@ -326,6 +326,9 @@ async def update_cloudflare_config(config: CloudflareConfig) -> CloudflareConfig
     return config
 
 
+NTFY_CONFIG_ID = "ntfy_config"
+
+
 async def get_ntfy_config() -> NtfyConfig:
     row = await db.fetchone(
         "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
@@ -366,11 +369,14 @@ async def send_ntfy_notification(
     cfg = await get_ntfy_config()
     if not cfg.enabled:
         return {"sent": 0, "skipped": "disabled"}
-    server = (cfg.server_url or "https://ntfy.bitaurus.net").rstrip("/")
+    server = (cfg.server_url or "https://ntfy.sh").rstrip("/")
     topics = [t.strip() for t in (cfg.topics or []) if t and t.strip()]
     if not server or not topics:
         return {"sent": 0, "skipped": "not_configured"}
 
+    # The ntfy Title is sent as an HTTP header, which must be ASCII. A non-ASCII
+    # char (e.g. an emoji) would make httpx raise and drop the notification, so
+    # coerce it to ASCII here (emoji belong in Tags/'body, not the title header).
     safe_title = (title or "").encode("ascii", "ignore").decode("ascii").strip() or "siLNt"
     headers = {"Title": safe_title, "Priority": priority or cfg.priority or "default"}
     if tags:
@@ -400,6 +406,9 @@ async def send_ntfy_notification(
             except Exception as e:
                 errors.append(f"{topic}: {e}")
     return {"sent": sent, "topics": len(topics), "errors": errors}
+
+
+HEALTH_STATE_ID = "service_health_state"
 
 
 async def notify_service_health_change(service: str, is_up: bool, detail: str = "") -> None:
@@ -921,8 +930,7 @@ async def get_wallet_sends(wallet_id: str) -> list[dict]:
             spent_in_txid              AS txid,
             MIN(spent_at)              AS spent_at,
             SUM(amount)                AS input_sum,
-            COUNT(*)                   AS input_count,
-            COUNT(*) FILTER (WHERE utxo_state = 'unconfirmed_spent') AS pending_inputs
+            COUNT(*)                   AS input_count
         FROM silnt.utxos
         WHERE wallet_id = :wid AND spent_in_txid IS NOT NULL
         GROUP BY spent_in_txid
@@ -935,7 +943,6 @@ async def get_wallet_sends(wallet_id: str) -> list[dict]:
             "spent_at":    int(r["spent_at"] or 0),
             "input_sum":   int(r["input_sum"] or 0),
             "input_count": int(r["input_count"] or 0),
-            "pending_inputs": int(r["pending_inputs"] or 0)
         }
         for r in rows
     ]
@@ -2380,6 +2387,146 @@ async def open_alert_exists_for(kind: str, key: str) -> bool:
             return True
     return False
 
+
+async def tamper_signature_alerted(bitmail: str, resolved_sp: str) -> bool:
+    """True if we've ALREADY created an alert for this exact tamper — same
+    bitmail redirected to the same rogue SP address — regardless of whether the
+    admin has acknowledged it. This is the correct dedup for an ONGOING tamper:
+    dismissing the alert must NOT cause the next sweep to re-insert/re-notify.
+    A DIFFERENT rogue address (or a recurrence after the record was fixed) has a
+    different signature, so it still alerts."""
+    rows = await db.fetchall(
+        "SELECT meta FROM silnt.admin_alerts WHERE kind = 'bitmail_tamper'",
+    )
+    for r in rows:
+        m = r["meta"] or ""
+        try:
+            d = json.loads(m) if m else {}
+        except Exception:
+            continue
+        if (d.get("bitmail") == bitmail
+                and (d.get("resolved_sp") or "").lower() == (resolved_sp or "").lower()):
+            return True
+    return False
+
+
+async def create_device_code(
+    user_id: str, code: str, device_id: str,
+    user_agent: Optional[str], ip: Optional[str], ttl_secs: int = 600,
+) -> None:
+    """Store a hashed device-confirmation code (one active per user; latest
+    replaces any previous). The plaintext code is emailed, never stored."""
+    import time as _t
+    code_hash = hashlib.sha256(code.encode()).hexdigest()
+    now = int(_t.time())
+    await db.execute(
+        """INSERT INTO silnt.device_codes
+              (user_id, code_hash, device_id, user_agent, ip, expires_at, attempts)
+           VALUES (:uid, :ch, :did, :ua, :ip, :exp, 0)
+           ON CONFLICT (user_id) DO UPDATE SET
+              code_hash = :ch, device_id = :did, user_agent = :ua,
+              ip = :ip, expires_at = :exp, attempts = 0""",
+        {"uid": user_id, "ch": code_hash, "did": device_id, "ua": user_agent,
+         "ip": ip, "exp": now + ttl_secs},
+    )
+
+
+async def verify_device_code(user_id: str, code: str, max_attempts: int = 5) -> Optional[dict]:
+    """
+    Verify a device-confirmation code for the user. Returns the pending device
+    info dict {device_id, user_agent, ip} on success (and consumes the code), or
+    None on failure. Enforces expiry and an attempt cap: after `max_attempts`
+    wrong tries the code is invalidated (deleted), so a 6-digit code can't be
+    brute-forced.
+    """
+    import time as _t
+    row = await db.fetchone(
+        "SELECT code_hash, device_id, user_agent, ip, expires_at, attempts "
+        "FROM silnt.device_codes WHERE user_id = :uid",
+        {"uid": user_id},
+    )
+    if not row:
+        return None
+    now = int(_t.time())
+    if now > int(row["expires_at"]):
+        await db.execute("DELETE FROM silnt.device_codes WHERE user_id = :uid", {"uid": user_id})
+        return None
+    if int(row["attempts"]) >= max_attempts:
+        await db.execute("DELETE FROM silnt.device_codes WHERE user_id = :uid", {"uid": user_id})
+        return None
+
+    supplied = hashlib.sha256((code or "").encode()).hexdigest()
+    if not hmac.compare_digest(supplied, row["code_hash"]):
+        await db.execute(
+            "UPDATE silnt.device_codes SET attempts = attempts + 1 WHERE user_id = :uid",
+            {"uid": user_id},
+        )
+        return None
+
+    # Success — consume the code (single-use).
+    await db.execute("DELETE FROM silnt.device_codes WHERE user_id = :uid", {"uid": user_id})
+    return {
+        "device_id":  row["device_id"],
+        "user_agent": row["user_agent"],
+        "ip":         row["ip"],
+    }
+
+
+async def mark_self_revoke(user_id: str) -> None:
+    """Record that the user just revoked their own current device. The login
+    alert suppresses false positives within a short grace window after this —
+    otherwise the user's own immediate re-login (right after self-revoking) would
+    trigger a 'new device sign-in' email, which is confusing and not a break-in."""
+    import time as _t
+    now = int(_t.time())
+    await db.execute(
+        """INSERT INTO silnt.login_alerts (user_id, sig, last_alert_at)
+           VALUES (:uid, '__revoke_grace__', :now)
+           ON CONFLICT (user_id, sig)
+           DO UPDATE SET last_alert_at = :now""",
+        {"uid": user_id, "now": now},
+    )
+
+
+async def in_self_revoke_grace(user_id: str, grace_secs: int = 300) -> bool:
+    """True if the user self-revoked within the last `grace_secs` (default 5 min)."""
+    import time as _t
+    row = await db.fetchone(
+        "SELECT last_alert_at FROM silnt.login_alerts WHERE user_id = :uid AND sig = '__revoke_grace__'",
+        {"uid": user_id},
+    )
+    if not row:
+        return False
+    return (int(_t.time()) - int(row["last_alert_at"])) < grace_secs
+
+
+async def should_send_login_alert(user_id: str, sig: str, cooldown_secs: int = 43200) -> bool:
+    """
+    Return True if we should send an unauthorized-device login alert for this
+    (user, device signature), and record that we're doing so. Deduplicated: once
+    an alert is sent for a signature, we won't send another for the same
+    signature until `cooldown_secs` has elapsed (default 12h). Prevents spamming
+    the user when an untrusted device repeatedly hits device-check (refreshes,
+    VPN flaps, dropped cookies).
+    """
+    import time as _t
+    now = int(_t.time())
+    row = await db.fetchone(
+        "SELECT last_alert_at FROM silnt.login_alerts WHERE user_id = :uid AND sig = :sig",
+        {"uid": user_id, "sig": sig},
+    )
+    if row and (now - int(row["last_alert_at"])) < cooldown_secs:
+        return False
+    await db.execute(
+        """INSERT INTO silnt.login_alerts (user_id, sig, last_alert_at)
+           VALUES (:uid, :sig, :now)
+           ON CONFLICT (user_id, sig)
+           DO UPDATE SET last_alert_at = :now""",
+        {"uid": user_id, "sig": sig, "now": now},
+    )
+    return True
+
+
 async def open_tamper_notified(kind: str, key: str) -> bool:
     """True if there's an open (unacknowledged) alert of this kind referencing
     `key` that we've ALREADY sent an ntfy for (meta contains '"notified": true')."""
@@ -2417,6 +2564,7 @@ async def mark_tamper_notified(kind: str, key: str) -> None:
             {"meta": json.dumps(d), "id": r["id"]},
         )
 
+
 async def resolve_open_alerts_for(kind: str, key: str) -> int:
     """Auto-acknowledge open alert(s) of this kind referencing `key`. Used by the
     tamper sweep when a previously-mismatched BitMail now resolves correctly (the
@@ -2437,24 +2585,3 @@ async def resolve_open_alerts_for(kind: str, key: str) -> int:
         )
         cleared += 1
     return cleared
-
-async def tamper_signature_alerted(bitmail: str, resolved_sp: str) -> bool:
-    """True if we've ALREADY created an alert for this exact tamper — same
-    bitmail redirected to the same rogue SP address — regardless of whether the
-    admin has acknowledged it. This is the correct dedup for an ONGOING tamper:
-    dismissing the alert must NOT cause the next sweep to re-insert/re-notify.
-    A DIFFERENT rogue address (or a recurrence after the record was fixed) has a
-    different signature, so it still alerts."""
-    rows = await db.fetchall(
-        "SELECT meta FROM silnt.admin_alerts WHERE kind = 'bitmail_tamper'",
-    )
-    for r in rows:
-        m = r["meta"] or ""
-        try:
-            d = json.loads(m) if m else {}
-        except Exception:
-            continue
-        if (d.get("bitmail") == bitmail
-                and (d.get("resolved_sp") or "").lower() == (resolved_sp or "").lower()):
-            return True
-    return False

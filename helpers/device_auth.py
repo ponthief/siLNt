@@ -20,6 +20,7 @@ DEVICE_COOKIE_PREFIX = "silnt_device_id_"
 DEVICE_COOKIE_MAX_AGE        = 365 * 24 * 3600   # 1 year
 DEVICE_CONFIRM_TOKEN_TTL     = 3600              # 1 hour
 DEVICE_COOKIE_DOMAIN = os.environ.get("SILNT_DEVICE_COOKIE_DOMAIN", "").strip() or None
+DEVICE_HEADER = "X-Silnt-Device"
 
 def _is_thrilla_request(request: Request) -> bool:
     # Thrilla's fetch wrapper sends this header on every call. The LNbits-native
@@ -36,6 +37,14 @@ def cookie_name_for_user(user_id: str) -> str:
     their own trust cookie."""
     return DEVICE_COOKIE_PREFIX + _safe_user_id_for_cookie(user_id)
 
+def read_device_id(request: Request, user_id: str) -> str | None:
+    """Device id from the per-user cookie (web) OR the X-Silnt-Device header
+    (native app, where cross-site cookies aren't reliably stored)."""
+    cookie_value = request.cookies.get(cookie_name_for_user(user_id))
+    if cookie_value:
+        return cookie_value
+    hdr = request.headers.get(DEVICE_HEADER)
+    return hdr.strip() if hdr else None
 
 def set_device_cookie(response: Response, user_id: str, device_id: str) -> None:
     """Set the per-user HttpOnly device_id cookie."""
@@ -45,7 +54,7 @@ def set_device_cookie(response: Response, user_id: str, device_id: str) -> None:
         max_age  = DEVICE_COOKIE_MAX_AGE,
         httponly = True,
         secure   = True,
-        samesite = "none",
+        samesite = "lax",
         path     = "/",
         domain= DEVICE_COOKIE_DOMAIN
     )
@@ -114,8 +123,8 @@ async def require_trusted_device(
     if not _is_thrilla_request(request):
         return key_info
     user_id = key_info.wallet.user
-    cookie_value = request.cookies.get(cookie_name_for_user(user_id))
-
+    # cookie_value = request.cookies.get(cookie_name_for_user(user_id))
+    cookie_value = read_device_id(request, user_id)
     if not cookie_value:
         raise HTTPException(
             status_code=HTTPStatus.FORBIDDEN,
@@ -144,8 +153,8 @@ async def require_trusted_device_admin(
     if not _is_thrilla_request(request):
         return key_info
     user_id = key_info.wallet.user
-    cookie_value = request.cookies.get(cookie_name_for_user(user_id))
-
+    # cookie_value = request.cookies.get(cookie_name_for_user(user_id))
+    cookie_value = read_device_id(request, user_id)
     if not cookie_value:
         raise HTTPException(
             status_code=HTTPStatus.FORBIDDEN,

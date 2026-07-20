@@ -461,3 +461,38 @@ async def m020_admin_alerts(db):
         "CREATE INDEX IF NOT EXISTS idx_admin_alerts_open "
         "ON silnt.admin_alerts (acknowledged, created_at)"
     )
+
+async def m021_login_alerts(db):
+    """
+    Dedup store for new-device sign-in alert emails. When an untrusted device
+    accesses an account, we email the user once per (user, device signature)
+    within a cooldown window — this table records the last time we alerted for a
+    given signature so refreshes / VPN flaps / cookie drops don't spam the user.
+    """
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS silnt.login_alerts (
+            user_id       TEXT NOT NULL,
+            sig           TEXT NOT NULL,       -- hash of UA + IP (coarse device id)
+            last_alert_at INTEGER NOT NULL,
+            PRIMARY KEY (user_id, sig)
+        );
+        """
+    )
+
+async def m022_device_codes(db):
+    """Short numeric codes for new-device confirmation (replaces email-link flow)."""
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS silnt.device_codes (
+            user_id     TEXT NOT NULL,
+            code_hash   TEXT NOT NULL,
+            device_id   TEXT NOT NULL,
+            user_agent  TEXT,
+            ip          TEXT,
+            expires_at  INTEGER NOT NULL,
+            attempts    INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id)
+        );
+        """
+    )

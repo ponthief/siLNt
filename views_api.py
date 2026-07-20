@@ -45,9 +45,9 @@ from lnbits.core.services.notifications import send_email_notification
 from .helpers.device_auth import (
     require_trusted_device,
     require_trusted_device_admin,    
-    make_device_confirm_token,
-    verify_device_confirm_token,
     set_device_cookie,
+    clear_device_cookie,
+    read_device_id,
     get_client_ip,
     cookie_name_for_user,    
     MAX_TRUSTED_DEVICES_PER_USER
@@ -135,7 +135,7 @@ from .crud import (
     delete_terminal_bip353_requests,
     create_payjoin_descriptor, get_payjoin_descriptor, list_payjoin_descriptors,
     delete_payjoin_descriptor, derive_descriptor_address,
-    create_payjoin_request, get_payjoin_request, update_payjoin_request,
+    get_payjoin_request, update_payjoin_request,
     list_payjoin_requests_for_receiver, list_payjoin_requests_for_sender,
     get_reserved_outpoints,
     create_payjoin_invoice, list_payjoin_invoices_for_payer,
@@ -169,7 +169,12 @@ from .crud import (
     open_tamper_notified,
     mark_tamper_notified,
     resolve_open_alerts_for,
-    tamper_signature_alerted
+    tamper_signature_alerted,
+    should_send_login_alert,
+    create_device_code,
+    verify_device_code,
+    mark_self_revoke,
+    in_self_revoke_grace,
 )
 
 from .models import (
@@ -186,6 +191,7 @@ from .models import (
     SetupBip353Request,
     RecoverKeysRequest,
     ForgotPasswordRequest,
+    DeviceVerifyCodeRequest,
     UpdateUtxoLabel,
     UpdateUtxoFrozenRequest,
     UpdateAddressLabelRequest,
@@ -1370,8 +1376,15 @@ async def api_device_check(
     key_info: WalletTypeInfo = Depends(require_invoice_key),
 ):
     user_id = key_info.wallet.user
-    cookie  = request.cookies.get(cookie_name_for_user(user_id))   # ← per-user
+    # cookie  = request.cookies.get(cookie_name_for_user(user_id))
+    cookie  = read_device_id(request, user_id)
     ua      = request.headers.get("user-agent", "")[:512]
+    # Brave (and some others) masquerade as Chrome in the UA. The client sends a
+    # reliable brand hint when it can detect one; prefix it so the UA-based label
+    # reflects the real browser. Whitelist known values to avoid header injection.
+    brand   = (request.headers.get("x-client-brand", "") or "").strip()[:16]
+    if brand in ("Brave",) and "Brave" not in ua:
+        ua = f"{brand} {ua}"[:512]
     ip      = get_client_ip(request)
 
     if cookie:
@@ -1383,7 +1396,39 @@ async def api_device_check(
                 status       = "trusted",
                 device_count = await count_trusted_devices(user_id),
                 cap          = MAX_TRUSTED_DEVICES_PER_USER,
-            )
+            )    
+    return DeviceCheckResponse(
+        status       = "untrusted",
+        device_count = await count_trusted_devices(user_id),
+        cap          = MAX_TRUSTED_DEVICES_PER_USER,
+    )
+
+@silnt_api_router.post("/api/v1/auth/device-request-confirm")
+async def api_device_request_confirm(
+    request:  Request,
+    response: Response,
+    key_info: WalletTypeInfo = Depends(require_invoice_key),
+):
+    """Explicitly send a new-device confirmation email. Called ONLY when the user
+    chooses to confirm this device (the 'Send confirmation email' action on the
+    pending-device screen) — never automatically. This is the email-sending half
+    that used to live inside device-check."""
+    user_id = key_info.wallet.user
+    # cookie  = request.cookies.get(cookie_name_for_user(user_id))
+    cookie  = read_device_id(request, user_id)
+    ua      = request.headers.get("user-agent", "")[:512]
+    brand   = (request.headers.get("x-client-brand", "") or "").strip()[:16]
+    if brand in ("Brave",) and "Brave" not in ua:
+        ua = f"{brand} {ua}"[:512]
+    ip      = get_client_ip(request)
+
+    # Already trusted on this browser? Nothing to send.
+    if cookie:
+        existing = await get_trusted_device(user_id, cookie)
+        if existing:
+            await touch_trusted_device(user_id, cookie)
+            set_device_cookie(response, user_id, cookie)
+            return {"status": "already-trusted"}
 
     new_device_id = secrets.token_urlsafe(24)
 
@@ -1405,94 +1450,88 @@ async def api_device_check(
             detail="This account has no email address. Cannot send confirmation.",
         )
 
-    token = make_device_confirm_token(user_id, new_device_id, ua, ip)
-    origin = request.headers.get("origin") or request.headers.get("referer") or ""
-    if not origin:
-        origin = f"https://{request.headers.get('host', '')}"
-    origin = origin.rstrip("/")
-    if origin.count("/") > 2:
-        parts = origin.split("/")
-        origin = "/".join(parts[:3])    
-    confirm_url = f"{origin}/confirm-device?token={token}"
-
-    subject = "Confirm a new device on your wallet"
+    code = f"{secrets.randbelow(1000000):06d}"
+    await create_device_code(user_id, code, new_device_id, ua, ip, ttl_secs=600)
+    subject = "Your device confirmation code"
     body = (
         f"Hi {account.username or 'there'},\n\n"
-        f"A new device tried to sign in to your wallet:\n\n"
-        f"  Browser: {ua or 'unknown'}\n"
+        f"Your device confirmation code is:\n\n    {code}\n\n"
+        f"Enter it in the app on the device you're signing in from. "
+        f"This code expires in 10 minutes.\n\n"
+        f"A sign-in was attempted from:\n"
+        f"  Browser: {ua or 'unknown'}\n  IP:      {ip or 'unknown'}\n"
         f"  Time:    {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}\n\n"
-        f"If this was you, confirm the device here:\n\n"
-        f"  {confirm_url}\n\n"
-        f"This link expires in 1 hour.\n\n"
-        f"If this WASN'T you, change your password immediately and ignore "
-        f"this email. (Note: any IP shown in your activity logs may be a "
+        f"If this WASN'T you, someone may have your password. Change your "
+        f"password and contact your administrator. (The IP shown may be a "
         f"CDN/proxy IP and may not reflect the actual location.)"
     )
-    res = await send_email_notification(
-        to_emails=[account.email], message=body, subject=subject
-    )
+    res = await send_email_notification(to_emails=[account.email], message=body, subject=subject)
     if res.get("status") != "ok":
-        logger.warning(f"Device confirmation email failed: {res}")
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-            detail="Could not send confirmation email. Please contact your administrator.",
-        )
-
-    # Set the per-user cookie now. Won't be valid until confirmed via email,
-    # but it makes the cookie available for subsequent requests in case the
-    # email link returns to this browser.
-    set_device_cookie(response, user_id, new_device_id)
-
-    return DeviceCheckResponse(
-        status       = "pending",
-        device_count = current_count,
-        cap          = MAX_TRUSTED_DEVICES_PER_USER,
-    )
-
-
-@silnt_api_router.get("/api/v1/auth/device-confirm")
-async def api_device_confirm(
-    request:  Request,
-    response: Response,
-    token:    str,
-):
-    payload = verify_device_confirm_token(token)
-    if not payload:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST,
-            detail="Invalid or expired confirmation token.",
-        )
-
-    user_id   = payload["user_id"]
-    device_id = payload["device_id"]
-    ua        = payload.get("ua", "")
-    ip        = payload.get("ip", "")
-
+        logger.warning(f"Device code email failed: {res}")
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                            detail="Could not send confirmation code. Please contact your administrator.")
+    # No valid trusted-device cookie. This endpoint is CHECK-ONLY: it never sends
+    # a confirmation email or mutates state. That avoids auto-emailing on every
+    # untrusted check (e.g. right after a user revokes their own device, or when
+    # a privacy browser / VPN drops the cookie). The confirmation email is sent
+    # only when the user explicitly asks, via /auth/device-request-confirm.
+    try:
+        existing_count = await count_trusted_devices(user_id)
+        if existing_count > 0:
+            sig = hashlib.sha256(f"{ua}|{ip}".encode()).hexdigest()[:32]
+            if await should_send_login_alert(user_id, sig):
+                account = await get_account(user_id)
+                if account and account.email:
+                    subject = "New device sign-in to your wallet"
+                    body = (
+                        f"Hi {account.username or 'there'},\n\n"
+                        f"Your account was just signed in to from a device that isn't "
+                        f"one of your confirmed devices:\n\n"
+                        f"  Browser: {ua or 'unknown'}\n"
+                        f"  IP:      {ip or 'unknown'}\n"
+                        f"  Time:    {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}\n\n"
+                        f"If this was you, just confirm the device from the app to start "
+                        f"using it — nothing else to do.\n\n"
+                        f"If this WASN'T you, someone may have your password. Your wallet "
+                        f"is still safe (they can't use it without also confirming the "
+                        f"device by email), but you should change your password and "
+                        f"contact your administrator.\n\n"
+                        f"(Note: the IP shown may be a CDN/proxy IP and may not "
+                        f"reflect the actual location.)"
+                    )
+                    res = await send_email_notification(
+                        to_emails=[account.email], message=body, subject=subject
+                    )
+                    if res.get("status") != "ok":
+                        logger.warning(f"Login-alert email failed for {user_id}: {res}")
+    except Exception as e:
+        logger.warning(f"Login-alert send skipped: {e}")
+    return {"status": "sent"}
+   
+@silnt_api_router.post("/api/v1/auth/device-verify-code")
+async def api_device_verify_code(request: Request, response: Response,
+                                 key_info: WalletTypeInfo = Depends(require_invoice_key)):
+    user_id = key_info.wallet.user
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    code = str((payload or {}).get("code", "")).strip()
+    if not code.isdigit() or len(code) != 6:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Enter the 6-digit code.")
+    pending = await verify_device_code(user_id, code)
+    if not pending:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                            detail="That code is incorrect or expired. Request a new one if needed.")
     current_count = await count_trusted_devices(user_id)
     if current_count >= MAX_TRUSTED_DEVICES_PER_USER:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST,
-            detail=(
-                f"This account already has {MAX_TRUSTED_DEVICES_PER_USER} "
-                f"trusted devices. Revoke one before adding another."
-            ),
-        )
-
-    await add_trusted_device(
-        user_id    = user_id,
-        device_id  = device_id,
-        user_agent = ua,
-        ip         = ip,
-    )
-
-    # Set the per-user cookie on the confirming browser
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                            detail=f"This account already has {MAX_TRUSTED_DEVICES_PER_USER} trusted devices. Revoke one before adding another.")
+    device_id = pending["device_id"]
+    await add_trusted_device(user_id=user_id, device_id=device_id,
+                             user_agent=pending.get("user_agent") or "", ip=pending.get("ip") or "")
     set_device_cookie(response, user_id, device_id)
-
-    return DeviceConfirmResponse(
-        confirmed    = True,
-        device_count = current_count + 1,
-        cap          = MAX_TRUSTED_DEVICES_PER_USER,
-    )
+    return DeviceConfirmResponse(confirmed=True, device_count=current_count + 1, cap=MAX_TRUSTED_DEVICES_PER_USER, device_id = device_id)
 
 
 @silnt_api_router.get("/api/v1/devices")
@@ -1502,7 +1541,8 @@ async def api_list_devices(
 ):
     user_id = key_info.wallet.user
     devices = await list_trusted_devices(user_id)
-    current = request.cookies.get(cookie_name_for_user(user_id))
+    # current = request.cookies.get(cookie_name_for_user(user_id))
+    current  = read_device_id(request, user_id)
     return DeviceListResponse(
         devices        = devices,
         current_device = current,
@@ -1525,11 +1565,13 @@ async def api_revoke_device(
 
     deleted = await revoke_trusted_device(user_id, device_row_id)
 
-    current = request.cookies.get(cookie_name_for_user(user_id))
-    if target.device_id == current:
+    # current = request.cookies.get(cookie_name_for_user(user_id))
+    current  = read_device_id(request, user_id)
+    was_current = (target.device_id == current)
+    if was_current:
         clear_device_cookie(response, user_id)
 
-    return {"deleted": bool(deleted), "device_row_id": device_row_id}
+    return {"deleted": bool(deleted), "device_row_id": device_row_id, "was_current": was_current}
 
 
 @silnt_api_router.post("/api/v1/devices/sign-out-others")
@@ -1538,12 +1580,17 @@ async def api_sign_out_others(
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
     user_id = key_info.wallet.user
-    current = request.cookies.get(cookie_name_for_user(user_id))
+    # current = request.cookies.get(cookie_name_for_user(user_id))
+    current  = read_device_id(request, user_id)
     if not current:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="No active device.")
     removed = await revoke_all_other_devices(user_id, current)
     return {"removed_count": removed}
 
+@silnt_api_router.get("/api/v1/auth/is-admin")
+async def api_is_admin(key_info: WalletTypeInfo = Depends(require_invoice_key)):
+    return {"is_admin": is_lnbits_admin(key_info.wallet.user)}
+    
 @silnt_api_router.get("/api/v1/auth/me")
 async def api_whoami(
     key_info: WalletTypeInfo = Depends(require_trusted_device),
@@ -2306,23 +2353,20 @@ async def api_payjoin_contact_request(
     data: CreateContactData,
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
-    """Send a connection request by EMAIL. Resolves the email neutrally: the
-    response is the same whether or not the email belongs to a user, so this
-    can't be used as an email-existence oracle. Only a real owner ever sees the
-    incoming request. The target approves before any connection exists."""
     uid = key_info.wallet.user
-    email = (data.email or "").strip().lower()
-    if not email or "@" not in email:
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Enter a valid email.")
+    username = (data.username or "").strip().lower()
+    if not username:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Enter a username.")
 
-    target_id, _ = await get_account_id_by_email(email)
+    target = await get_account_by_username(username)
+    target_id = target.id if target else None
 
-    # Clear error if you enter your OWN email (harmless self-oracle — you know
-    # your own address). Otherwise stay neutral (no email-existence oracle).
+    # Clear error if you enter your OWN username (harmless self-oracle — you know
+    # your own handle). Otherwise stay neutral (no username-existence oracle).
     me = await get_account(uid)
-    if me and me.email and me.email.strip().lower() == email:
+    if me and me.username and me.username.strip().lower() == username:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
-                            detail="That's your own email — connect with someone else.")
+                            detail="That's your own username — connect with someone else.")
 
     if target_id and target_id != uid:
         await create_payjoin_contact(uid, target_id)
@@ -3117,8 +3161,7 @@ async def probe_blindbit_health() -> None:
 async def probe_fulcrum_health() -> None:
     """Reachability probe for Fulcrum, callable from a background loop (no auth).
     Fires the down/up ntfy on a state change. Best-effort — never raises."""
-    try:
-        from .helpers.electrum_client import ElectrumClient
+    try:        
         cfg = await get_blindbit_config()
         host = getattr(cfg, "fulcrum_host", "") or ""
         port = int(getattr(cfg, "fulcrum_port", 50001) or 50001)
