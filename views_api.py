@@ -115,6 +115,8 @@ from .crud import (
     list_user_bip353_requests,
     list_pending_bip353_requests,
     is_username_taken,
+    is_username_approved_elsewhere,
+    sp_address_has_approved_bitmail,
     update_bip353_request_status,
     cancel_user_request,
     restore_utxo_to_unspent,
@@ -1697,7 +1699,13 @@ async def api_create_bip353_request(
         raise HTTPException(
             status_code=HTTPStatus.CONFLICT,
             detail="That BitMail username is already taken. Choose another.",
-        )   
+        )
+    _cf = await get_cloudflare_config()
+    if _cf and _cf.domain and _bip353_exists_in_dns(username, _cf.domain):
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail="That BitMail username is already taken. Choose another.",
+        )
     # Verify wallet ownership FIRST so all checks below are wallet-scoped
     wallet = await get_silnt_wallet(data.wallet_id)
     if not wallet or wallet.user != user_id:
@@ -1732,7 +1740,7 @@ async def api_create_bip353_request(
         )
 
     # Assign-once: this address was granted a BitMail before (even if since removed).
-    if await address_has_approved_bitmail(data.wallet_id, address_id):
+    if await address_has_approved_bitmail(data.wallet_id, address_id) or await sp_address_has_approved_bitmail(target_sp_address):
         raise HTTPException(
             status_code=HTTPStatus.FORBIDDEN,
             detail="This address previously had a BitMail and cannot be assigned another. "
@@ -1793,6 +1801,20 @@ async def api_cancel_user_request(
         )
     return {"cancelled": True}
 
+def _bip353_exists_in_dns(username: str, domain: str) -> bool:
+    """True if {username}@{domain} already resolves as a BIP-353 DNS record."""
+    if not domain:
+        return False
+    try:
+        res = bip353_resolve(f"{username}@{domain}")
+        return bool(res and res.get("result"))
+    except HTTPException as e:
+        if e.status_code == HTTPStatus.NOT_FOUND:
+            return False
+        return True
+    except Exception:
+        return False
+
 @silnt_api_router.get("/api/v1/bip353/admin/requests")
 async def api_admin_list_requests(
     key_info: WalletTypeInfo = Depends(require_trusted_device),
@@ -1833,10 +1855,20 @@ async def api_admin_approve_request(
             status_code=HTTPStatus.BAD_REQUEST,
             detail="Final username is invalid.",
         )
-    if final_username != req.requested_username and await is_username_taken(final_username):
+    if await sp_address_has_approved_bitmail(req.sp_address):
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN,
+            detail="This address previously had a BitMail and cannot be assigned "
+                   "another. BitMail assignment is permanent per address.",
+        )
+    _cf_check = await get_cloudflare_config()
+    if await is_username_approved_elsewhere(final_username, req_id) or (
+        _cf_check and _cf_check.domain
+        and _bip353_exists_in_dns(final_username, _cf_check.domain)
+    ):
         raise HTTPException(
             status_code=HTTPStatus.CONFLICT,
-            detail="That username is already taken.",
+            detail="That username is already taken (already published).",
         )
 
    # Verify CF integration is configured

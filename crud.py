@@ -1238,8 +1238,10 @@ async def is_username_taken(username: str) -> bool:
     """Check if username is already approved + active for someone."""
     row = await db.fetchone(
         """SELECT 1 FROM silnt.bip353_requests
-           WHERE LOWER(final_username) = LOWER(:uname)
-             AND status = 'approved'""",
+           WHERE (
+                 (status = 'approved' AND LOWER(final_username)     = LOWER(:uname))
+                OR (status = 'pending'  AND LOWER(requested_username) = LOWER(:uname))
+                 )""",
         {"uname": username},
     )
     if row:
@@ -1252,7 +1254,32 @@ async def is_username_taken(username: str) -> bool:
     )
     return row is not None
 
+async def is_username_approved_elsewhere(username: str, exclude_req_id: str) -> bool:
+    """True if some OTHER approved request already holds this username."""
+    row = await db.fetchone(
+        """SELECT 1 FROM silnt.bip353_requests
+           WHERE status = 'approved'
+             AND LOWER(final_username) = LOWER(:uname)
+             AND id <> :rid""",
+        {"uname": username, "rid": exclude_req_id},
+    )
+    return row is not None
 
+async def sp_address_has_approved_bitmail(sp_address: str) -> bool:
+    """True if this Silent Payment address has EVER had an approved BitMail —
+    keyed by the SP address itself, which is stable across delete+re-add of a
+    labeled address (address_id is not). Enforces the permanent 'assign once'
+    rule even if the user removes and re-creates the labeled address."""
+    if not sp_address:
+        return False
+    row = await db.fetchone(
+        """SELECT 1 FROM silnt.bip353_requests
+           WHERE sp_address = :sp AND status = 'approved'
+           LIMIT 1""",
+        {"sp": sp_address},
+    )
+    return row is not None
+    
 async def update_bip353_request_status(
     req_id:        str,
     status:        str,
