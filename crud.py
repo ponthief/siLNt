@@ -9,7 +9,7 @@ from lnbits.db import Database
 from lnbits.helpers import urlsafe_short_hash
 from .models import (
     Config,
-    BlindbitConfig,
+    BackendConfig,
     WalletAccount,
     UTXORecord,
     WalletAddress,
@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 db = Database("ext_silnt")
 
 # Singleton row ID for the global blindbit config
-BLINDBIT_CONFIG_ID = "blindbit"
+DEFAULT_CONFIG_NETWORK = "signet"
 CF_CONFIG_ID = "cloudflare_config"
 BIP352_CHANGE_LABEL_INDEX = 1
 
@@ -242,34 +242,34 @@ async def delete_wallet_label_address(address_id: str, wallet_id: str) -> None:
     )
 
 
-# ── Global admin-only blindbit config ───────────────────────────────────────
+# ── Global admin-only backend config ───────────────────────────────────────
 
 
-async def get_blindbit_config() -> BlindbitConfig:
+async def get_backend_config(network: str) -> BackendConfig:
     row = await db.fetchone(
-        "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
-        {"id": BLINDBIT_CONFIG_ID},
+        "SELECT json_data FROM silnt.backend_config WHERE id = :id",
+        {"id": network},
     )
     if not row:
-        return BlindbitConfig()
-    return BlindbitConfig(**json.loads(row["json_data"]))
+        return BackendConfig()
+    return BackendConfig(**json.loads(row["json_data"]))
 
 
-async def update_blindbit_config(config: BlindbitConfig) -> BlindbitConfig:
+async def update_backend_config(config: BackendConfig, network: str) -> BackendConfig:
     json_data = config.json()
     existing = await db.fetchone(
-        "SELECT id FROM silnt.blindbit_config WHERE id = :id",
-        {"id": BLINDBIT_CONFIG_ID},
+        "SELECT id FROM silnt.backend_config WHERE id = :id",
+        {"id": network},
     )
     if existing:
         await db.execute(
-            "UPDATE silnt.blindbit_config SET json_data = :json_data WHERE id = :id",
-            {"json_data": json_data, "id": BLINDBIT_CONFIG_ID},
+            "UPDATE silnt.backend_config SET json_data = :json_data WHERE id = :id",
+            {"json_data": json_data, "id": network},
         )
     else:
         await db.execute(
-            "INSERT INTO silnt.blindbit_config (id, json_data) VALUES (:id, :json_data)",
-            {"id": BLINDBIT_CONFIG_ID, "json_data": json_data},
+            "INSERT INTO silnt.backend_config (id, json_data) VALUES (:id, :json_data)",
+            {"id": network, "json_data": json_data},
         )
     return config
 
@@ -1100,7 +1100,7 @@ async def get_effective_dust_threshold(user_id: str) -> int:
     Resolve the dust threshold for a user.
     Priority:
       1. User's own prefs.dust_threshold_sats (if non-NULL and > 0)
-      2. Admin's BlindbitConfig.dust_threshold_sats (if non-zero)
+      2. Admin's BackendConfig.dust_threshold_sats (if non-zero)
       3. Hard fallback: 5000 sats
     """
     prefs = await get_user_prefs(user_id)
@@ -1420,6 +1420,28 @@ async def delete_all_silnt_data_for_user(user_id: str) -> dict:
 
     return {"wallets_deleted": len(wallet_ids), "wallet_ids": wallet_ids}
 
+
+async def list_silnt_user_ids_for_network(network: str) -> list[str]:
+    """User_ids that have siLNt presence ON a specific network — i.e. a wallet or
+    a PayJoin descriptor whose network matches. Used by the network-locked admin
+    Accounts page so the mainnet portal doesn't list signet-only users.
+    (trusted_devices and bip353_requests are network-agnostic, so they are not
+    used to scope network membership.)"""
+    ids: set[str] = set()
+    for sql, col in (
+        ('SELECT DISTINCT "user" FROM silnt.wallets WHERE "user" IS NOT NULL AND network = :net', "user"),
+        ("SELECT DISTINCT user_id FROM silnt.payjoin_descriptors WHERE network = :net", "user_id"),
+    ):
+        try:
+            rows = await db.fetchall(sql, {"net": network})
+        except Exception:
+            continue
+        for r in rows:
+            v = r[col]
+            if v:
+                ids.add(v)
+    return sorted(ids)
+    
 async def clear_wallet_hr_address(wallet_id: str) -> None:
     """Blank a wallet's hr_address after its BitMail DNS record is removed."""
     await db.execute(
@@ -2612,3 +2634,9 @@ async def resolve_open_alerts_for(kind: str, key: str) -> int:
         )
         cleared += 1
     return cleared
+
+async def get_blindbit_config() -> BackendConfig:
+    return await get_backend_config(DEFAULT_CONFIG_NETWORK)
+
+async def update_blindbit_config(config: BackendConfig) -> BackendConfig:
+    return await update_backend_config(config, DEFAULT_CONFIG_NETWORK)

@@ -42,14 +42,6 @@ async def m001_initial(db):
     )
     await db.execute(
         """
-        CREATE TABLE IF NOT EXISTS silnt.blindbit_config (
-            id TEXT PRIMARY KEY,
-            json_data TEXT NOT NULL DEFAULT '{}'            
-        );
-        """
-    )
-    await db.execute(
-        """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_silnt_utxos_vout_wallet_id ON silnt.utxos (txid, vout, wallet_id);
         """
     )
@@ -324,7 +316,7 @@ async def m013_payjoin_invoice_fields(db):
       sender_*   = payer B (B's inputs set when B pays)
     Runtime statuses: 'OPEN' (A posted invoice) -> 'CLAIMED' (B paid, PSBT built,
     awaiting both signatures) -> 'BROADCAST' / 'CANCELLED'. status is TEXT, so no
-    enum to alter. Fulcrum config needs NO migration (BlindbitConfig is stored as
+    enum to alter. Fulcrum config needs NO migration (BackendConfig is stored as
     JSON in blindbit_config.json_data).
     """
     await db.execute("ALTER TABLE silnt.payjoin_requests ADD COLUMN memo TEXT;")
@@ -496,3 +488,28 @@ async def m022_device_codes(db):
         );
         """
     )
+
+async def m023_backend_config_per_network(db):
+    # Rename blindbit_config -> backend_config, keyed per-network. The legacy
+    # singleton row (id='blindbit') is copied to its network id. Old table is
+    # left in place for now (dropped in a later cleanup migration after Stage 2).
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS silnt.backend_config (
+            id TEXT PRIMARY KEY,
+            json_data TEXT NOT NULL DEFAULT '{}'
+        );
+        """
+    )
+    # Copy the legacy singleton to the network it represented (signet).
+    row = await db.fetchone(
+        "SELECT json_data FROM silnt.blindbit_config WHERE id = 'blindbit'",
+        {},
+    )
+    if row:
+        await db.execute(
+            """INSERT INTO silnt.backend_config (id, json_data)
+               VALUES (:id, :json)
+               ON CONFLICT (id) DO NOTHING""",
+            {"id": "signet", "json": row["json_data"]},
+        )

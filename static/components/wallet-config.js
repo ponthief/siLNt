@@ -37,7 +37,7 @@ window.app.component('wallet-config', {
       try {
         const {data} = await LNbits.api.request(
           'PUT',
-          '/siLNt/api/v1/blindbit/config',
+          '/siLNt/api/v1/backend/config',
           this.adminkey,
           this.config
         )
@@ -54,7 +54,7 @@ window.app.component('wallet-config', {
     getConfig: async function () {
       try {        
           const [{data: blindbit}, {data: appConfig}] = await Promise.all([
-          LNbits.api.request('GET', '/siLNt/api/v1/blindbit/config', this.inkey),
+          LNbits.api.request('GET', '/siLNt/api/v1/backend/config', this.inkey),
           LNbits.api.request('GET', '/siLNt/api/v1/config', this.inkey)
       ])      
         this.config =  {

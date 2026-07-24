@@ -21,7 +21,7 @@ class CreateWallet(BaseModel):
     passphrase:  Optional[str] = None    
     last_height: Optional[int] = None
 
-class BlindbitConfig(BaseModel):
+class BackendConfig(BaseModel):
     blindbit_url: str = ""
     mempool_url: str = "https://mempool.space"
     min_scan_height:  int = 0   # 0 = no minimum; e.g. 840000 = no scans before block 840000
@@ -349,6 +349,7 @@ class PayjoinRequest(BaseModel):
 class ImportDescriptorData(BaseModel):
     descriptor: str
     label: Optional[str] = None
+    network: str = "signet"
 
 
 class ProposePayjoinData(BaseModel):

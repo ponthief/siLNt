@@ -316,7 +316,7 @@
   <q-expansion-item group="api" dense expand-separator label="Get BlindBit Oracle Config">
     <q-card>
       <q-card-section>
-        <code><span class="text-blue">GET</span> /siLNt/api/v1/blindbit/config</code>
+        <code><span class="text-blue">GET</span> /siLNt/api/v1/backend/config</code>
         <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
         <code>{"X-Api-Key": &lt;invoice_key&gt;}</code><br />
         <h5 class="text-caption q-mt-sm q-mb-none">Returns 200 OK (application/json)</h5>
@@ -326,7 +326,7 @@
         >
         <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
         <code
-          >curl -X GET {{ request.base_url }}siLNt/api/v1/blindbit/config -H
+          >curl -X GET {{ request.base_url }}siLNt/api/v1/backend/config -H
           "X-Api-Key: &lt;invoice_key&gt;"
         </code>
       </q-card-section>
@@ -336,7 +336,7 @@
   <q-expansion-item group="api" dense expand-separator label="Update BlindBit Oracle Config">
     <q-card>
       <q-card-section>
-        <code><span class="text-blue">PUT</span> /siLNt/api/v1/blindbit/config</code>
+        <code><span class="text-blue">PUT</span> /siLNt/api/v1/backend/config</code>
         <h5 class="text-caption q-mt-sm q-mb-none">Headers</h5>
         <code>{"X-Api-Key": &lt;admin_key&gt;}</code><br />
         <h5 class="text-caption q-mt-sm q-mb-none">Body (application/json)</h5>
@@ -353,7 +353,7 @@
         >
         <h5 class="text-caption q-mt-sm q-mb-none">Curl example</h5>
         <code
-          >curl -X PUT {{ request.base_url }}siLNt/api/v1/blindbit/config -H
+          >curl -X PUT {{ request.base_url }}siLNt/api/v1/backend/config -H
           "X-Api-Key: &lt;admin_key&gt;" -H "Content-Type: application/json" -d
           '{"blindbit_url": "http://localhost:8001", "mempool_url": "http://localhost:8080"}'
         </code>

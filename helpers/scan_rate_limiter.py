@@ -21,7 +21,7 @@ from fastapi import HTTPException, Request
 from loguru import logger
 
 
-# ── Configurable limits (could live in BlindbitConfig if you want admin UI control)
+# ── Configurable limits (could live in BackendConfig if you want admin UI control)
 WALLET_COOLDOWN_SECONDS    = 60           # 1 minute between scans of same wallet
 MAX_CONCURRENT_PER_USER    = 1            # only one active scan per user
 MAX_SCAN_STARTS_PER_IP_HR  = 30           # 30 scan-starts/hour per IP

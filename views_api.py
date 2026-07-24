@@ -71,8 +71,10 @@ from .crud import (
     update_title,
     update_balance,
     get_silnt_wallet,
+    get_backend_config,
     get_blindbit_config,
     update_blindbit_config,
+    update_backend_config,
     get_utxos_for_wallet,
     insert_utxos_for_wallet,
     update_unconfirmed_utxo,
@@ -135,10 +137,16 @@ from .crud import (
     list_all_bip353_requests,
     delete_bip353_request_if_terminal,
     delete_terminal_bip353_requests,
-    create_payjoin_descriptor, get_payjoin_descriptor, list_payjoin_descriptors,
-    delete_payjoin_descriptor, derive_descriptor_address,
-    get_payjoin_request, update_payjoin_request,
-    list_payjoin_requests_for_receiver, list_payjoin_requests_for_sender,
+    create_payjoin_descriptor,
+    get_payjoin_descriptor,
+    list_payjoin_descriptors,
+    delete_payjoin_descriptor, 
+    derive_descriptor_address,
+    get_payjoin_request, 
+    update_payjoin_request,
+    list_silnt_user_ids_for_network,
+    list_payjoin_requests_for_receiver, 
+    list_payjoin_requests_for_sender,
     get_reserved_outpoints,
     create_payjoin_invoice, list_payjoin_invoices_for_payer,
     get_account_id_by_email,
@@ -177,10 +185,11 @@ from .crud import (
     verify_device_code,
     mark_self_revoke,
     in_self_revoke_grace,
+    DEFAULT_CONFIG_NETWORK
 )
 
 from .models import (
-    BlindbitConfig,
+    BackendConfig,
     CreateWallet,
     WalletAccount,
     BuildTxRequest,
@@ -262,7 +271,7 @@ async def api_wallet_create(
     try:
         wallet_id = urlsafe_short_hash()
 
-        blindbit_cfg = await get_blindbit_config()
+        blindbit_cfg = await get_backend_config(data.network)
         min_height   = blindbit_cfg.min_scan_height or 0
 
         # ★ 1. Default last_height to oracle tip if not supplied
@@ -648,8 +657,8 @@ async def api_save_generated_wallet_address(
     "/api/v1/oracle/tip",
     dependencies=[Depends(require_trusted_device)],
 )
-async def api_get_chain_tip():
-    blindbit = await get_blindbit_config()
+async def api_get_chain_tip(network: str = Query("signet")):
+    blindbit = await get_backend_config(network)
     if not blindbit.blindbit_url:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
@@ -670,25 +679,27 @@ async def api_get_chain_tip():
         )
 
 
-# ── BlindBit config ───────────────────────────────────────────────────────────
+# ── Backend config ───────────────────────────────────────────────────────────
 
 
-@silnt_api_router.get("/api/v1/blindbit/config")
-async def api_get_blindbit_config(
+@silnt_api_router.get("/api/v1/backend/config")
+async def api_get_backend_config(
+    network: Optional[str] = Query(None),
     key_info: WalletTypeInfo = Depends(require_trusted_device),
-) -> BlindbitConfig:
+) -> BackendConfig:
     """Any authenticated user can read the blindbit endpoint (needed to trigger scan).
     Credentials (user/pass) are included so the scan proxy can use them server-side."""
-    return await get_blindbit_config()
+    return await get_backend_config(network or DEFAULT_CONFIG_NETWORK)
 
 
-@silnt_api_router.put("/api/v1/blindbit/config")
-async def api_update_blindbit_config(
-    data: BlindbitConfig, key_info: WalletTypeInfo = Depends(require_trusted_device_admin)
-) -> BlindbitConfig:
+@silnt_api_router.put("/api/v1/backend/config")
+async def api_update_backend_config(
+    data: BackendConfig,  network: Optional[str] = Query(None),
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin)
+) -> BackendConfig:
     require_admin(key_info)
     """Only admin can write blindbit connection settings."""
-    return await update_blindbit_config(data)
+    return await update_backend_config(data, network or DEFAULT_CONFIG_NETWORK)
 
 
 # ── Scanning ──────────────────────────────────────────────────────────────────
@@ -727,7 +738,7 @@ async def api_scan_wallet(
         raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
 
     # Enforce min scan height
-    blindbit = await get_blindbit_config()
+    blindbit = await get_backend_config(wallet.network)
     min_height = blindbit.min_scan_height or 0
 
     requested_from = data.from_height if data.from_height is not None else wallet.last_height
@@ -979,7 +990,10 @@ async def api_build_transaction(
 )
 async def api_broadcast_transaction(data: BroadcastTxRequest):
     try:
-        blindbit = await get_blindbit_config()
+        _bwallet = await get_silnt_wallet(data.wallet_id)
+        if not _bwallet:
+            raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet not found.")
+        blindbit = await get_backend_config(_bwallet.network)
         base = (blindbit.mempool_url or "https://mempool.space").rstrip("/")
         mempool_url = f"{base}/api/tx"
 
@@ -1085,9 +1099,10 @@ async def api_recover_wallet_keys(
 
 @silnt_api_router.get("/api/v1/config")
 async def api_get_config(
+    network: str = Query("signet"),
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ) -> dict:
-    blindbit = await get_blindbit_config()
+    blindbit = await get_backend_config(network)
     config = Config()
     current  = await count_silnt_wallets(key_info.wallet.user)
     return {
@@ -1984,7 +1999,7 @@ async def api_restore_utxo(data: RestoreUtxoRequest):
 
     # Verify the spending tx is actually gone (don't restore a still-pending or
     # confirmed spend — that would corrupt state).
-    blindbit = await get_blindbit_config()
+    blindbit = await get_backend_config(wallet.network)
     status = await get_tx_status(
         blindbit.mempool_url or "https://mempool.space", utxo["spent_in_txid"]
     )
@@ -2185,6 +2200,7 @@ async def api_tx_confirmation(
 
 @silnt_api_router.get("/api/v1/admin/blindbit/health")
 async def api_blindbit_health(
+    network: str = Query("signet"),
     key_info: WalletTypeInfo = Depends(require_admin_key),
 ):
     """
@@ -2193,7 +2209,7 @@ async def api_blindbit_health(
     with no block); a real stall shows up as BlindBit falling behind the tip.
     Returns up/down + whether the heights diverge (+ the heights only when they do).
     """
-    blindbit = await get_blindbit_config()
+    blindbit = await get_backend_config(network)
     bb_url = (blindbit.blindbit_url or "").rstrip("/")
     mp_url = (blindbit.mempool_url or "").rstrip("/")
     if not bb_url:
@@ -2293,19 +2309,19 @@ async def api_admin_purge_terminal(
 # ── fulcrum config (host/port for SYNC) ───────────────────────────────────────
 # Sync uses Fulcrum; broadcast uses mempool (reused). Pull Fulcrum host/port from
 # blindbit config — add fields there, or hardcode per-instance for now.
-async def _fulcrum_cfg():
-    cfg = await get_blindbit_config()
+async def _fulcrum_cfg(network: str):
+    cfg = await get_backend_config(network)
     return (
         getattr(cfg, "fulcrum_host", "127.0.0.1"),
         int(getattr(cfg, "fulcrum_port", 50001)),
         bool(getattr(cfg, "fulcrum_tls", False)),
-        getattr(cfg, "network", None) or "signet",
+        network,
     )
 
 
-async def _broadcast_via_mempool(tx_hex: str) -> str:
+async def _broadcast_via_mempool(tx_hex: str, network: str) -> str:
     """Reuse siLNt's mempool broadcast path (same as /api/v1/tx/broadcast)."""
-    blindbit = await get_blindbit_config()
+    blindbit = await get_backend_config(network)
     base = (blindbit.mempool_url or "https://mempool.space").rstrip("/")
     url = f"{base}/api/tx"
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -2321,7 +2337,7 @@ async def api_payjoin_import_descriptor(
     data: ImportDescriptorData,
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
-    _, _, _, network = await _fulcrum_cfg()
+    network = data.network
     try:
         d = await create_payjoin_descriptor(
             user_id=key_info.wallet.user, descriptor=data.descriptor,
@@ -2358,7 +2374,7 @@ async def api_payjoin_utxos(
     d = await get_payjoin_descriptor(did)
     if not d or d.user_id != key_info.wallet.user:
         raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Not found.")
-    host, port, tls, network = await _fulcrum_cfg()
+    host, port, tls, network = await _fulcrum_cfg(d.network)
     try:
         res = sync_wallet(d.descriptor, network, host, port, use_tls=tls)
     except Exception as e:
@@ -2539,7 +2555,7 @@ async def api_payjoin_create_invoice(
                             detail="That input is already reserved by another pending PayJoin.")
 
     # A's payment address at next-unused receive index (avoid reuse)
-    host, port, tls, network = await _fulcrum_cfg()
+    host, port, tls, network = await _fulcrum_cfg(rd.network)
     try:
         pay_index = next_unused_receive_index(rd.descriptor, network, host, port, use_tls=tls)
     except Exception as e:
@@ -2604,7 +2620,7 @@ async def api_payjoin_pay_invoice(
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Payee wallet missing.")
     payee_input = json.loads(req.receiver_input)
 
-    host, port, tls, network = await _fulcrum_cfg()
+    host, port, tls, network = await _fulcrum_cfg(rd.network)
     try:
         built = build_merged_payjoin(
             sender_descriptor=sd.descriptor,           # payer B
@@ -2707,9 +2723,11 @@ async def api_payjoin_sign(
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
                             detail=f"Not fully signed: {result.get('finalize_error')}")
 
-    tx_hex = result["tx_hex"]
+    tx_hex = result["tx_hex"]    
+    _sd = await get_payjoin_descriptor(req.sender_descriptor_id)
+    _net = _sd.network if _sd else "signet"
     try:
-        txid = await _broadcast_via_mempool(tx_hex)
+        txid = await _broadcast_via_mempool(tx_hex, _net)
     except HTTPException:
         await update_payjoin_request(rid, tx_hex=tx_hex)
         raise
@@ -2739,13 +2757,14 @@ async def api_payjoin_cancel(
 
 @silnt_api_router.get("/api/v1/admin/fulcrum/health")
 async def api_fulcrum_health(
+    network: str = Query("signet"),
     key_info: WalletTypeInfo = Depends(require_admin_key),
 ):
     """
     Health = Fulcrum reachable AND in sync with the chain tip (mempool/esplora).
     Mirrors the BlindBit health check. Returns up/down + whether heights diverge.
     """    
-    cfg = await get_blindbit_config()
+    cfg = await get_backend_config(network)
     host = getattr(cfg, "fulcrum_host", "") or ""
     port = int(getattr(cfg, "fulcrum_port", 50003) or 50003)
     tls = bool(getattr(cfg, "fulcrum_tls", False))
@@ -2955,11 +2974,12 @@ async def api_admin_account_delete(
     dependencies=[Depends(require_trusted_device_admin)],
 )
 async def api_admin_accounts_list(
+    network: str = Query("signet"),
     key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
 ):
     require_admin(key_info)
     out = []
-    for uid in await list_silnt_user_ids():
+    for uid in await list_silnt_user_ids_for_network(network):
         acct = await get_account(uid)
         # Skip orphaned references: siLNt rows whose LNbits account no longer
         # exists (deleted user leaving stale device/descriptor rows).
@@ -2972,7 +2992,7 @@ async def api_admin_accounts_list(
         if uname is None and isinstance(acct, dict):
             uname = acct.get("username")
             email = acct.get("email")
-        wallets = await get_silnt_wallets(uid)
+        wallets = await get_silnt_wallets(uid, network)
         out.append({
             "user_id": uid,
             "username": uname or uid,

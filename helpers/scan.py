@@ -12,6 +12,7 @@ from loguru import logger
 from ..crud import (
     db,
     get_blindbit_config,
+    get_backend_config,
     get_silnt_wallet,
     get_silnt_wallets,
     get_wallet_addresses,
@@ -595,7 +596,7 @@ async def scan_wallet(
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
         raise ValueError(f"Wallet {wallet_id} not found")
-    blindbit = await get_blindbit_config()
+    blindbit = await get_backend_config(wallet.network)
     if not blindbit.blindbit_url:
         raise ValueError("BlindBit Oracle URL not configured")
 

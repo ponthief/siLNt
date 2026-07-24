@@ -43,7 +43,7 @@ A [LNbits](https://lnbits.com) extension for managing [Silent Payment](https://s
 Before scanning, an admin must configure the BlindBit Oracle connection via the **Settings** button (⚙️) in the extension UI, or via the API:
 
 ```bash
-curl -X PUT https://<your-lnbits>/siLNt/api/v1/blindbit/config \
+curl -X PUT https://<your-lnbits>/siLNt/api/v1/backend/config \
   -H "X-Api-Key: <admin_key>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -206,7 +206,7 @@ Full interactive docs at `/docs#/siLNt` on your LNbits instance.
 }
 ```
 
-### BlindbitConfig
+### BackendConfig
 
 ```json
 {
