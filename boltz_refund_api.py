@@ -38,7 +38,8 @@ from lnbits.core.crud import get_standalone_payment
 
 # siLNt-local imports — adjust paths to your layout
 from .crud import (
-    get_blindbit_config,
+    get_backend_config,
+    DEFAULT_CONFIG_NETWORK,
     get_boltz_swap,
     update_boltz_swap,
     list_boltz_swaps_by_status,
@@ -62,16 +63,16 @@ silnt_refund_router = APIRouter()
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
-async def _boltz_base() -> str:
-    cfg = await get_blindbit_config()
+async def _boltz_base(network: str = DEFAULT_CONFIG_NETWORK) -> str:
+    cfg = await get_backend_config(network)
     url = cfg.boltz_url
     if not url:
         raise HTTPException(HTTPStatus.SERVICE_UNAVAILABLE, "Boltz URL not configured.")
     return url
 
 
-async def _mempool_base() -> str:
-    cfg = await get_blindbit_config()
+async def _mempool_base(network: str = DEFAULT_CONFIG_NETWORK) -> str:
+    cfg = await get_backend_config(network)
     url = cfg.mempool_url
     if not url:
         raise HTTPException(HTTPStatus.SERVICE_UNAVAILABLE, "Mempool URL not configured.")
@@ -117,15 +118,15 @@ async def _lockup_confirmed(rec) -> bool:
     if not rec.lockup_txid:
         return False
     try:
-        base = await _mempool_base()
+        base = await _mempool_base(rec.network or DEFAULT_CONFIG_NETWORK)
         async with httpx.AsyncClient(timeout=20) as c:
             r = await c.get(f"{base}/api/tx/{rec.lockup_txid}/status")
             return r.status_code == 200 and bool(r.json().get("confirmed"))
     except Exception:
         return False
 
-async def _boltz_status(swap_id: str) -> Optional[str]:
-    base = await _boltz_base()
+async def _boltz_status(swap_id: str, network: str = DEFAULT_CONFIG_NETWORK) -> Optional[str]:
+    base = await _boltz_base(network)
     async with httpx.AsyncClient(timeout=20) as c:
         r = await c.get(f"{base}/v2/swap/submarine/{swap_id}")
         if r.status_code != 200:
@@ -136,16 +137,16 @@ async def _boltz_status(swap_id: str) -> Optional[str]:
         return state
 
 
-async def _chain_height() -> int:
-    base = await _mempool_base()
+async def _chain_height(network: str = DEFAULT_CONFIG_NETWORK) -> int:
+    base = await _mempool_base(network)
     async with httpx.AsyncClient(timeout=20) as c:
         r = await c.get(f"{base}/api/blocks/tip/height")
         r.raise_for_status()
         return int(r.text.strip())
 
 
-async def _broadcast(tx_hex: str) -> str:
-    base = await _mempool_base()
+async def _broadcast(tx_hex: str, network: str = DEFAULT_CONFIG_NETWORK) -> str:
+    base = await _mempool_base(network)
     async with httpx.AsyncClient(timeout=30) as c:
         r = await c.post(f"{base}/api/tx", content=tx_hex)
         if r.status_code != 200:
@@ -167,7 +168,7 @@ async def _is_refundable(rec, height: int) -> tuple:
     if await _invoice_paid(rec.payment_hash):
         logger.info(f"[refundable?] {rec.id}: NOT refundable — invoice paid (swap succeeded)")
         return False, "swap already succeeded (invoice paid)"
-    status = await _boltz_status(rec.id)
+    status = await _boltz_status(rec.id, rec.network or DEFAULT_CONFIG_NETWORK)
     logger.info(f"[refundable?] {rec.id}: boltz_status={status} height={height} timeout={rec.timeout_block_height} lockup={rec.lockup_txid}")
     if status in TERMINAL_STATES:
         return False, "swap already succeeded"
@@ -233,7 +234,7 @@ async def api_refund_swap(
     if rec.wallet_id != key_info.wallet.id and rec.silnt_wallet_id != key_info.wallet.id:
         raise HTTPException(HTTPStatus.FORBIDDEN, "Not your swap.")
 
-    height = await _chain_height()
+    height = await _chain_height(rec.network or DEFAULT_CONFIG_NETWORK)
     ok, reason = await _is_refundable(rec, height)
     if not ok:
         raise HTTPException(HTTPStatus.BAD_REQUEST, f"Not refundable: {reason}")
@@ -275,7 +276,7 @@ async def api_refund_swap(
         logger.error(f"refund build failed for {swap_id}: {exc}")
         raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Could not build refund: {exc}")
 
-    txid = await _broadcast(tx_hex)
+    txid = await _broadcast(tx_hex, rec.network or DEFAULT_CONFIG_NETWORK)
     rec.status = "refunded"
     rec.refund_address = dest
     await update_boltz_swap(rec)
@@ -294,7 +295,7 @@ async def api_list_swaps(key_info: WalletTypeInfo = Depends(require_admin_key)):
         if rec.status == "funded":
             done = await _invoice_paid(rec.payment_hash)
             if not done:
-                boltz_state = await _boltz_status(rec.id)
+                boltz_state = await _boltz_status(rec.id, rec.network or DEFAULT_CONFIG_NETWORK)
                 done = boltz_state in TERMINAL_STATES
             if done:
                 rec.status = "completed"
@@ -349,7 +350,7 @@ async def api_delete_swap(
 
     # Only allow deleting genuinely finished swaps — never an active/refundable one,
     # so a user can't accidentally discard a swap whose funds are still recoverable.
-    height = await _chain_height()
+    height = await _chain_height(rec.network or DEFAULT_CONFIG_NETWORK)
     status = rec.status
     if status not in ("completed", "refunded"):
         # is it expired (past timeout and never refunded)? Block deletion if it's
@@ -404,7 +405,7 @@ async def refund_due_swaps(default_fee_sats: int = 300) -> list:
                     fee_sats=default_fee_sats,
                     network=rec.network,
                 )
-                txid = await _broadcast(tx_hex)
+                txid = await _broadcast(tx_hex, rec.network)
                 rec.status = "refunded"
                 await update_boltz_swap(rec)
                 results.append({"swap_id": rec.id, "txid": txid})

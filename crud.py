@@ -1095,19 +1095,21 @@ async def upsert_user_prefs(
 
 
 
-async def get_effective_dust_threshold(user_id: str) -> int:
+async def get_effective_dust_threshold(
+    user_id: str, network: str = DEFAULT_CONFIG_NETWORK
+) -> int:
     """
     Resolve the dust threshold for a user.
     Priority:
       1. User's own prefs.dust_threshold_sats (if non-NULL and > 0)
-      2. Admin's BackendConfig.dust_threshold_sats (if non-zero)
+      2. Admin's BackendConfig.dust_threshold_sats for `network` (if non-zero)
       3. Hard fallback: 5000 sats
     """
     prefs = await get_user_prefs(user_id)
     if prefs and prefs.dust_threshold_sats and prefs.dust_threshold_sats > 0:
         return int(prefs.dust_threshold_sats)
-    blindbit = await get_blindbit_config()
-    return int(blindbit.dust_threshold_sats or 5000)
+    backend = await get_backend_config(network)
+    return int(backend.dust_threshold_sats or 5000)
 
 async def create_bip353_request(
     user_id:            str,
@@ -2635,8 +2637,3 @@ async def resolve_open_alerts_for(kind: str, key: str) -> int:
         cleared += 1
     return cleared
 
-async def get_blindbit_config() -> BackendConfig:
-    return await get_backend_config(DEFAULT_CONFIG_NETWORK)
-
-async def update_blindbit_config(config: BackendConfig) -> BackendConfig:
-    return await update_backend_config(config, DEFAULT_CONFIG_NETWORK)

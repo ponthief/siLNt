@@ -1,8 +1,8 @@
 import httpx
 from loguru import logger
 from ..crud import (
-    get_blindbit_config,
-    get_wallet_unspent_utxos_for_dust_check,    
+    get_backend_config,
+    get_wallet_unspent_utxos_for_dust_check,
     get_wallet_owned_outpoints,
     is_own_sent_tx,
     update_utxo_dust_flag,    
@@ -59,9 +59,9 @@ async def evaluate_dust_for_wallet(wallet_id: str) -> int:
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
         return 0
-    threshold = await get_effective_dust_threshold(wallet.user)
-    blindbit  = await get_blindbit_config()      
-    mempool   = blindbit.mempool_url or "https://mempool.space"
+    threshold = await get_effective_dust_threshold(wallet.user, wallet.network)
+    backend   = await get_backend_config(wallet.network)
+    mempool   = backend.mempool_url or "https://mempool.space"
 
     utxos             = await get_wallet_unspent_utxos_for_dust_check(wallet_id)
     owned_outpoints   = await get_wallet_owned_outpoints(wallet_id)

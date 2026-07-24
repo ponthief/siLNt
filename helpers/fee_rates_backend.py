@@ -15,7 +15,7 @@ import time
 from http import HTTPStatus
 from fastapi import Depends, HTTPException
 from loguru import logger
-from ..crud import get_blindbit_config
+from ..crud import get_backend_config, DEFAULT_CONFIG_NETWORK
 
 # Fallback tiers if the mempool can't be reached (signet/regtest or outage).
 # 1 sat/vB across the board is safe for test networks and won't block a send.
@@ -50,14 +50,14 @@ async def get_btc_usd_rate() -> float:
         logger.warning(f"CoinGecko rate fetch failed: {e}")
         return _rate_cache["rate"]   # stale or 0
 
-async def get_recommended_fees() -> dict:
+async def get_recommended_fees(network: str = DEFAULT_CONFIG_NETWORK) -> dict:
     """
     Fetch recommended fee tiers (sat/vB) from the configured mempool. Returns the
     mempool shape, or a safe fallback on any error. Never raises — a fee lookup
     failing should not block the user; they can still send at the fallback rate.
     """
-    blindbit = await get_blindbit_config()
-    base = (blindbit.mempool_url or "https://mempool.space").rstrip("/")
+    backend = await get_backend_config(network)
+    base = (backend.mempool_url or "https://mempool.space").rstrip("/")
     url = f"{base}/api/v1/fees/recommended"
     try:
         async with httpx.AsyncClient(timeout=10.0, verify=False) as c:
