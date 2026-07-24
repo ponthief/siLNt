@@ -1402,6 +1402,9 @@ async def delete_all_silnt_data_for_user(user_id: str) -> dict:
     await db.execute("DELETE FROM silnt.bip353_requests WHERE user_id = :uid", {"uid": user_id})
     await db.execute("DELETE FROM silnt.trusted_devices  WHERE user_id = :uid", {"uid": user_id})
     await db.execute("DELETE FROM silnt.user_prefs        WHERE user_id = :uid", {"uid": user_id})
+    # Admin alerts reference the user only inside their meta JSON (no column), so
+    # clean them via the meta-aware helper rather than a DELETE ... WHERE.
+    await delete_admin_alerts_for_user(user_id)
     # Boltz swaps for the user's wallets.
     for wid in wallet_ids:
         await db.execute("DELETE FROM silnt.boltz_swaps WHERE silnt_wallet_id = :wid", {"wid": wid})
@@ -1599,6 +1602,20 @@ async def cancel_all_pending_requests_for_wallet(wallet_id: str) -> int:
            SET status = 'cancelled', processed_at = :ts
            WHERE wallet_id = :wid AND status = 'pending'""",
         {"wid": wallet_id, "ts": int(time.time())},
+    )
+    return getattr(result, "rowcount", 0) or 0
+
+async def delete_bip353_requests_for_wallet(wallet_id: str) -> int:
+    """Delete ALL BitMail requests (any status) tied to a wallet. Called when the
+    wallet itself is deleted, so approved BitMails don't linger in
+    list_approved_bitmails() (which drives the tamper sweep) after their owning
+    wallet is gone. The wallet's live DNS records are removed separately by the
+    delete endpoint before this runs."""
+    if not wallet_id:
+        return 0
+    result = await db.execute(
+        "DELETE FROM silnt.bip353_requests WHERE wallet_id = :wid",
+        {"wid": wallet_id},
     )
     return getattr(result, "rowcount", 0) or 0
 
@@ -2395,6 +2412,41 @@ async def acknowledge_admin_alert(alert_id: str) -> bool:
         {"id": alert_id},
     )
     return (getattr(result, "rowcount", 0) or 0) > 0
+
+
+async def _delete_admin_alerts_where_meta(field: str, value: str) -> int:
+    """Delete admin alerts whose meta JSON has meta[field] == value. The wallet_id
+    and user_id an alert refers to live inside the meta JSON blob (there is no
+    column for them), so we parse each row rather than filter in SQL. Alert volume
+    is small, so scanning the table is fine."""
+    if not value:
+        return 0
+    rows = await db.fetchall("SELECT id, meta FROM silnt.admin_alerts")
+    removed = 0
+    for r in rows:
+        raw = r["meta"] or ""
+        try:
+            meta = json.loads(raw) if raw else {}
+        except Exception:
+            continue
+        if meta.get(field) == value:
+            await db.execute(
+                "DELETE FROM silnt.admin_alerts WHERE id = :id", {"id": r["id"]}
+            )
+            removed += 1
+    return removed
+
+
+async def delete_admin_alerts_for_wallet(wallet_id: str) -> int:
+    """Remove admin alerts raised for a wallet (matched via meta.wallet_id). Called
+    on wallet deletion so a removed wallet leaves no orphan alerts behind."""
+    return await _delete_admin_alerts_where_meta("wallet_id", wallet_id)
+
+
+async def delete_admin_alerts_for_user(user_id: str) -> int:
+    """Remove admin alerts raised for a user (matched via meta.user_id). Used when
+    wiping all of a user's siLNt data."""
+    return await _delete_admin_alerts_where_meta("user_id", user_id)
 
 
 async def get_issued_bitmail_sp_address(username: str) -> Optional[str]:

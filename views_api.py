@@ -135,6 +135,7 @@ from .crud import (
     list_all_bip353_requests,
     delete_bip353_request_if_terminal,
     delete_terminal_bip353_requests,
+    delete_bip353_requests_for_wallet,
     create_payjoin_descriptor,
     get_payjoin_descriptor,
     list_payjoin_descriptors,
@@ -171,6 +172,7 @@ from .crud import (
     list_admin_alerts,
     count_open_admin_alerts,
     acknowledge_admin_alert,
+    delete_admin_alerts_for_wallet,
     get_issued_bitmail_sp_address,
     list_approved_bitmails,
     open_alert_exists_for,
@@ -499,6 +501,14 @@ async def api_wallet_delete(wallet_id: str):
     await delete_silnt_wallet(wallet_id)
     await delete_utxos_for_wallet(wallet_id)
     await delete_wallet_label_addresses(wallet_id)
+    # Purge records that reference this wallet by id so nothing is left orphaned:
+    # its BitMail requests (else the tamper sweep keeps checking a dead wallet and
+    # list_approved_bitmails returns it forever) and any admin alerts raised for it.
+    try:
+        await delete_bip353_requests_for_wallet(wallet_id)
+        await delete_admin_alerts_for_wallet(wallet_id)
+    except Exception as e:
+        logger.warning(f"post-delete cleanup (bip353/alerts) failed for {wallet_id}: {e}")
     return "", HTTPStatus.NO_CONTENT
 
 
@@ -3132,6 +3142,19 @@ async def _run_bitmail_tamper_sweep_inner() -> dict:
         uname = (row.get("final_username") or "").strip()
         expected = (row.get("sp_address") or "").strip()
         if not uname or not expected:
+            continue
+        # If the owning wallet has been deleted, this is a stale record left over
+        # from a wallet removal. Purge it (request row + any alerts) and skip — a
+        # dead wallet must not keep generating tamper checks/alerts. This also
+        # self-heals orphans created before delete-time cleanup existed.
+        wid = (row.get("wallet_id") or "").strip()
+        if wid and not await get_silnt_wallet(wid):
+            try:
+                await delete_bip353_requests_for_wallet(wid)
+                await delete_admin_alerts_for_wallet(wid)
+                logger.info(f"tamper sweep: purged stale BitMail records for deleted wallet {wid}")
+            except Exception as e:
+                logger.warning(f"tamper sweep: could not purge stale records for {wid}: {e}")
             continue
         bitmail = f"{uname}@{our_domain}"
         checked += 1
