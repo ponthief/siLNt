@@ -34,6 +34,7 @@ db = Database("ext_silnt")
 # Singleton row ID for the global blindbit config
 DEFAULT_CONFIG_NETWORK = "signet"
 CF_CONFIG_ID = "cloudflare_config"
+NTFY_CONFIG_ID = "ntfy_config"
 BIP352_CHANGE_LABEL_INDEX = 1
 
 async def create_silnt_wallet(wallet: WalletAccount) -> WalletAccount:
@@ -276,7 +277,7 @@ async def update_backend_config(config: BackendConfig, network: str) -> BackendC
 
 async def get_cloudflare_config() -> CloudflareConfig:
     row = await db.fetchone(
-        "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
+        "SELECT json_data FROM silnt.backend_config WHERE id = :id",
         {"id": CF_CONFIG_ID},
     )
     cfg = CloudflareConfig(**json.loads(row["json_data"])) if row else CloudflareConfig()
@@ -300,7 +301,7 @@ async def update_cloudflare_config(config: CloudflareConfig) -> CloudflareConfig
         # No env override: preserve the existing stored domain rather than let
         # the client change it.
         existing = await db.fetchone(
-            "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
+            "SELECT json_data FROM silnt.backend_config WHERE id = :id",
             {"id": CF_CONFIG_ID},
         )
         if existing:
@@ -310,28 +311,26 @@ async def update_cloudflare_config(config: CloudflareConfig) -> CloudflareConfig
                 pass
     json_data = config.json()
     existing = await db.fetchone(
-        "SELECT id FROM silnt.blindbit_config WHERE id = :id",
+        "SELECT id FROM silnt.backend_config WHERE id = :id",
         {"id": CF_CONFIG_ID},
     )
     if existing:
         await db.execute(
-            "UPDATE silnt.blindbit_config SET json_data = :json_data WHERE id = :id",
+            "UPDATE silnt.backend_config SET json_data = :json_data WHERE id = :id",
             {"json_data": json_data, "id": CF_CONFIG_ID},
         )
     else:
         await db.execute(
-            "INSERT INTO silnt.blindbit_config (id, json_data) VALUES (:id, :json_data)",
+            "INSERT INTO silnt.backend_config (id, json_data) VALUES (:id, :json_data)",
             {"id": CF_CONFIG_ID, "json_data": json_data},
         )
     return config
 
 
-NTFY_CONFIG_ID = "ntfy_config"
-
 
 async def get_ntfy_config() -> NtfyConfig:
     row = await db.fetchone(
-        "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
+        "SELECT json_data FROM silnt.backend_config WHERE id = :id",
         {"id": NTFY_CONFIG_ID},
     )
     return NtfyConfig(**json.loads(row["json_data"])) if row else NtfyConfig()
@@ -340,17 +339,17 @@ async def get_ntfy_config() -> NtfyConfig:
 async def update_ntfy_config(config: NtfyConfig) -> NtfyConfig:
     json_data = config.json()
     existing = await db.fetchone(
-        "SELECT id FROM silnt.blindbit_config WHERE id = :id",
+        "SELECT id FROM silnt.backend_config WHERE id = :id",
         {"id": NTFY_CONFIG_ID},
     )
     if existing:
         await db.execute(
-            "UPDATE silnt.blindbit_config SET json_data = :json_data WHERE id = :id",
+            "UPDATE silnt.backend_config SET json_data = :json_data WHERE id = :id",
             {"json_data": json_data, "id": NTFY_CONFIG_ID},
         )
     else:
         await db.execute(
-            "INSERT INTO silnt.blindbit_config (id, json_data) VALUES (:id, :json_data)",
+            "INSERT INTO silnt.backend_config (id, json_data) VALUES (:id, :json_data)",
             {"id": NTFY_CONFIG_ID, "json_data": json_data},
         )
     return config
@@ -430,7 +429,7 @@ async def notify_service_health_change(service: str, is_up: bool, detail: str = 
     state_id = f"{HEALTH_STATE_ID}:{service}"
     try:
         row = await db.fetchone(
-            "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
+            "SELECT json_data FROM silnt.backend_config WHERE id = :id",
             {"id": state_id},
         )
         prev = json.loads(row["json_data"]).get("up") if row else None
@@ -444,16 +443,16 @@ async def notify_service_health_change(service: str, is_up: bool, detail: str = 
     try:
         payload = json.dumps({"up": is_up})
         exists = await db.fetchone(
-            "SELECT id FROM silnt.blindbit_config WHERE id = :id", {"id": state_id}
+            "SELECT id FROM silnt.backend_config WHERE id = :id", {"id": state_id}
         )
         if exists:
             await db.execute(
-                "UPDATE silnt.blindbit_config SET json_data = :j WHERE id = :id",
+                "UPDATE silnt.backend_config SET json_data = :j WHERE id = :id",
                 {"j": payload, "id": state_id},
             )
         else:
             await db.execute(
-                "INSERT INTO silnt.blindbit_config (id, json_data) VALUES (:id, :j)",
+                "INSERT INTO silnt.backend_config (id, json_data) VALUES (:id, :j)",
                 {"id": state_id, "j": payload},
             )
     except Exception:
@@ -485,7 +484,7 @@ async def reset_service_health_state() -> None:
     clean (the next health check is treated as a first observation). Called when
     ntfy config is saved, so stale state can't permanently suppress alerts."""
     await db.execute(
-        "DELETE FROM silnt.blindbit_config WHERE id = :id", {"id": HEALTH_STATE_ID}
+        "DELETE FROM silnt.backend_config WHERE id = :id", {"id": HEALTH_STATE_ID}
     )
 
 async def count_silnt_wallets(user: str, network: Optional[str] = None) -> int:
@@ -1095,19 +1094,21 @@ async def upsert_user_prefs(
 
 
 
-async def get_effective_dust_threshold(user_id: str) -> int:
+async def get_effective_dust_threshold(
+    user_id: str, network: str = DEFAULT_CONFIG_NETWORK
+) -> int:
     """
     Resolve the dust threshold for a user.
     Priority:
       1. User's own prefs.dust_threshold_sats (if non-NULL and > 0)
-      2. Admin's BackendConfig.dust_threshold_sats (if non-zero)
+      2. Admin's BackendConfig.dust_threshold_sats for `network` (if non-zero)
       3. Hard fallback: 5000 sats
     """
     prefs = await get_user_prefs(user_id)
     if prefs and prefs.dust_threshold_sats and prefs.dust_threshold_sats > 0:
         return int(prefs.dust_threshold_sats)
-    blindbit = await get_blindbit_config()
-    return int(blindbit.dust_threshold_sats or 5000)
+    backend = await get_backend_config(network)
+    return int(backend.dust_threshold_sats or 5000)
 
 async def create_bip353_request(
     user_id:            str,
@@ -1400,6 +1401,9 @@ async def delete_all_silnt_data_for_user(user_id: str) -> dict:
     await db.execute("DELETE FROM silnt.bip353_requests WHERE user_id = :uid", {"uid": user_id})
     await db.execute("DELETE FROM silnt.trusted_devices  WHERE user_id = :uid", {"uid": user_id})
     await db.execute("DELETE FROM silnt.user_prefs        WHERE user_id = :uid", {"uid": user_id})
+    # Admin alerts reference the user only inside their meta JSON (no column), so
+    # clean them via the meta-aware helper rather than a DELETE ... WHERE.
+    await delete_admin_alerts_for_user(user_id)
     # Boltz swaps for the user's wallets.
     for wid in wallet_ids:
         await db.execute("DELETE FROM silnt.boltz_swaps WHERE silnt_wallet_id = :wid", {"wid": wid})
@@ -1597,6 +1601,20 @@ async def cancel_all_pending_requests_for_wallet(wallet_id: str) -> int:
            SET status = 'cancelled', processed_at = :ts
            WHERE wallet_id = :wid AND status = 'pending'""",
         {"wid": wallet_id, "ts": int(time.time())},
+    )
+    return getattr(result, "rowcount", 0) or 0
+
+async def delete_bip353_requests_for_wallet(wallet_id: str) -> int:
+    """Delete ALL BitMail requests (any status) tied to a wallet. Called when the
+    wallet itself is deleted, so approved BitMails don't linger in
+    list_approved_bitmails() (which drives the tamper sweep) after their owning
+    wallet is gone. The wallet's live DNS records are removed separately by the
+    delete endpoint before this runs."""
+    if not wallet_id:
+        return 0
+    result = await db.execute(
+        "DELETE FROM silnt.bip353_requests WHERE wallet_id = :wid",
+        {"wid": wallet_id},
     )
     return getattr(result, "rowcount", 0) or 0
 
@@ -2395,6 +2413,41 @@ async def acknowledge_admin_alert(alert_id: str) -> bool:
     return (getattr(result, "rowcount", 0) or 0) > 0
 
 
+async def _delete_admin_alerts_where_meta(field: str, value: str) -> int:
+    """Delete admin alerts whose meta JSON has meta[field] == value. The wallet_id
+    and user_id an alert refers to live inside the meta JSON blob (there is no
+    column for them), so we parse each row rather than filter in SQL. Alert volume
+    is small, so scanning the table is fine."""
+    if not value:
+        return 0
+    rows = await db.fetchall("SELECT id, meta FROM silnt.admin_alerts")
+    removed = 0
+    for r in rows:
+        raw = r["meta"] or ""
+        try:
+            meta = json.loads(raw) if raw else {}
+        except Exception:
+            continue
+        if meta.get(field) == value:
+            await db.execute(
+                "DELETE FROM silnt.admin_alerts WHERE id = :id", {"id": r["id"]}
+            )
+            removed += 1
+    return removed
+
+
+async def delete_admin_alerts_for_wallet(wallet_id: str) -> int:
+    """Remove admin alerts raised for a wallet (matched via meta.wallet_id). Called
+    on wallet deletion so a removed wallet leaves no orphan alerts behind."""
+    return await _delete_admin_alerts_where_meta("wallet_id", wallet_id)
+
+
+async def delete_admin_alerts_for_user(user_id: str) -> int:
+    """Remove admin alerts raised for a user (matched via meta.user_id). Used when
+    wiping all of a user's siLNt data."""
+    return await _delete_admin_alerts_where_meta("user_id", user_id)
+
+
 async def get_issued_bitmail_sp_address(username: str) -> Optional[str]:
     """Return the SP address siLNt recorded for an APPROVED BitMail issued on our
     own domain, matched by final_username. None if we never issued that name.
@@ -2635,8 +2688,3 @@ async def resolve_open_alerts_for(kind: str, key: str) -> int:
         cleared += 1
     return cleared
 
-async def get_blindbit_config() -> BackendConfig:
-    return await get_backend_config(DEFAULT_CONFIG_NETWORK)
-
-async def update_blindbit_config(config: BackendConfig) -> BackendConfig:
-    return await update_backend_config(config, DEFAULT_CONFIG_NETWORK)

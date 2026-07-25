@@ -72,8 +72,6 @@ from .crud import (
     update_balance,
     get_silnt_wallet,
     get_backend_config,
-    get_blindbit_config,
-    update_blindbit_config,
     update_backend_config,
     get_utxos_for_wallet,
     insert_utxos_for_wallet,
@@ -137,6 +135,7 @@ from .crud import (
     list_all_bip353_requests,
     delete_bip353_request_if_terminal,
     delete_terminal_bip353_requests,
+    delete_bip353_requests_for_wallet,
     create_payjoin_descriptor,
     get_payjoin_descriptor,
     list_payjoin_descriptors,
@@ -173,6 +172,7 @@ from .crud import (
     list_admin_alerts,
     count_open_admin_alerts,
     acknowledge_admin_alert,
+    delete_admin_alerts_for_wallet,
     get_issued_bitmail_sp_address,
     list_approved_bitmails,
     open_alert_exists_for,
@@ -361,15 +361,18 @@ async def api_wallet_create(
                 detail="Silent Payment Wallet already exists!",
             )
 
+        # The limit is per-network: max_wallets_per_user comes from THIS network's
+        # backend config, so count only the user's wallets on this network. A user
+        # at the cap on signet can still create a wallet on mainnet.
         max_wallets = blindbit_cfg.max_wallets_per_user or 1
         if max_wallets > 0:
-            current_count = await count_silnt_wallets(key_info.wallet.user)
+            current_count = await count_silnt_wallets(key_info.wallet.user, data.network)
             if current_count >= max_wallets:
                 raise HTTPException(
                     status_code=HTTPStatus.BAD_REQUEST,
                     detail=(
                         f"Wallet limit reached. You can have at most {max_wallets} wallet"
-                        f"{'s' if max_wallets != 1 else ''} on this server. "
+                        f"{'s' if max_wallets != 1 else ''} on {data.network}. "
                         f"You currently have {current_count}."
                     ),
                 )
@@ -448,7 +451,7 @@ async def api_wallet_update(
                 )
             await update_hr_address(wallet.id, data.hr_address)
         if data.last_height is not None and int(data.last_height) != wallet.last_height:
-            validated_height = await validate_born_height(data.last_height)
+            validated_height = await validate_born_height(data.last_height, wallet.network)
             if validated_height is not None:
                 await update_last_height(wallet.id, int(data.last_height))
         if data.title is not None and data.title != wallet.title:
@@ -501,6 +504,14 @@ async def api_wallet_delete(wallet_id: str):
     await delete_silnt_wallet(wallet_id)
     await delete_utxos_for_wallet(wallet_id)
     await delete_wallet_label_addresses(wallet_id)
+    # Purge records that reference this wallet by id so nothing is left orphaned:
+    # its BitMail requests (else the tamper sweep keeps checking a dead wallet and
+    # list_approved_bitmails returns it forever) and any admin alerts raised for it.
+    try:
+        await delete_bip353_requests_for_wallet(wallet_id)
+        await delete_admin_alerts_for_wallet(wallet_id)
+    except Exception as e:
+        logger.warning(f"post-delete cleanup (bip353/alerts) failed for {wallet_id}: {e}")
     return "", HTTPStatus.NO_CONTENT
 
 
@@ -1104,7 +1115,9 @@ async def api_get_config(
 ) -> dict:
     blindbit = await get_backend_config(network)
     config = Config()
-    current  = await count_silnt_wallets(key_info.wallet.user)
+    # Per-network count so the UI's "wallets used" matches the per-network create
+    # limit enforced in api_wallet_create.
+    current  = await count_silnt_wallets(key_info.wallet.user, network)
     return {
         "mempool_endpoint": blindbit.mempool_url or "https://mempool.space",
         "sats_denominated": config.sats_denominated,
@@ -1384,7 +1397,7 @@ async def api_get_wallet_transaction(
     if wallet.user != key_info.wallet.user:
         raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
 
-    return await get_wallet_transaction_detail(wallet_id, txid)
+    return await get_wallet_transaction_detail(wallet_id, txid, wallet.network)
 
 @silnt_api_router.post("/api/v1/auth/device-check")
 async def api_device_check(
@@ -1631,8 +1644,8 @@ async def api_get_user_prefs(
     """
     user_id  = key_info.wallet.user
     prefs    = await get_user_prefs(user_id)
-    blindbit = await get_blindbit_config()
-    admin_default = int(blindbit.dust_threshold_sats or 5000)
+    backend  = await get_backend_config(DEFAULT_CONFIG_NETWORK)
+    admin_default = int(backend.dust_threshold_sats or 5000)
     return {
         "user_id":                    user_id,
         "dust_threshold_sats":        prefs.dust_threshold_sats if prefs else None,
@@ -1682,12 +1695,12 @@ async def api_update_user_prefs(
             except Exception as e:
                 logger.warning(f"dust re-eval failed for wallet {w.id}: {e}")
     except Exception as e:
-        logger.warning(f"dust re-eval skipped after prefs update: {e}")    
-    blindbit = await get_blindbit_config()
+        logger.warning(f"dust re-eval skipped after prefs update: {e}")
+    backend = await get_backend_config(DEFAULT_CONFIG_NETWORK)
     return {
         "user_id":                    user_id,
         "dust_threshold_sats":        dts,
-        "admin_default_dust":         int(blindbit.dust_threshold_sats or 5000),
+        "admin_default_dust":         int(backend.dust_threshold_sats or 5000),
         "effective_dust_threshold":   await get_effective_dust_threshold(user_id),
         "wallets_reevaluated":        reevaluated
     }
@@ -2143,9 +2156,9 @@ async def api_close_account(
 @silnt_api_router.get(
     "/api/v1/fees/recommended", dependencies=[Depends(require_trusted_device)]
 )
-async def api_recommended_fees():
+async def api_recommended_fees(network: str = Query(DEFAULT_CONFIG_NETWORK)):
     """Recommended fee tiers (sat/vB) for the configured network."""
-    return await get_recommended_fees()
+    return await get_recommended_fees(network)
 
 @silnt_api_router.get(
     "/api/v1/rate/usd", dependencies=[Depends(require_trusted_device)]
@@ -2172,7 +2185,7 @@ async def api_tx_confirmation(
         raise HTTPException(HTTPStatus.NOT_FOUND, "Wallet not found.")
     # (Add your usual user/wallet ownership check here, matching other endpoints.)
 
-    cfg = await get_blindbit_config()
+    cfg = await get_backend_config(wallet.network)
     mempool = (cfg.mempool_url or "").rstrip("/")
     if not mempool:
         raise HTTPException(HTTPStatus.SERVICE_UNAVAILABLE, "Mempool URL not configured.")
@@ -2654,7 +2667,7 @@ async def api_payjoin_requests(
     incoming = await list_payjoin_requests_for_receiver(uid)
     outgoing = await list_payjoin_requests_for_sender(uid)
     try:
-        blindbit = await get_blindbit_config()
+        blindbit = await get_backend_config(DEFAULT_CONFIG_NETWORK)
         mempool_base = blindbit.mempool_url or "https://mempool.space"
         seen = set()
         for r in [*incoming, *outgoing]:
@@ -3135,6 +3148,19 @@ async def _run_bitmail_tamper_sweep_inner() -> dict:
         expected = (row.get("sp_address") or "").strip()
         if not uname or not expected:
             continue
+        # If the owning wallet has been deleted, this is a stale record left over
+        # from a wallet removal. Purge it (request row + any alerts) and skip — a
+        # dead wallet must not keep generating tamper checks/alerts. This also
+        # self-heals orphans created before delete-time cleanup existed.
+        wid = (row.get("wallet_id") or "").strip()
+        if wid and not await get_silnt_wallet(wid):
+            try:
+                await delete_bip353_requests_for_wallet(wid)
+                await delete_admin_alerts_for_wallet(wid)
+                logger.info(f"tamper sweep: purged stale BitMail records for deleted wallet {wid}")
+            except Exception as e:
+                logger.warning(f"tamper sweep: could not purge stale records for {wid}: {e}")
+            continue
         bitmail = f"{uname}@{our_domain}"
         checked += 1
         try:
@@ -3191,7 +3217,7 @@ async def probe_blindbit_health() -> None:
     loop (no auth). Fires the down/up ntfy via notify_service_health_change on a
     state change. Best-effort — never raises."""
     try:
-        blindbit = await get_blindbit_config()
+        blindbit = await get_backend_config(DEFAULT_CONFIG_NETWORK)
         bb_url = (blindbit.blindbit_url or "").rstrip("/")
         if not bb_url:
             await notify_service_health_change("BlindBit Oracle", False, "URL not configured.")
@@ -3213,8 +3239,8 @@ async def probe_blindbit_health() -> None:
 async def probe_fulcrum_health() -> None:
     """Reachability probe for Fulcrum, callable from a background loop (no auth).
     Fires the down/up ntfy on a state change. Best-effort — never raises."""
-    try:        
-        cfg = await get_blindbit_config()
+    try:
+        cfg = await get_backend_config(DEFAULT_CONFIG_NETWORK)
         host = getattr(cfg, "fulcrum_host", "") or ""
         port = int(getattr(cfg, "fulcrum_port", 50001) or 50001)
         tls = bool(getattr(cfg, "fulcrum_tls", False))

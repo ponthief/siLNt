@@ -500,16 +500,4 @@ async def m023_backend_config_per_network(db):
             json_data TEXT NOT NULL DEFAULT '{}'
         );
         """
-    )
-    # Copy the legacy singleton to the network it represented (signet).
-    row = await db.fetchone(
-        "SELECT json_data FROM silnt.blindbit_config WHERE id = 'blindbit'",
-        {},
-    )
-    if row:
-        await db.execute(
-            """INSERT INTO silnt.backend_config (id, json_data)
-               VALUES (:id, :json)
-               ON CONFLICT (id) DO NOTHING""",
-            {"id": "signet", "json": row["json_data"]},
-        )
+    )    

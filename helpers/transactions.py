@@ -2,7 +2,7 @@ import time
 import httpx
 from loguru import logger
 from ..crud import (
-    get_blindbit_config,
+    get_backend_config,
     get_wallet_receives,
     get_wallet_sends,
     get_utxos_for_txid,
@@ -108,13 +108,14 @@ async def list_wallet_transactions(
 async def get_wallet_transaction_detail(
     wallet_id: str,
     txid:      str,
+    network:   str,
 ) -> dict:
     """
     Enriched view of one transaction. Pulls our own UTXOs from DB, then queries
     mempool.space for the full tx (fee, recipient, confirmation status).
     """
-    blindbit       = await get_blindbit_config()
-    mempool_base   = blindbit.mempool_url or "https://mempool.space"
+    backend        = await get_backend_config(network)
+    mempool_base   = backend.mempool_url or "https://mempool.space"
 
     own_outputs    = await get_utxos_for_txid(wallet_id, txid)
     spent_inputs   = await get_utxos_spent_in_tx(wallet_id, txid)

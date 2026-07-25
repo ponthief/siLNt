@@ -11,7 +11,7 @@ from coincurve import PublicKey
 from loguru import logger
 from ..crud import (
     db,
-    get_blindbit_config,
+    DEFAULT_CONFIG_NETWORK,
     get_backend_config,
     get_silnt_wallet,
     get_silnt_wallets,
@@ -423,7 +423,8 @@ class BlindBitOracleClient:
 
 
 async def scan_block(
-    height, client, scan_secret_bytes, spend_pub_bytes, spend_secret_bytes, labels
+    height, client, scan_secret_bytes, spend_pub_bytes, spend_secret_bytes, labels,
+    network: str,
 ):
     if labels:
         tweaks = await client.get_tweaks(height)
@@ -440,7 +441,7 @@ async def scan_block(
         )
         for o in owned:
             if not o.timestamp:
-                o.timestamp = await get_block_ts(o.txid.hex())
+                o.timestamp = await get_block_ts(o.txid.hex(), network)
         return owned
     compute_data = await client.get_compute_index(height)
     if compute_data:
@@ -461,7 +462,7 @@ async def scan_block(
                     owned.vout = full.get("vout", owned.vout)
                     owned.amount = full.get("amount", owned.amount)
                     owned.timestamp = full.get("timestamp") or await get_block_ts(
-                        full.get("txid", "")
+                        full.get("txid", ""), network
                     )
                     owned.pub_key = bytes.fromhex(full["pubkey"])
         return matches
@@ -477,7 +478,7 @@ async def scan_block(
     )
 
 
-async def mark_spent_utxos_batch(heights, client, wallet_id, owned_utxos_lookup):
+async def mark_spent_utxos_batch(heights, client, wallet_id, owned_utxos_lookup, network):
     """
     Short-hash matches move UTXOs to 'unconfirmed_spent' (provisional), then each
     is verified against the exact outpoint via mempool outspend before finalizing.
@@ -487,9 +488,9 @@ async def mark_spent_utxos_batch(heights, client, wallet_id, owned_utxos_lookup)
     if not owned_utxos_lookup:
         return
 
-    # Resolve the mempool base once for verification.    
-    blindbit = await get_blindbit_config()
-    mempool_base = blindbit.mempool_url or "https://mempool.space"
+    # Resolve the mempool base once for verification.
+    backend = await get_backend_config(network)
+    mempool_base = backend.mempool_url or "https://mempool.space"
 
     async def check_height(height: int):
         try:
@@ -661,13 +662,14 @@ async def scan_wallet(
                     spend_pub_bytes,
                     spend_secret_bytes,
                     labels,
+                    wallet.network,
                 )
                 for h in batch
             ],
             return_exceptions=True,
         )
 
-        await mark_spent_utxos_batch(batch, oracle, wallet_id, owned_utxos_lookup)
+        await mark_spent_utxos_batch(batch, oracle, wallet_id, owned_utxos_lookup, wallet.network)
 
         for h, result in zip(batch, batch_results):
             if isinstance(result, Exception):
@@ -720,7 +722,7 @@ async def scan_wallet(
     )
     
     try:
-        rec = await reconcile_unconfirmed_spent(wallet_id)
+        rec = await reconcile_unconfirmed_spent(wallet_id, wallet.network)
         if rec["restored"] or rec["confirmed"]:
             logger.info(
                 f"Wallet {wallet_id} reconcile: "
@@ -768,9 +770,9 @@ async def scan_all_wallets(user: str, network: str = "mainnet") -> list[dict]:
     return results
 
 
-async def get_block_ts(txid: str) -> int:
-    blindbit = await get_blindbit_config()
-    base = (blindbit.mempool_url or "https://mempool.space").rstrip("/")
+async def get_block_ts(txid: str, network: str = DEFAULT_CONFIG_NETWORK) -> int:
+    backend = await get_backend_config(network)
+    base = (backend.mempool_url or "https://mempool.space").rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=10.0) as c:
             r = await c.get(f"{base}/api/tx/{txid}")
@@ -802,13 +804,13 @@ async def get_tx_status(base_mempool_url: str, txid: str) -> dict | None:
         return {"unknown": True}                  # network hiccup — don't change state
 
 
-async def reconcile_unconfirmed_spent(wallet_id: str) -> dict:
+async def reconcile_unconfirmed_spent(wallet_id: str, network: str = DEFAULT_CONFIG_NETWORK) -> dict:
     """
     Walk the wallet's unconfirmed_spent UTXOs and reconcile each against the
     explorer. Returns counts of {confirmed, restored, pending}.
     """
-    blindbit = await get_blindbit_config()
-    base = blindbit.mempool_url or "https://mempool.space"
+    backend = await get_backend_config(network)
+    base = backend.mempool_url or "https://mempool.space"
 
     rows = await db.fetchall(
         """SELECT txid, vout, spent_in_txid FROM silnt.utxos

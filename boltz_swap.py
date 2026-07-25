@@ -37,7 +37,7 @@ from http import HTTPStatus
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger
 from pydantic import BaseModel
 
@@ -47,7 +47,8 @@ from lnbits.core.services import create_invoice
 from lnbits.decorators import require_admin_key
 from lnbits.core.models import WalletTypeInfo
 from .crud import (
-    get_blindbit_config,
+    get_backend_config,
+    DEFAULT_CONFIG_NETWORK,
     get_boltz_swap,
     create_boltz_swap,
     update_boltz_swap
@@ -56,16 +57,15 @@ from .models import CreateSwapInRequest, SwapInResponse, BoltzSwapRecord, Funded
 from .swap_crypto import encrypt_refund_key
 
 # ── Config ────────────────────────────────────────────────────────────────────
-# boltz_url is stored in the siLNt BlindBit/system config (same store as
+# boltz_url is stored in the per-network siLNt backend config (same store as
 # blindbit_url / mempool_url), editable in the Thrilla Admin screen. Read it the
-# same way the scanner reads blindbit_url. Replace `get_blindbit_config()` below
-# with siLNt's actual config accessor (the one that returns blindbit_url).
+# same way the scanner reads blindbit_url, keyed by the swap's network.
 #
 #   regtest → http://127.0.0.1:9001   (boltz-backend-nginx)
 #   mainnet → https://api.boltz.exchange
-async def _boltz_url() -> str:
-    
-    cfg = await get_blindbit_config()
+async def _boltz_url(network: str = DEFAULT_CONFIG_NETWORK) -> str:
+
+    cfg = await get_backend_config(network)
     url = cfg.boltz_url
     if not url:
         raise HTTPException(
@@ -75,16 +75,16 @@ async def _boltz_url() -> str:
     return url
 
 
-async def _boltz_get(path: str) -> dict:
-    base = await _boltz_url()
+async def _boltz_get(path: str, network: str = DEFAULT_CONFIG_NETWORK) -> dict:
+    base = await _boltz_url(network)
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.get(f"{base}{path}")
         r.raise_for_status()
         return r.json()
 
 
-async def _boltz_post(path: str, body: dict) -> dict:
-    base = await _boltz_url()
+async def _boltz_post(path: str, body: dict, network: str = DEFAULT_CONFIG_NETWORK) -> dict:
+    base = await _boltz_url(network)
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(f"{base}{path}", json=body)
         if r.status_code >= 400:
@@ -101,10 +101,13 @@ silnt_boltz_router = APIRouter()
 
 
 @silnt_boltz_router.get("/api/v1/swap/limits")
-async def api_swap_limits(key_info: WalletTypeInfo = Depends(require_admin_key)):
+async def api_swap_limits(
+    network: str = Query(DEFAULT_CONFIG_NETWORK),
+    key_info: WalletTypeInfo = Depends(require_admin_key),
+):
     """Boltz submarine pair limits/fees (min/max), for client-side validation."""
     try:
-        pairs = await _boltz_get("/v2/swap/submarine")
+        pairs = await _boltz_get("/v2/swap/submarine", network)
         # shape: { "BTC": { "BTC": { "limits": {"minimal":..,"maximal":..}, "fees": {...} } } }
         btc = pairs.get("BTC", {}).get("BTC", {})
         limits = btc.get("limits", {})
@@ -157,6 +160,7 @@ async def api_create_swap_in(
                 "from": "BTC",
                 "refundPublicKey": refund_pub,
             },
+            data.network,
         )
     except HTTPException:
         raise
@@ -205,7 +209,9 @@ async def api_swap_in_status(
 ):
     """Poll a swap's status from Boltz (client can also use the WS directly)."""
     try:
-        status = await _boltz_get(f"/v2/swap/submarine/{swap_id}")
+        rec = await get_boltz_swap(swap_id)
+        network = rec.network if rec and rec.network else DEFAULT_CONFIG_NETWORK
+        status = await _boltz_get(f"/v2/swap/submarine/{swap_id}", network)
         return status
     except HTTPException:
         raise
@@ -239,8 +245,8 @@ async def api_swap_in_funded(
     if rec.wallet_id != key_info.wallet.id and rec.silnt_wallet_id != key_info.wallet.id:
         raise HTTPException(HTTPStatus.FORBIDDEN, "Not your swap.")
 
-    # Fetch the tx and find the output paying the lockup address.    
-    cfg = await get_blindbit_config()
+    # Fetch the tx and find the output paying the lockup address.
+    cfg = await get_backend_config(rec.network or DEFAULT_CONFIG_NETWORK)
     mempool = cfg.mempool_url
     if not mempool:
         raise HTTPException(HTTPStatus.SERVICE_UNAVAILABLE, "Mempool URL not configured.")
