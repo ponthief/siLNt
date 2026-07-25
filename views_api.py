@@ -361,15 +361,18 @@ async def api_wallet_create(
                 detail="Silent Payment Wallet already exists!",
             )
 
+        # The limit is per-network: max_wallets_per_user comes from THIS network's
+        # backend config, so count only the user's wallets on this network. A user
+        # at the cap on signet can still create a wallet on mainnet.
         max_wallets = blindbit_cfg.max_wallets_per_user or 1
         if max_wallets > 0:
-            current_count = await count_silnt_wallets(key_info.wallet.user)
+            current_count = await count_silnt_wallets(key_info.wallet.user, data.network)
             if current_count >= max_wallets:
                 raise HTTPException(
                     status_code=HTTPStatus.BAD_REQUEST,
                     detail=(
                         f"Wallet limit reached. You can have at most {max_wallets} wallet"
-                        f"{'s' if max_wallets != 1 else ''} on this server. "
+                        f"{'s' if max_wallets != 1 else ''} on {data.network}. "
                         f"You currently have {current_count}."
                     ),
                 )
@@ -1112,7 +1115,9 @@ async def api_get_config(
 ) -> dict:
     blindbit = await get_backend_config(network)
     config = Config()
-    current  = await count_silnt_wallets(key_info.wallet.user)
+    # Per-network count so the UI's "wallets used" matches the per-network create
+    # limit enforced in api_wallet_create.
+    current  = await count_silnt_wallets(key_info.wallet.user, network)
     return {
         "mempool_endpoint": blindbit.mempool_url or "https://mempool.space",
         "sats_denominated": config.sats_denominated,
