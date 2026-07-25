@@ -34,6 +34,7 @@ db = Database("ext_silnt")
 # Singleton row ID for the global blindbit config
 DEFAULT_CONFIG_NETWORK = "signet"
 CF_CONFIG_ID = "cloudflare_config"
+NTFY_CONFIG_ID = "ntfy_config"
 BIP352_CHANGE_LABEL_INDEX = 1
 
 async def create_silnt_wallet(wallet: WalletAccount) -> WalletAccount:
@@ -276,7 +277,7 @@ async def update_backend_config(config: BackendConfig, network: str) -> BackendC
 
 async def get_cloudflare_config() -> CloudflareConfig:
     row = await db.fetchone(
-        "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
+        "SELECT json_data FROM silnt.backend_config WHERE id = :id",
         {"id": CF_CONFIG_ID},
     )
     cfg = CloudflareConfig(**json.loads(row["json_data"])) if row else CloudflareConfig()
@@ -300,7 +301,7 @@ async def update_cloudflare_config(config: CloudflareConfig) -> CloudflareConfig
         # No env override: preserve the existing stored domain rather than let
         # the client change it.
         existing = await db.fetchone(
-            "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
+            "SELECT json_data FROM silnt.backend_config WHERE id = :id",
             {"id": CF_CONFIG_ID},
         )
         if existing:
@@ -310,28 +311,26 @@ async def update_cloudflare_config(config: CloudflareConfig) -> CloudflareConfig
                 pass
     json_data = config.json()
     existing = await db.fetchone(
-        "SELECT id FROM silnt.blindbit_config WHERE id = :id",
+        "SELECT id FROM silnt.backend_config WHERE id = :id",
         {"id": CF_CONFIG_ID},
     )
     if existing:
         await db.execute(
-            "UPDATE silnt.blindbit_config SET json_data = :json_data WHERE id = :id",
+            "UPDATE silnt.backend_config SET json_data = :json_data WHERE id = :id",
             {"json_data": json_data, "id": CF_CONFIG_ID},
         )
     else:
         await db.execute(
-            "INSERT INTO silnt.blindbit_config (id, json_data) VALUES (:id, :json_data)",
+            "INSERT INTO silnt.backend_config (id, json_data) VALUES (:id, :json_data)",
             {"id": CF_CONFIG_ID, "json_data": json_data},
         )
     return config
 
 
-NTFY_CONFIG_ID = "ntfy_config"
-
 
 async def get_ntfy_config() -> NtfyConfig:
     row = await db.fetchone(
-        "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
+        "SELECT json_data FROM silnt.backend_config WHERE id = :id",
         {"id": NTFY_CONFIG_ID},
     )
     return NtfyConfig(**json.loads(row["json_data"])) if row else NtfyConfig()
@@ -340,17 +339,17 @@ async def get_ntfy_config() -> NtfyConfig:
 async def update_ntfy_config(config: NtfyConfig) -> NtfyConfig:
     json_data = config.json()
     existing = await db.fetchone(
-        "SELECT id FROM silnt.blindbit_config WHERE id = :id",
+        "SELECT id FROM silnt.backend_config WHERE id = :id",
         {"id": NTFY_CONFIG_ID},
     )
     if existing:
         await db.execute(
-            "UPDATE silnt.blindbit_config SET json_data = :json_data WHERE id = :id",
+            "UPDATE silnt.backend_config SET json_data = :json_data WHERE id = :id",
             {"json_data": json_data, "id": NTFY_CONFIG_ID},
         )
     else:
         await db.execute(
-            "INSERT INTO silnt.blindbit_config (id, json_data) VALUES (:id, :json_data)",
+            "INSERT INTO silnt.backend_config (id, json_data) VALUES (:id, :json_data)",
             {"id": NTFY_CONFIG_ID, "json_data": json_data},
         )
     return config
@@ -430,7 +429,7 @@ async def notify_service_health_change(service: str, is_up: bool, detail: str = 
     state_id = f"{HEALTH_STATE_ID}:{service}"
     try:
         row = await db.fetchone(
-            "SELECT json_data FROM silnt.blindbit_config WHERE id = :id",
+            "SELECT json_data FROM silnt.backend_config WHERE id = :id",
             {"id": state_id},
         )
         prev = json.loads(row["json_data"]).get("up") if row else None
@@ -444,16 +443,16 @@ async def notify_service_health_change(service: str, is_up: bool, detail: str = 
     try:
         payload = json.dumps({"up": is_up})
         exists = await db.fetchone(
-            "SELECT id FROM silnt.blindbit_config WHERE id = :id", {"id": state_id}
+            "SELECT id FROM silnt.backend_config WHERE id = :id", {"id": state_id}
         )
         if exists:
             await db.execute(
-                "UPDATE silnt.blindbit_config SET json_data = :j WHERE id = :id",
+                "UPDATE silnt.backend_config SET json_data = :j WHERE id = :id",
                 {"j": payload, "id": state_id},
             )
         else:
             await db.execute(
-                "INSERT INTO silnt.blindbit_config (id, json_data) VALUES (:id, :j)",
+                "INSERT INTO silnt.backend_config (id, json_data) VALUES (:id, :j)",
                 {"id": state_id, "j": payload},
             )
     except Exception:
@@ -485,7 +484,7 @@ async def reset_service_health_state() -> None:
     clean (the next health check is treated as a first observation). Called when
     ntfy config is saved, so stale state can't permanently suppress alerts."""
     await db.execute(
-        "DELETE FROM silnt.blindbit_config WHERE id = :id", {"id": HEALTH_STATE_ID}
+        "DELETE FROM silnt.backend_config WHERE id = :id", {"id": HEALTH_STATE_ID}
     )
 
 async def count_silnt_wallets(user: str, network: Optional[str] = None) -> int:
