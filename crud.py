@@ -2276,7 +2276,9 @@ def _decrypt_sp_contact_row(row: dict) -> dict:
             pass  # legacy/plaintext tolerance
     return out
 
-async def create_sp_contact(user_id: str, label: str, value: str) -> "SpContact":
+async def create_sp_contact(
+    user_id: str, label: str, value: str, network: str
+) -> "SpContact":
     from .models import SpContact
     value = (value or "").strip()
     if not value:
@@ -2284,10 +2286,11 @@ async def create_sp_contact(user_id: str, label: str, value: str) -> "SpContact"
     label = (label or "").strip() or value
     kind = _classify_recipient(value)
     vhash = _spc_hash(value)
-    # Dedup: same user + same recipient (case-insensitive) — update label instead.
+    # Dedup within the same user AND network — the same recipient can legitimately
+    # be saved on more than one network, so it's not a cross-network duplicate.
     existing = await db.fetchone(
-        "SELECT id FROM silnt.sp_contacts WHERE user_id = :uid AND value_sha256 = :h",
-        {"uid": user_id, "h": vhash},
+        "SELECT id FROM silnt.sp_contacts WHERE user_id = :uid AND network = :net AND value_sha256 = :h",
+        {"uid": user_id, "net": network, "h": vhash},
     )
     if existing:
         await db.execute(
@@ -2298,10 +2301,10 @@ async def create_sp_contact(user_id: str, label: str, value: str) -> "SpContact"
     cid = urlsafe_short_hash()
     await db.execute(
         """
-        INSERT INTO silnt.sp_contacts (id, user_id, label, kind, value, value_sha256)
-        VALUES (:id, :uid, :label, :kind, :value, :h)
+        INSERT INTO silnt.sp_contacts (id, user_id, network, label, kind, value, value_sha256)
+        VALUES (:id, :uid, :net, :label, :kind, :value, :h)
         """,
-        {"id": cid, "uid": user_id, "label": label, "kind": kind,
+        {"id": cid, "uid": user_id, "net": network, "label": label, "kind": kind,
          "value": _pj_encrypt(value), "h": vhash},
     )
     return await get_sp_contact(cid)
@@ -2311,11 +2314,12 @@ async def get_sp_contact(cid: str) -> Optional["SpContact"]:
     row = await db.fetchone("SELECT * FROM silnt.sp_contacts WHERE id = :id", {"id": cid})
     return SpContact(**_decrypt_sp_contact_row(row)) if row else None
 
-async def list_sp_contacts(user_id: str) -> list:
+async def list_sp_contacts(user_id: str, network: str) -> list:
     from .models import SpContact
     rows = await db.fetchall(
-        "SELECT * FROM silnt.sp_contacts WHERE user_id = :uid ORDER BY last_used_at DESC NULLS LAST, label ASC",
-        {"uid": user_id},
+        "SELECT * FROM silnt.sp_contacts WHERE user_id = :uid AND network = :net "
+        "ORDER BY last_used_at DESC NULLS LAST, label ASC",
+        {"uid": user_id, "net": network},
     )
     return [SpContact(**_decrypt_sp_contact_row(r)) for r in rows]
 
@@ -2325,11 +2329,12 @@ async def update_sp_contact_label(cid: str, user_id: str, label: str) -> None:
         {"l": (label or "").strip(), "id": cid, "uid": user_id},
     )
 
-async def touch_sp_contact(user_id: str, value: str) -> None:
+async def touch_sp_contact(user_id: str, value: str, network: str) -> None:
     """Bump last_used_at when a saved recipient is sent to (for ordering)."""
     await db.execute(
-        "UPDATE silnt.sp_contacts SET last_used_at = :ts WHERE user_id = :uid AND value_sha256 = :h",
-        {"ts": int(time.time()), "uid": user_id, "h": _spc_hash(value)},
+        "UPDATE silnt.sp_contacts SET last_used_at = :ts "
+        "WHERE user_id = :uid AND network = :net AND value_sha256 = :h",
+        {"ts": int(time.time()), "uid": user_id, "net": network, "h": _spc_hash(value)},
     )
 
 async def delete_sp_contact(cid: str, user_id: str) -> None:

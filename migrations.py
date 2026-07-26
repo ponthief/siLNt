@@ -500,4 +500,21 @@ async def m023_backend_config_per_network(db):
             json_data TEXT NOT NULL DEFAULT '{}'
         );
         """
-    )    
+    )
+
+
+async def m024_sp_contacts_network(db):
+    """Scope the SP address book per network. Without this, a user with wallets
+    on more than one network (e.g. a mainnet build reusing a signet test account)
+    sees every network's contacts. Contacts predate this column were created in
+    the signet-only phase, so backfill them to signet; new rows carry their
+    creating build's network. The dedup index gains `network` so the same
+    recipient can be saved on more than one network.
+    """
+    await db.execute(
+        "ALTER TABLE silnt.sp_contacts ADD COLUMN network TEXT NOT NULL DEFAULT 'signet';"
+    )
+    await db.execute("DROP INDEX IF EXISTS silnt.idx_sp_contacts_user")
+    await db.execute(
+        "CREATE INDEX idx_sp_contacts_user ON silnt.sp_contacts (user_id, network, value_sha256);"
+    )

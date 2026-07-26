@@ -1018,7 +1018,7 @@ async def api_build_transaction(
             network=wallet.network,
         )
         try:
-            await touch_sp_contact(key_info.wallet.user, _orig_recipient)
+            await touch_sp_contact(key_info.wallet.user, _orig_recipient, wallet.network)
         except Exception:
             pass
         return result
@@ -2885,17 +2885,31 @@ async def api_fulcrum_health(
 # ── SP send contacts (per-user private address book) ──────────────────────────
 @silnt_api_router.get("/api/v1/contacts")
 async def api_sp_contacts_list(
+    network: Optional[str] = Query(None),
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
-    rows = await list_sp_contacts(key_info.wallet.user)
+    # The address book is per-network; require it explicitly so a mainnet build
+    # can't be served a signet account's contacts (and vice versa).
+    if not network:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="A `network` query parameter is required (e.g. ?network=mainnet).",
+        )
+    rows = await list_sp_contacts(key_info.wallet.user, network)
     return {"contacts": [c.dict() for c in rows]}
 
 
 @silnt_api_router.post("/api/v1/contacts")
 async def api_sp_contacts_create(
     data: CreateSpContactData,
+    network: Optional[str] = Query(None),
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
+    if not network:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="A `network` query parameter is required (e.g. ?network=mainnet).",
+        )
     value = (data.value or "").strip()
     if not value:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Recipient is required.")
@@ -2908,7 +2922,7 @@ async def api_sp_contacts_create(
             status_code=HTTPStatus.BAD_REQUEST,
             detail="Recipient must be a BitMail name (name@domain) or an SP address (sp1…/tsp1…).",
         )
-    c = await create_sp_contact(key_info.wallet.user, data.label, value)
+    c = await create_sp_contact(key_info.wallet.user, data.label, value, network)
     return c.dict()
 
 @silnt_api_router.patch("/api/v1/contacts/{cid}")

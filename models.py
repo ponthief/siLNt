@@ -424,6 +424,7 @@ class ContactLabelData(BaseModel):
 class SpContact(BaseModel):
     id: str
     user_id: str
+    network: str = "mainnet"       # address book is per-network
     label: str
     kind: str                      # 'bitmail' | 'sp'
     value: str                     # recipient (bitmail name or sp address); decrypted on read
