@@ -53,7 +53,9 @@ class WalletAccount(BaseModel):
     sp_address: str
     hr_address: str
     last_height: int
-    last_scan_height: int = 1
+    # 0 = never scanned (matches the DB column default in migrations.py). Was 1,
+    # which made a freshly-created wallet report "scanned to block 1".
+    last_scan_height: int = 0
 
 
 class UTXORecord(BaseModel):
