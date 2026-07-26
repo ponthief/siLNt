@@ -668,7 +668,14 @@ async def api_save_generated_wallet_address(
     "/api/v1/oracle/tip",
     dependencies=[Depends(require_trusted_device)],
 )
-async def api_get_chain_tip(network: str = Query("signet")):
+async def api_get_chain_tip(network: Optional[str] = Query(None)):
+    # No silent signet fallback: a client that omits `network` (e.g. a mainnet
+    # build) would otherwise get signet's tip. Require it explicitly.
+    if not network:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="A `network` query parameter is required (e.g. ?network=mainnet).",
+        )
     blindbit = await get_backend_config(network)
     if not blindbit.blindbit_url:
         raise HTTPException(
@@ -1139,9 +1146,16 @@ async def api_recover_wallet_keys(
 
 @silnt_api_router.get("/api/v1/config")
 async def api_get_config(
-    network: str = Query("signet"),
+    network: Optional[str] = Query(None),
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ) -> dict:
+    # No silent signet fallback: require the client's network explicitly so a
+    # mainnet build can't be served signet's min_scan_height / dust threshold.
+    if not network:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="A `network` query parameter is required (e.g. ?network=mainnet).",
+        )
     blindbit = await get_backend_config(network)
     config = Config()
     # Per-network count so the UI's "wallets used" matches the per-network create
