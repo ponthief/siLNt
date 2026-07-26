@@ -837,8 +837,37 @@ async def api_resolve_bip353(
         ..., description="BIP353 address in email format, e.g. alice@domain.com"
     ),
     key_info: WalletTypeInfo = Depends(require_trusted_device),
-) -> dict:    
+) -> dict:
     return bip353_resolve(address.strip())
+
+
+@silnt_api_router.get("/api/v1/bip353/available")
+async def api_bip353_available(
+    username: str = Query(..., description="Desired BitMail username (no domain)"),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+) -> dict:
+    """
+    Live availability check for a BitMail username, used by clients before
+    submitting a request. Applies the same rules as api_create_bip353_request:
+    format, reserved list, already-approved, and existing DNS record.
+    Returns {available: bool, reason: 'invalid'|'reserved'|'taken'|None}.
+    """
+    u = (username or "").strip().lower()
+    if not USERNAME_PATTERN.match(u):
+        return {"available": False, "reason": "invalid"}
+    if u in RESERVED_USERNAMES:
+        return {"available": False, "reason": "reserved"}
+    if await is_username_taken(u):
+        return {"available": False, "reason": "taken"}
+    try:
+        _cf = await get_cloudflare_config()
+        if _cf and _cf.domain and _bip353_exists_in_dns(u, _cf.domain):
+            return {"available": False, "reason": "taken"}
+    except Exception:
+        # A DNS/config hiccup shouldn't block the check — the authoritative
+        # validation still runs on submit in api_create_bip353_request.
+        pass
+    return {"available": True, "reason": None}
     
 
 # Transactions
