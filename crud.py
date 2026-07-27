@@ -2292,6 +2292,16 @@ async def create_sp_contact(
         "SELECT id FROM silnt.sp_contacts WHERE user_id = :uid AND network = :net AND value_sha256 = :h",
         {"uid": user_id, "net": network, "h": vhash},
     )
+    # A name must be unique within the user's per-network address book. Reject if
+    # some OTHER contact already uses this label (case-insensitive) — this same
+    # recipient keeping or changing its own label is fine (handled below).
+    label_owner = await db.fetchone(
+        "SELECT id FROM silnt.sp_contacts "
+        "WHERE user_id = :uid AND network = :net AND LOWER(label) = LOWER(:l)",
+        {"uid": user_id, "net": network, "l": label},
+    )
+    if label_owner and (not existing or label_owner["id"] != existing["id"]):
+        raise ValueError(f'A contact named "{label}" already exists.')
     if existing:
         await db.execute(
             "UPDATE silnt.sp_contacts SET label = :l WHERE id = :id",
@@ -2324,9 +2334,20 @@ async def list_sp_contacts(user_id: str, network: str) -> list:
     return [SpContact(**_decrypt_sp_contact_row(r)) for r in rows]
 
 async def update_sp_contact_label(cid: str, user_id: str, label: str) -> None:
+    label = (label or "").strip()
+    # Same uniqueness rule as create: a rename can't collide with another
+    # contact's name in the same user+network address book.
+    clash = await db.fetchone(
+        "SELECT id FROM silnt.sp_contacts "
+        "WHERE user_id = :uid AND id != :cid AND LOWER(label) = LOWER(:l) "
+        "AND network = (SELECT network FROM silnt.sp_contacts WHERE id = :cid)",
+        {"uid": user_id, "cid": cid, "l": label},
+    )
+    if clash:
+        raise ValueError(f'A contact named "{label}" already exists.')
     await db.execute(
         "UPDATE silnt.sp_contacts SET label = :l WHERE id = :id AND user_id = :uid",
-        {"l": (label or "").strip(), "id": cid, "uid": user_id},
+        {"l": label, "id": cid, "uid": user_id},
     )
 
 async def touch_sp_contact(user_id: str, value: str, network: str) -> None:
