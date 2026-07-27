@@ -2922,7 +2922,10 @@ async def api_sp_contacts_create(
             status_code=HTTPStatus.BAD_REQUEST,
             detail="Recipient must be a BitMail name (name@domain) or an SP address (sp1…/tsp1…).",
         )
-    c = await create_sp_contact(key_info.wallet.user, data.label, value, network)
+    try:
+        c = await create_sp_contact(key_info.wallet.user, data.label, value, network)
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
     return c.dict()
 
 @silnt_api_router.patch("/api/v1/contacts/{cid}")
@@ -2931,7 +2934,10 @@ async def api_sp_contacts_update(
     data: UpdateSpContactData,
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
-    await update_sp_contact_label(cid, key_info.wallet.user, data.label)
+    try:
+        await update_sp_contact_label(cid, key_info.wallet.user, data.label)
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
     return {"ok": True}
 
 
