@@ -42,6 +42,10 @@ class CreateWallet(BaseModel):
     hr_address: Optional[str] = None
     last_height: str = None
     balance: Optional[int] = None
+    # Client-derived Silent Payments address. When present, the client generated
+    # the seed and derived keys on-device (server never sees the mnemonic), so the
+    # server stores this address as-is and skips server-side generation/derivation.
+    sp_address: Optional[str] = None
 
 
 class WalletAccount(BaseModel):
