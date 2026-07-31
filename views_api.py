@@ -304,23 +304,6 @@ async def api_wallet_create(
         # ★ 2. Generate or import + ★ 3. checksum validation
         #    data.mnemonic is encrypted (as before) when importing. Decrypt first,
         #    then validate/generate. If no mnemonic supplied → generate fresh.
-        mn = Mnemonic("english")
-        if data.mnemonic:                      # ← only decrypt when present
-            mnemonic_plain = decrypt_mnemonic(data.mnemonic, str(last_height))
-            words = mnemonic_plain.strip().lower().split()
-            if len(words) != 12:
-                raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
-                    detail=f"Mnemonic must be exactly 12 words (got {len(words)}).")
-            mnemonic_plain = " ".join(words)
-            if not mn.check(mnemonic_plain):
-                raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
-                    detail="Invalid mnemonic — the checksum (last word) is incorrect.")
-            was_generated = False
-        else:
-            mnemonic_plain = mn.generate(strength=128)   # fresh 12 words
-            was_generated = True
-
-        # ★ 4. Pass the BIP-39 passphrase through to derivation
         passphrase = (data.passphrase or "").strip()
 
         new_wallet = WalletAccount(
@@ -336,19 +319,54 @@ async def api_wallet_create(
             scan_secret="",
         )
 
-        (
-            sp_address,
-            scan_secret_hex,
-            spend_key_hex,
-        ) = await generate_silent_wallet_address(
-            mnemonic_plain,
-            passphrase=passphrase,     # ← see note if your helper lacks this arg
-            network=data.network,
-        )
-        if not all([sp_address, scan_secret_hex, spend_key_hex]):
-            raise ValueError(
-                f"Wallet '{data.title}' cannot be created with given mnemonic!"
+        if data.sp_address:
+            # Client-side derivation: the app generated the seed and derived the
+            # keys on-device, so the server never sees the mnemonic or the private
+            # keys. Trust the supplied address (self-custody) and skip derivation.
+            sp_address = data.sp_address.strip()
+            expected_prefix = "sp1" if data.network == "mainnet" else "tsp1"
+            if not sp_address.startswith(expected_prefix):
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_REQUEST,
+                    detail=f"sp_address must start with '{expected_prefix}' for {data.network}.",
+                )
+            # Never known to the server; the client stores its own keys/mnemonic.
+            scan_secret_hex = ""
+            spend_key_hex = ""
+            mnemonic_plain = None
+            was_generated = False
+        else:
+            # Legacy path: server generates (or imports) the seed and derives keys.
+            # Kept for older clients and the web app until they move on-device too.
+            mn = Mnemonic("english")
+            if data.mnemonic:                      # ← only decrypt when present
+                mnemonic_plain = decrypt_mnemonic(data.mnemonic, str(last_height))
+                words = mnemonic_plain.strip().lower().split()
+                if len(words) != 12:
+                    raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                        detail=f"Mnemonic must be exactly 12 words (got {len(words)}).")
+                mnemonic_plain = " ".join(words)
+                if not mn.check(mnemonic_plain):
+                    raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                        detail="Invalid mnemonic — the checksum (last word) is incorrect.")
+                was_generated = False
+            else:
+                mnemonic_plain = mn.generate(strength=128)   # fresh 12 words
+                was_generated = True
+
+            (
+                sp_address,
+                scan_secret_hex,
+                spend_key_hex,
+            ) = await generate_silent_wallet_address(
+                mnemonic_plain,
+                passphrase=passphrase,
+                network=data.network,
             )
+            if not all([sp_address, scan_secret_hex, spend_key_hex]):
+                raise ValueError(
+                    f"Wallet '{data.title}' cannot be created with given mnemonic!"
+                )
 
         _stable_seed = f"{data.network}:{sp_address}".encode()
         wallet_id = "sp" + hashlib.sha256(_stable_seed).hexdigest()[:20]
