@@ -1,4 +1,3 @@
-import random
 import hmac
 import os
 import hashlib
