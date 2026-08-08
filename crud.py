@@ -532,8 +532,8 @@ async def get_utxos_by_txid(txid: str) -> list:
 
 async def get_next_label_index(wallet_id: str) -> int:
     """
-    Return the LOWEST free label index >= 2 for this wallet (m=0 is the base
-    address, m=1 is the BIP-352 change label, both reserved). Using the lowest
+    Return the LOWEST free label index >= 2 for this wallet (m=0 is the BIP-352
+    change label, m=1 is the legacy change index, both reserved). Using the lowest
     free index — rather than MAX+1 — means deleting a labeled address (e.g. m=2)
     frees that slot, so the next generated address reuses it instead of skipping
     to m=4 and leaving a permanent hole (and drifting past the wallet's small

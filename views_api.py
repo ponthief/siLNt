@@ -233,7 +233,7 @@ from .models import (
 )
 
 MAX_ADDRESSES_PER_WALLET = 2
-BIP352_CHANGE_LABEL_INDEX = 1
+BIP352_CHANGE_LABEL_INDEX = 0
 BITMAIL_MAX_ACQUISITIONS = 3
 BLINDBIT_SYNC_TOLERANCE = 2
 FULCRUM_SYNC_TOLERANCE = 2
@@ -564,9 +564,11 @@ async def api_preview_wallet_address(
 
     label_index = data.label_index
     if label_index is None or label_index <= 0:
+        # m=0 is the BIP-352 change label — never hand it out; bump to next free.
         label_index = await get_next_label_index(wallet_id)
-    elif label_index == BIP352_CHANGE_LABEL_INDEX:
-        # m=1 is reserved per BIP-352 — silently bump to next free
+    elif label_index == 1:
+        # m=1 is the legacy change index (still scanned) — keep it reserved so a
+        # user label can't collide with pre-fix change outputs.
         label_index = await get_next_label_index(wallet_id)
     elif await label_index_taken(wallet_id, label_index):
         label_index = await get_next_label_index(wallet_id)
@@ -659,13 +661,14 @@ async def api_save_generated_wallet_address(
     # Determine the label_index — trust server, not stale client state
     label_index = data.label_index
     if label_index is None or label_index <= 0:
+        # m=0 is the BIP-352 change label — never hand it out; bump to next free.
+        label_index = await get_next_label_index(wallet_id)
+    elif label_index == 1:
+        # m=1 is the legacy change index (still scanned) — keep it reserved.
         label_index = await get_next_label_index(wallet_id)
     elif await label_index_taken(wallet_id, label_index):
         # Bump to next free instead of erroring
         label_index = await get_next_label_index(wallet_id)
-    if label_index == BIP352_CHANGE_LABEL_INDEX:
-      # m=1 is reserved for change — bump to next free
-      label_index = await get_next_label_index(wallet_id)
 
     try:
         return await save_wallet_address(
