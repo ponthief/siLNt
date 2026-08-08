@@ -7,10 +7,19 @@
 #   1. Create a Firebase project and a service account with the
 #      "Firebase Cloud Messaging API" enabled; download its JSON key.
 #   2. Put the JSON on the server and set:  SILNT_FCM_CREDENTIALS=/path/to/key.json
-#   If the env var is unset or the file is missing, push is simply disabled
+#      (either exported into LNbits' environment or as a line in the .env LNbits
+#      loads — both are supported).
+#   If the value is unset or the file is missing, push is simply disabled
 #   (sends are no-ops) — the rest of the app is unaffected.
+#
+# No 'google-auth' install is required: access tokens are minted here by signing
+# a JWT with the service account's key using 'cryptography' (already an LNbits
+# dependency).
 import asyncio
+import base64
+import json
 import os
+import time
 from typing import Optional
 
 import httpx
@@ -18,7 +27,7 @@ from loguru import logger
 
 _SCOPES = ["https://www.googleapis.com/auth/firebase.messaging"]
 
-_creds = None  # cached google.oauth2.service_account.Credentials
+_creds = None  # cached _ServiceAccount
 
 
 _ENV_KEY = "SILNT_FCM_CREDENTIALS"
@@ -118,7 +127,7 @@ def _resolve_credentials_path():
 def _load_credentials():
     """Return (creds, reason). On failure creds is None and reason is a
     human-readable explanation of exactly which link is broken — so callers can
-    tell 'env unset' from 'file missing' from 'google-auth not installed'."""
+    tell 'env unset' from 'file missing' from 'wrong/invalid credentials file'."""
     global _creds
     if _creds is not None:
         return _creds, ""
@@ -138,21 +147,30 @@ def _load_credentials():
             f"and readable by the LNbits user)."
         )
     try:
-        from google.oauth2 import service_account
+        with open(path, "r", encoding="utf-8") as fh:
+            info = json.load(fh)
     except Exception as e:
         return None, (
-            f"The 'google-auth' package isn't installed in the LNbits "
-            f"environment ({e}). Install the extension's dependencies "
-            f"(google-auth) and restart LNbits."
+            f"Found the credentials file but couldn't read it as JSON: {e}."
+        )
+    if (
+        info.get("type") != "service_account"
+        or not info.get("client_email")
+        or not info.get("private_key")
+    ):
+        return None, (
+            "The credentials file isn't a service-account key (needs "
+            "type=service_account, client_email and private_key). If you "
+            "downloaded google-services.json for the app, that's the wrong "
+            "file — you need a service-account key from Project settings → "
+            "Service accounts."
         )
     try:
-        _creds = service_account.Credentials.from_service_account_file(
-            path, scopes=_SCOPES
-        )
+        _creds = _ServiceAccount(info)
     except Exception as e:
         return None, (
-            f"Found the credentials file but couldn't load it as a service "
-            f"account: {e} (is it the service-account JSON, not google-services.json?)."
+            f"Found the service-account file but couldn't initialise it: {e} "
+            f"(is 'cryptography' available and the private_key valid?)."
         )
     return _creds, ""
 
@@ -168,13 +186,78 @@ def push_enabled() -> bool:
     return _load_credentials()[0] is not None
 
 
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+class _ServiceAccount:
+    """Minimal service-account OAuth2 client for FCM. Mints access tokens by
+    signing a JWT with the account's RSA key and exchanging it at Google's token
+    endpoint — using only 'cryptography' (already an LNbits dependency), so no
+    'google-auth' install is needed in the LNbits venv."""
+
+    def __init__(self, info: dict):
+        from cryptography.hazmat.primitives import serialization
+
+        self.client_email = info["client_email"]
+        self.project_id = info.get("project_id") or ""
+        self.token_uri = info.get("token_uri") or "https://oauth2.googleapis.com/token"
+        # Raises here if the key is malformed / cryptography is unavailable, so a
+        # bad key is reported clearly at load time.
+        self._key = serialization.load_pem_private_key(
+            info["private_key"].encode("utf-8"), password=None
+        )
+        self._token: Optional[str] = None
+        self._exp: float = 0.0
+
+    def _sign(self, message: bytes) -> bytes:
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+
+        return self._key.sign(message, padding.PKCS1v15(), hashes.SHA256())
+
+    def access_token(self) -> str:
+        """Return a cached token, minting a fresh one when it's within 60s of
+        expiry. Blocking (does one HTTPS POST) — call via run_in_executor."""
+        now = time.time()
+        if self._token and now < self._exp - 60:
+            return self._token
+
+        issued = int(now)
+        header = {"alg": "RS256", "typ": "JWT"}
+        claims = {
+            "iss": self.client_email,
+            "scope": " ".join(_SCOPES),
+            "aud": self.token_uri,
+            "iat": issued,
+            "exp": issued + 3600,
+        }
+        signing_input = (
+            _b64url(json.dumps(header, separators=(",", ":")).encode("utf-8"))
+            + "."
+            + _b64url(json.dumps(claims, separators=(",", ":")).encode("utf-8"))
+        ).encode("ascii")
+        assertion = (
+            signing_input.decode("ascii") + "." + _b64url(self._sign(signing_input))
+        )
+        resp = httpx.post(
+            self.token_uri,
+            data={
+                "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                "assertion": assertion,
+            },
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        self._token = body["access_token"]
+        self._exp = time.time() + int(body.get("expires_in", 3600))
+        return self._token
+
+
 def _fresh_access_token(creds) -> str:
     # Blocking refresh — call via run_in_executor.
-    from google.auth.transport.requests import Request
-
-    if not creds.valid:
-        creds.refresh(Request())
-    return creds.token
+    return creds.access_token()
 
 
 async def send_fcm(
