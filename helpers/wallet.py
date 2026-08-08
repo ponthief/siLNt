@@ -114,7 +114,7 @@ def _compute_amounts(utxos: list[dict], amount: int, fee_rate: float):
     return total_input, fee, change_amount, estimated_vsize
 
 
-# ── Phase 4: BIP-352 m=1 change scriptPubKey (orig step 5) ────────────────────
+# ── Phase 4: BIP-352 m=0 change scriptPubKey (orig step 5) ────────────────────
 def _derive_change_script(change_amount, scan_secret_hex, spend_key, utxos, network):
     """Returns the change Script, or None when change is dust/zero."""
     if change_amount < 546:
@@ -126,7 +126,7 @@ def _derive_change_script(change_amount, scan_secret_hex, spend_key, utxos, netw
     change_sp_address = generate_labeled_sp_address(
         scan_secret_hex=scan_secret_hex,
         spend_pub_hex=spend_pub_hex,
-        m=1,                                   # BIP-352 change label
+        m=0,                                   # BIP-352 change label (m=0)
         hrp=hrp,
     )
     return Script(derive_sp_scriptpubkey(change_sp_address, spend_key.secret, utxos))
@@ -422,8 +422,8 @@ def build_transaction(
     """
     Build and sign a Bitcoin transaction.
     Supports Silent Payment addresses (sp1/tsp1) and standard on-chain addresses.
-    Change goes to the wallet's own m=1 labeled SP address (BIP-352 reserved
-    change index). Returns dict with tx_hex, fee, amount, change.
+    Change goes to the wallet's own m=0 labeled SP address (BIP-352 reserved
+    change label). Returns dict with tx_hex, fee, amount, change.
     """
     spend_key = ec.PrivateKey(bytes.fromhex(spend_key_hex))
 
@@ -561,10 +561,11 @@ def generate_labeled_sp_address(
         B_m = B_spend + TaggedHash("BIP0352/Label", b_scan || ser32(m)) * G
 
     Reserved indices (per BIP-352 spec):
-      - m=0  → default address (NO tweak applied; computed elsewhere from
-                B_spend directly — do NOT call this function with m=0)
-      - m=1  → change label (reserved for self-send change outputs)
-      - m≥2  → user-defined labels
+      - m=0  → change label (reserved, per BIP-352, for self-send change
+                outputs; a real tweak IS applied. Never hand this address out.)
+      - m≥1  → user-defined labels
+      The default/base address is the UNLABELED address (B_spend directly, no
+      tweak) — it is computed elsewhere, not via this function.
 
     Args:
         scan_secret_hex: receiver's scan private key (hex)
@@ -574,10 +575,10 @@ def generate_labeled_sp_address(
     """
     if not isinstance(m, int):
         raise TypeError(f"label_index (m) must be an integer, got {type(m).__name__}")
-    if m < 1:
+    if m < 0:
         raise ValueError(
-            f"label_index must be ≥ 1 (m=0 is the default address — use a "
-            f"separate derivation; got m={m})"
+            f"label_index must be ≥ 0 (m=0 is the change label; the base "
+            f"address is unlabeled and derived separately; got m={m})"
         )
     scan_secret_bytes = bytes.fromhex(scan_secret_hex)
     spend_pub_bytes = bytes.fromhex(spend_pub_hex)

@@ -26,7 +26,12 @@ from .wallet import generate_labeled_sp_address, get_spend_pub_from_secret
 _scan_progress: dict[str, dict] = {}
 _scan_stop: dict[str, bool] = {}
 SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-BIP352_CHANGE_LABEL_INDEX = 1
+# BIP-352 reserves label m=0 for change. Wallets created before this fix put
+# change at m=1, so we keep scanning m=1 too (legacy) — cheap, and it keeps
+# existing wallets' historical change detectable — while producing new change
+# at the standard m=0.
+BIP352_CHANGE_LABEL_INDEX = 0
+BIP352_LEGACY_CHANGE_LABEL_INDICES = [1]
 BIP352_LABELED_ADDRESS_INDICES=[2,3]
 
 @dataclass
@@ -143,7 +148,12 @@ def create_label(scan_key: bytes, m: int) -> Label:
 
 
 def create_labels(scan_key: bytes, indices: list[int]) -> list[Label]:
-    all_indices = sorted(set([0, BIP352_CHANGE_LABEL_INDEX] + BIP352_LABELED_ADDRESS_INDICES  + list(indices)))
+    all_indices = sorted(set(
+        [BIP352_CHANGE_LABEL_INDEX]
+        + BIP352_LEGACY_CHANGE_LABEL_INDICES
+        + BIP352_LABELED_ADDRESS_INDICES
+        + list(indices)
+    ))
     return [create_label(scan_key, m) for m in all_indices]
 
 

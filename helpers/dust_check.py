@@ -14,7 +14,10 @@ from ..crud import (
     get_silnt_wallet
 )
 
-BIP352_CHANGE_LABEL_INDEX = 1
+# BIP-352 change label is m=0. m=1 is the legacy change index (wallets created
+# before the fix); both are self-send change, never third-party dust.
+BIP352_CHANGE_LABEL_INDEX = 0
+BIP352_CHANGE_LABEL_INDICES = (0, 1)
 
 async def _funding_tx_inputs_match_owned(
     txid: str,
@@ -86,7 +89,7 @@ async def evaluate_dust_for_wallet(wallet_id: str) -> int:
         if amount > threshold:
             should_be_dust = False
         else:
-            if u.get("label_index") == BIP352_CHANGE_LABEL_INDEX:
+            if u.get("label_index") in BIP352_CHANGE_LABEL_INDICES:
                 should_be_dust = False
             else:
                 is_self_send = await is_own_sent_tx(wallet_id, utxo_txid)
