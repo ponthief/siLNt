@@ -1847,9 +1847,26 @@ def _pj_encrypt(plaintext: str) -> str:
     from lnbits.utils.crypto import AESCipher
     return AESCipher(key=_payjoin_enc_key()).encrypt(plaintext.encode())
 
+def _strip_residual_padding(s: str) -> str:
+    """AESCipher can leave a residual PKCS7 padding block on the decrypted string
+    when the plaintext was exactly block-aligned (a multiple of 16 bytes) — e.g.
+    a 32-byte / 64-hex key. Every value we encrypt is printable text, so a
+    trailing run of N identical control bytes (0x01–0x10) equal to N is that
+    leftover padding, not data. Strip it so no caller has to. A cleanly-decrypted
+    value never matches, so this is a no-op in the normal case."""
+    if not s:
+        return s
+    last = ord(s[-1])
+    if 1 <= last <= 16 and len(s) >= last and all(ord(c) == last for c in s[-last:]):
+        return s[:-last]
+    return s
+
+
 def _pj_decrypt(ciphertext: str) -> str:
     from lnbits.utils.crypto import AESCipher
-    return AESCipher(key=_payjoin_enc_key()).decrypt(ciphertext)
+    return _strip_residual_padding(
+        AESCipher(key=_payjoin_enc_key()).decrypt(ciphertext)
+    )
 
 def _xpub_fingerprint_hash(xpub: str) -> str:
     """Deterministic, non-reversible tag for dedup/equality lookups without
