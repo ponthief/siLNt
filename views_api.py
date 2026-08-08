@@ -820,7 +820,15 @@ async def api_scan_wallet(
                 spend_secret_hex=data.spend_key,
                 from_height=data.from_height,
                 to_height=data.to_height,
-            )            
+            )
+            # Notify on any newly-found coins, not just when the background sweep
+            # is the finder. Opening the app triggers this interactive scan, which
+            # usually beats the 30-min sweep — so without this, an app-open find
+            # would never notify. The client shows it as an in-app banner (app in
+            # foreground) via the FCM onMessage handler.
+            new_found = (result or {}).get("utxos_found", 0) if isinstance(result, dict) else 0
+            if new_found > 0:
+                await _notify_payment_found(wallet, new_found, (result or {}).get("balance"))
         except ValueError as e:
             logger.error(f"Scan value error for {wallet_id}: {e}"); _mark_scan_failed(wallet_id)
         except RuntimeError as e:
