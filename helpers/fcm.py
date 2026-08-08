@@ -104,3 +104,86 @@ async def send_fcm(
                     logger.warning(f"FCM send {r.status_code}: {r.text[:200]}")
             except Exception as e:
                 logger.warning(f"FCM send error: {e}")
+
+
+async def send_fcm_report(
+    tokens: list, title: str, body: str, data: Optional[dict] = None
+) -> dict:
+    """Like send_fcm but returns a structured report for diagnostics, so a test
+    endpoint can tell the user *why* nothing arrived (no credentials, no
+    registered device, or a specific FCM rejection). Never raises. Invalid
+    tokens are still pruned from the DB.
+
+    Returns: {
+        push_enabled: bool,   # server has SILNT_FCM_CREDENTIALS loaded
+        tokens: int,          # how many device tokens were tried
+        sent: int,            # accepted by FCM (200)
+        pruned: int,          # removed because FCM said unregistered/invalid
+        errors: [str],        # human-readable failure reasons
+    }
+    """
+    report = {"push_enabled": False, "tokens": len(tokens), "sent": 0,
+              "pruned": 0, "errors": []}
+
+    creds = _get_credentials()
+    if not creds:
+        report["errors"].append(
+            "Server has no FCM credentials (SILNT_FCM_CREDENTIALS unset or file missing)."
+        )
+        return report
+    report["push_enabled"] = True
+    if not tokens:
+        report["errors"].append("No device tokens registered for this user.")
+        return report
+
+    try:
+        loop = asyncio.get_event_loop()
+        access_token = await loop.run_in_executor(None, _fresh_access_token, creds)
+        project_id = creds.project_id
+    except Exception as e:
+        report["errors"].append(f"OAuth token refresh failed: {e}")
+        return report
+
+    from ..crud import remove_fcm_token
+
+    url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+    payload_data = {str(k): str(v) for k, v in (data or {}).items()}
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for token in tokens:
+            msg = {
+                "message": {
+                    "token": token,
+                    "notification": {"title": title, "body": body},
+                    "data": payload_data,
+                    "android": {"priority": "high"},
+                }
+            }
+            try:
+                r = await client.post(url, headers=headers, json=msg)
+                if r.status_code == 200:
+                    report["sent"] += 1
+                    continue
+                txt = r.text.lower()
+                if r.status_code in (400, 404) and (
+                    "unregistered" in txt
+                    or "not-registered" in txt
+                    or "invalid-argument" in txt
+                    or "invalid registration" in txt
+                ):
+                    await remove_fcm_token(token)
+                    report["pruned"] += 1
+                    report["errors"].append(
+                        f"Token …{token[-8:]} was invalid/unregistered (pruned)."
+                    )
+                else:
+                    report["errors"].append(
+                        f"FCM {r.status_code}: {r.text[:160]}"
+                    )
+            except Exception as e:
+                report["errors"].append(f"send error: {e}")
+    return report

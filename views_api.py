@@ -955,6 +955,28 @@ async def api_unregister_fcm_token(
     return {"ok": True}
 
 
+@silnt_api_router.post("/api/v1/fcm/test")
+async def api_test_fcm(
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """Send a diagnostic push to this user's registered devices and report the
+    outcome. Lets the user verify the whole FCM pipeline (credentials on the
+    server + a registered device token) without waiting for a real payment and
+    the 30-min background sweep. The returned report says exactly why nothing
+    arrived if it didn't."""
+    from .crud import list_fcm_tokens_for_user
+    from .helpers.fcm import send_fcm_report
+
+    tokens = await list_fcm_tokens_for_user(key_info.wallet.user)
+    report = await send_fcm_report(
+        tokens,
+        "Thrilla test notification",
+        "If you can see this, push notifications are working.",
+        {"type": "test"},
+    )
+    return report
+
+
 async def _notify_payment_found(wallet, new_found: int, balance) -> None:
     """Best-effort push to the wallet owner's devices when a background scan finds
     new funds. No-op if push isn't configured or the user has no registered
