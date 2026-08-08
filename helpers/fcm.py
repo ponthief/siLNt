@@ -33,81 +33,13 @@ _creds = None  # cached _ServiceAccount
 _ENV_KEY = "SILNT_FCM_CREDENTIALS"
 
 
-def _clean_val(v: str) -> str:
-    return (v or "").strip().strip('"').strip("'").strip()
-
-
-def _manual_env_parse(path: str) -> dict:
-    out = {}
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, _, v = line.partition("=")
-                out[k.strip()] = v.strip()
-    except Exception:
-        pass
-    return out
-
-
-def _candidate_env_files() -> list:
-    """LNbits .env locations to check, most-specific first. Covers the common
-    setups: an explicit LNBITS_ENV_FILE, the .env in the dir LNbits was started
-    from, and one alongside the data folder."""
-    candidates = []
-    explicit = os.environ.get("LNBITS_ENV_FILE", "").strip()
-    if explicit:
-        candidates.append(explicit)
-    try:
-        from dotenv import find_dotenv
-
-        found = find_dotenv(usecwd=True)
-        if found:
-            candidates.append(found)
-    except Exception:
-        pass
-    candidates.append(os.path.join(os.getcwd(), ".env"))
-    data_folder = os.environ.get("LNBITS_DATA_FOLDER", "").strip()
-    if data_folder:
-        candidates.append(os.path.join(data_folder, ".env"))
-        parent = os.path.dirname(data_folder.rstrip("/\\"))
-        if parent:
-            candidates.append(os.path.join(parent, ".env"))
-    # De-dupe while preserving order.
-    seen, ordered = set(), []
-    for c in candidates:
-        if c and c not in seen:
-            seen.add(c)
-            ordered.append(c)
-    return ordered
-
-
-def _read_from_env_files():
-    """Parse LNbits' .env directly for the credentials path. Deployment-agnostic:
-    works even when .env isn't exported into os.environ (pydantic reads the file
-    to build settings but doesn't populate os.environ). Returns (value, source)."""
-    for path in _candidate_env_files():
-        if not os.path.exists(path):
-            continue
-        try:
-            from dotenv import dotenv_values
-
-            vals = dotenv_values(path)
-        except Exception:
-            vals = _manual_env_parse(path)
-        v = _clean_val(vals.get(_ENV_KEY, ""))
-        if v:
-            return v, path
-    return "", ""
-
-
 def _resolve_credentials_path():
     """Where the service-account JSON lives, and where we found it. Read at
     call-time (not import-time) so a restart reliably picks up a freshly-added
     value. Order: process env → LNbits settings object → LNbits .env file."""
-    p = _clean_val(os.environ.get(_ENV_KEY, ""))
+    from .appenv import clean, read_from_env_files
+
+    p = clean(os.environ.get(_ENV_KEY, ""))
     if p:
         return p, "process environment"
     try:
@@ -115,10 +47,10 @@ def _resolve_credentials_path():
 
         v = getattr(_s, "silnt_fcm_credentials", None)
         if v:
-            return _clean_val(str(v)), "LNbits settings"
+            return clean(str(v)), "LNbits settings"
     except Exception:
         pass
-    v, source = _read_from_env_files()
+    v, source = read_from_env_files(_ENV_KEY)
     if v:
         return v, f".env ({source})"
     return "", ""
@@ -133,7 +65,9 @@ def _load_credentials():
         return _creds, ""
     path, source = _resolve_credentials_path()
     if not path:
-        checked = ", ".join(_candidate_env_files()) or "(none found)"
+        from .appenv import candidate_env_files
+
+        checked = ", ".join(candidate_env_files()) or "(none found)"
         return None, (
             f"SILNT_FCM_CREDENTIALS not found in the process environment, "
             f"LNbits settings, or any .env checked ({checked}). Confirm the key "

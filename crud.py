@@ -7,6 +7,7 @@ import hmac
 from typing import Optional, Tuple, List
 from lnbits.db import Database
 from lnbits.helpers import urlsafe_short_hash
+from .helpers.appenv import silnt_env
 from .models import (
     Config,
     BackendConfig,
@@ -377,7 +378,7 @@ async def get_cloudflare_config() -> CloudflareConfig:
     # Source it from SILNT_BITMAIL_DOMAIN when set; otherwise keep whatever is
     # stored (back-compat). Strip a leading dot in case someone reuses the
     # cookie-domain form (".thrilla.me" → "thrilla.me").
-    env_domain = os.environ.get("SILNT_BITMAIL_DOMAIN", "").strip().lstrip(".")
+    env_domain = silnt_env("SILNT_BITMAIL_DOMAIN").strip().lstrip(".")
     if env_domain:
         cfg.domain = env_domain
     return cfg
@@ -386,7 +387,7 @@ async def get_cloudflare_config() -> CloudflareConfig:
 async def update_cloudflare_config(config: CloudflareConfig) -> CloudflareConfig:
     # Domain is not admin-editable — force it from the env var (or keep the
     # currently-effective value), ignoring whatever the client sent.
-    env_domain = os.environ.get("SILNT_BITMAIL_DOMAIN", "").strip().lstrip(".")
+    env_domain = silnt_env("SILNT_BITMAIL_DOMAIN").strip().lstrip(".")
     if env_domain:
         config.domain = env_domain
     else:
