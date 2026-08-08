@@ -442,7 +442,7 @@ class BlindBitOracleClient:
 
 
 async def scan_block(
-    height, client, scan_secret_bytes, spend_pub_bytes, spend_secret_bytes, labels,
+    height, client, scan_secret_bytes, spend_pub_bytes, labels,
     network: str,
 ):
     if labels:
@@ -608,10 +608,11 @@ def set_scan_progress(wallet_id, current, total, found, active=True):
 
 async def scan_wallet(
     wallet_id: str,
-    scan_secret_hex: str,  # passed from client, never stored
-    spend_secret_hex: str,
+    scan_secret_hex: str,  # scan private key — detection only
+    spend_secret_hex: Optional[str] = None,
     from_height: Optional[int] = None,
     to_height: Optional[int] = None,
+    spend_pub_hex: Optional[str] = None,
 ) -> dict:
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
@@ -621,10 +622,19 @@ async def scan_wallet(
         raise ValueError("BlindBit Oracle URL not configured")
 
     scan_secret_bytes = bytes.fromhex(scan_secret_hex)
-    spend_secret_bytes = bytes.fromhex(spend_secret_hex)
-    spend_pub_bytes = coincurve.PublicKey.from_secret(spend_secret_bytes).format(
-        compressed=True
-    )
+    # Scanning is detection-only: it needs the spend PUBLIC key, never the spend
+    # private key. Accept the pubkey directly (the background scanner derives it
+    # from the wallet's sp_address, so the spend key never reaches the server) or
+    # derive it from a supplied spend secret (interactive client scans).
+    if spend_pub_hex:
+        spend_pub_bytes = bytes.fromhex(spend_pub_hex)
+    elif spend_secret_hex:
+        spend_pub_bytes = coincurve.PublicKey.from_secret(
+            bytes.fromhex(spend_secret_hex)
+        ).format(compressed=True)
+    else:
+        raise ValueError("scan_wallet needs spend_pub_hex or spend_secret_hex")
+    spend_pub_hex_resolved = spend_pub_bytes.hex()
 
     oracle = BlindBitOracleClient(base_url=blindbit.blindbit_url)
     start = max(from_height if from_height is not None else wallet.last_height, 1)
@@ -679,7 +689,6 @@ async def scan_wallet(
                     oracle,
                     scan_secret_bytes,
                     spend_pub_bytes,
-                    spend_secret_bytes,
                     labels,
                     wallet.network,
                 )
@@ -702,7 +711,7 @@ async def scan_wallet(
                     elif owned.label and owned.label.m >= 2:
                         try:
                             hrp = "sp" if (wallet.network == "mainnet") else "tsp"
-                            spend_pub_hex = get_spend_pub_from_secret(spend_secret_hex)
+                            spend_pub_hex = spend_pub_hex_resolved
                             labeled_addr = generate_labeled_sp_address(
                                 scan_secret_hex=scan_secret_hex,
                                 spend_pub_hex=spend_pub_hex,

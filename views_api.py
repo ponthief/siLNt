@@ -224,7 +224,8 @@ from .models import (
     CreateContactData,
     ContactLabelData,
     CreateSpContactData,
-    UpdateSpContactData,    
+    UpdateSpContactData,
+    BackgroundScanData,
     AdminDeleteAccountData,
     NtfyConfig,
     USERNAME_PATTERN,
@@ -856,6 +857,129 @@ async def api_stop_scan(
         reset_wallet_cooldown=True,
     )
     return {"status": "stop requested"}
+
+
+# ── Background scanning (opt-in "Remote Scanner") ─────────────────────────────
+# Opting in uploads ONLY the wallet's scan key (detection capability) so the
+# server can keep the wallet caught up on a timer while the user is away. The
+# spend key is never uploaded; the background scanner derives the spend PUBLIC
+# key from the wallet's sp_address. Disabling deletes the key from the server.
+
+async def _get_owned_wallet(wallet_id: str, key_info: WalletTypeInfo):
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
+    if wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+    return wallet
+
+
+@silnt_api_router.get("/api/v1/wallet/{wallet_id}/background-scan")
+async def api_background_scan_status(
+    wallet_id: str, key_info: WalletTypeInfo = Depends(require_trusted_device)
+):
+    from .crud import is_background_scan_enabled
+    await _get_owned_wallet(wallet_id, key_info)
+    return {"enabled": await is_background_scan_enabled(wallet_id)}
+
+
+@silnt_api_router.put("/api/v1/wallet/{wallet_id}/background-scan")
+async def api_background_scan_enable(
+    wallet_id: str,
+    data: BackgroundScanData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    import coincurve
+    from .crud import enable_background_scan
+    from .helpers.wallet import parse_sp_address
+
+    wallet = await _get_owned_wallet(wallet_id, key_info)
+    sk = (data.scan_secret or "").strip().lower()
+    try:
+        sk_bytes = bytes.fromhex(sk)
+        assert len(sk_bytes) == 32
+    except Exception:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="scan_secret must be a 32-byte hex string.",
+        )
+    # Safety: the uploaded key must actually be THIS wallet's scan key (its public
+    # key must match the B_scan in the wallet's sp_address). Rejects a wrong/typo'd
+    # key that would silently scan nothing.
+    try:
+        b_scan_from_key = coincurve.PublicKey.from_secret(sk_bytes).format(compressed=True)
+        b_scan_from_addr, _ = parse_sp_address(wallet.sp_address)
+    except Exception:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Invalid scan key.")
+    if b_scan_from_key != b_scan_from_addr:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="scan key does not match this wallet.",
+        )
+    await enable_background_scan(wallet_id, sk)
+    return {"enabled": True}
+
+
+@silnt_api_router.delete("/api/v1/wallet/{wallet_id}/background-scan")
+async def api_background_scan_disable(
+    wallet_id: str, key_info: WalletTypeInfo = Depends(require_trusted_device)
+):
+    from .crud import disable_background_scan
+    await _get_owned_wallet(wallet_id, key_info)
+    await disable_background_scan(wallet_id)
+    return {"enabled": False}
+
+
+# How often the background scanner sweeps opted-in wallets to the chain tip.
+BACKGROUND_SCAN_INTERVAL_SECONDS = 1800  # 30 min
+
+
+async def run_background_scans() -> None:
+    """One sweep: catch up every opted-in wallet to the chain tip. Stores no
+    spend key — derives the spend PUBLIC key from each wallet's sp_address."""
+    from .crud import (
+        list_background_scan_wallet_ids,
+        get_background_scan_secret,
+    )
+    from .helpers.wallet import parse_sp_address
+
+    wallet_ids = await list_background_scan_wallet_ids()
+    for wid in wallet_ids:
+        try:
+            wallet = await get_silnt_wallet(wid)
+            if not wallet:
+                continue
+            # Don't collide with a user-initiated scan already in flight.
+            if get_scan_progress(wid).get("active"):
+                continue
+            blindbit = await get_backend_config(wallet.network)
+            if not blindbit.blindbit_url:
+                continue
+            oracle = BlindBitOracleClient(base_url=blindbit.blindbit_url)
+            tip = await oracle.get_chain_tip()
+            if not tip:
+                continue
+            birth = int(wallet.last_height or 0)
+            last_scan = int(wallet.last_scan_height or 0)
+            covered = max(last_scan, birth)
+            if covered >= tip:
+                continue  # already caught up
+            scan_secret = await get_background_scan_secret(wid)
+            if not scan_secret:
+                continue
+            _, b_spend = parse_sp_address(wallet.sp_address)
+            resume = last_scan + 1 if last_scan > birth else birth
+            logger.info(f"Background scan {wid}: blocks {resume}–{tip}")
+            await scan_wallet(
+                wallet_id=wid,
+                scan_secret_hex=scan_secret,
+                spend_pub_hex=b_spend.hex(),
+                from_height=resume,
+                to_height=tip,
+            )
+        except Exception as e:
+            logger.warning(f"Background scan failed for {wid}: {e}")
+            continue
 
 
 # BIP353

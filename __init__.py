@@ -6,7 +6,13 @@ from lnbits.tasks import create_permanent_unique_task
 
 from .crud import db
 from .views import silnt_generic_router
-from .views_api import silnt_api_router, run_bitmail_tamper_sweep, run_health_probes
+from .views_api import (
+    silnt_api_router,
+    run_bitmail_tamper_sweep,
+    run_health_probes,
+    run_background_scans,
+    BACKGROUND_SCAN_INTERVAL_SECONDS,
+)
 from .boltz_swap import silnt_boltz_router
 from .boltz_refund_api import silnt_refund_router
 from .boltz_refund_api import refund_due_swaps
@@ -60,6 +66,17 @@ async def _health_monitor_loop():
             logger.error(f"[silnt] health monitor loop error: {exc}")
         await asyncio.sleep(60)   # every 2 min
 
+async def _background_scan_loop():
+    # Keep opt-in wallets caught up to the chain tip so a user returning after a
+    # while isn't faced with a huge scan. Each sweep skips wallets already at tip
+    # or mid-scan, so a quiet interval is cheap.
+    while True:
+        try:
+            await run_background_scans()
+        except Exception as exc:
+            logger.error(f"[silnt] background scan loop error: {exc}")
+        await asyncio.sleep(BACKGROUND_SCAN_INTERVAL_SECONDS)
+
 # in async def silnt_start() / wherever the ext starts its tasks:
 def siLNt_start():
     task = create_permanent_unique_task("ext_silnt", _refund_loop)
@@ -68,6 +85,8 @@ def siLNt_start():
     scheduled_tasks.append(tamper_task)
     health_task = create_permanent_unique_task("ext_silnt_health", _health_monitor_loop)
     scheduled_tasks.append(health_task)
+    bgscan_task = create_permanent_unique_task("ext_silnt_bgscan", _background_scan_loop)
+    scheduled_tasks.append(bgscan_task)
 
 # in the ext stop hook:
 def siLNt_stop():

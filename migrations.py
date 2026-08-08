@@ -518,3 +518,23 @@ async def m024_sp_contacts_network(db):
     await db.execute(
         "CREATE INDEX idx_sp_contacts_user ON silnt.sp_contacts (user_id, network, value_sha256);"
     )
+
+
+async def m025_background_scan(db):
+    """Opt-in "Remote Scanner": a user may let the server scan a wallet in the
+    background (so a returning user isn't faced with a huge catch-up). This
+    requires storing the wallet's SCAN private key — a detection-only capability
+    (it can find payments but never spend). The spend key is never stored; the
+    background scanner derives the spend PUBLIC key from the wallet's sp_address.
+    The scan key is encrypted at rest. Presence of a row = opted in; disabling
+    deletes the row (removing the key from the server).
+    """
+    await db.execute(
+        f"""
+        CREATE TABLE silnt.background_scan (
+            wallet_id   TEXT PRIMARY KEY,
+            scan_secret TEXT NOT NULL,          -- encrypted at rest (AESCipher)
+            created_at  TIMESTAMP NOT NULL DEFAULT {db.timestamp_now}
+        );
+        """
+    )

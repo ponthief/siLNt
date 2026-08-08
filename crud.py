@@ -71,6 +71,55 @@ async def delete_silnt_wallet(wallet_id: str) -> None:
         "DELETE FROM silnt.wallets WHERE id = :id",
         {"id": wallet_id},
     )
+    # A deleted wallet must not keep a stored scan key on the server.
+    await db.execute(
+        "DELETE FROM silnt.background_scan WHERE wallet_id = :id",
+        {"id": wallet_id},
+    )
+
+
+# ── Background scanning (opt-in "Remote Scanner") ─────────────────────────────
+# Stores ONLY the scan private key (detection capability), encrypted at rest.
+# Presence of a row == opted in. The spend key is never stored.
+async def enable_background_scan(wallet_id: str, scan_secret_hex: str) -> None:
+    enc = _pj_encrypt(scan_secret_hex)
+    await db.execute(
+        """INSERT INTO silnt.background_scan (wallet_id, scan_secret)
+           VALUES (:wid, :sk)
+           ON CONFLICT (wallet_id) DO UPDATE SET scan_secret = EXCLUDED.scan_secret""",
+        {"wid": wallet_id, "sk": enc},
+    )
+
+
+async def disable_background_scan(wallet_id: str) -> None:
+    await db.execute(
+        "DELETE FROM silnt.background_scan WHERE wallet_id = :wid", {"wid": wallet_id}
+    )
+
+
+async def is_background_scan_enabled(wallet_id: str) -> bool:
+    row = await db.fetchone(
+        "SELECT 1 FROM silnt.background_scan WHERE wallet_id = :wid", {"wid": wallet_id}
+    )
+    return row is not None
+
+
+async def get_background_scan_secret(wallet_id: str) -> Optional[str]:
+    row = await db.fetchone(
+        "SELECT scan_secret FROM silnt.background_scan WHERE wallet_id = :wid",
+        {"wid": wallet_id},
+    )
+    if not row:
+        return None
+    try:
+        return _pj_decrypt(row["scan_secret"])
+    except Exception:
+        return None
+
+
+async def list_background_scan_wallet_ids() -> list:
+    rows = await db.fetchall("SELECT wallet_id FROM silnt.background_scan")
+    return [r["wallet_id"] for r in rows]
 
 
 async def delete_utxos_for_wallet(wallet_id: str) -> None:

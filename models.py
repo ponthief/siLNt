@@ -446,6 +446,12 @@ class UpdateSpContactData(BaseModel):
     label: str
 
 
+class BackgroundScanData(BaseModel):
+    # The wallet's scan PRIVATE key (hex). Uploaded to opt a wallet into
+    # server-side background scanning. Detection-only — never the spend key.
+    scan_secret: str
+
+
 class AdminDeleteAccountData(BaseModel):
     identifier: str            # username or email of the account to delete
     confirm_username: str      # must match the resolved username (typed confirmation)
