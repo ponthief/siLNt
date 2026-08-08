@@ -112,9 +112,15 @@ async def get_background_scan_secret(wallet_id: str) -> Optional[str]:
     if not row:
         return None
     try:
-        return _pj_decrypt(row["scan_secret"])
+        sk = _pj_decrypt(row["scan_secret"]) or ""
     except Exception:
         return None
+    # A 32-byte key is 64 hex chars — exactly AES-block-aligned — so AESCipher can
+    # leave a trailing padding block on the decrypted string. Extract just the
+    # leading 64-hex key so bytes.fromhex() doesn't choke on trailing bytes.
+    import re
+    m = re.match(r"[0-9a-fA-F]{64}", sk.strip())
+    return m.group(0) if m else None
 
 
 async def list_background_scan_wallet_ids() -> list:
