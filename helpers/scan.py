@@ -33,6 +33,13 @@ SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 BIP352_CHANGE_LABEL_INDEX = 0
 BIP352_LEGACY_CHANGE_LABEL_INDICES = [1]
 BIP352_LABELED_ADDRESS_INDICES=[2,3]
+# BIP-352 v1.1.0 (March 2026): a recipient group holds at most K_max = 2323
+# outputs — the most P2TR outputs that fit in a 100,000-vByte standard tx.
+# Cap the receiver's per-transaction scan loop at this so a maliciously crafted
+# transaction packing many outputs to one scan key can't force O(N^2) work
+# (each match rescans the remaining outputs); the cap bounds it to O(N*K_max).
+# Honest transactions never reach it, so conforming receivers are unaffected.
+BIP352_MAX_OUTPUTS_PER_GROUP = 2323
 
 @dataclass
 class Label:
@@ -183,7 +190,9 @@ def receiver_scan_transaction_with_shared_secret(
     found_outputs: list[FoundOutput] = []
     remaining = list(tx_outputs)
     k = 0
-    while True:
+    # Stop at K_max even if outputs keep matching — bounds worst-case work on a
+    # hostile transaction. A normal transaction exits earlier via `not found`.
+    while k < BIP352_MAX_OUTPUTS_PER_GROUP:
         output_pub_key, tweak = create_output_pub_key_and_tweak(
             shared_secret, spend_pub_key, k
         )
