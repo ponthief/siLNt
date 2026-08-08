@@ -538,3 +538,21 @@ async def m025_background_scan(db):
         );
         """
     )
+
+
+async def m026_fcm_tokens(db):
+    """Firebase Cloud Messaging device tokens, per user, so the server can push a
+    notification (e.g. "payment received" from a background scan) to a user's
+    phone(s). A user can have several devices; a token is unique."""
+    await db.execute(
+        f"""
+        CREATE TABLE silnt.fcm_tokens (
+            token      TEXT PRIMARY KEY,
+            user_id    TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT {db.timestamp_now}
+        );
+        """
+    )
+    await db.execute(
+        "CREATE INDEX idx_fcm_tokens_user ON silnt.fcm_tokens (user_id);"
+    )

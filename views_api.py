@@ -226,6 +226,7 @@ from .models import (
     CreateSpContactData,
     UpdateSpContactData,
     BackgroundScanData,
+    FcmTokenData,
     AdminDeleteAccountData,
     NtfyConfig,
     USERNAME_PATTERN,
@@ -930,6 +931,55 @@ async def api_background_scan_disable(
     return {"enabled": False}
 
 
+# ── Push notification device tokens (FCM) ─────────────────────────────────────
+@silnt_api_router.post("/api/v1/fcm/token")
+async def api_register_fcm_token(
+    data: FcmTokenData, key_info: WalletTypeInfo = Depends(require_trusted_device)
+):
+    from .crud import register_fcm_token
+    tok = (data.token or "").strip()
+    if not tok:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="token is required.")
+    await register_fcm_token(key_info.wallet.user, tok)
+    return {"ok": True}
+
+
+@silnt_api_router.delete("/api/v1/fcm/token")
+async def api_unregister_fcm_token(
+    data: FcmTokenData, key_info: WalletTypeInfo = Depends(require_trusted_device)
+):
+    from .crud import remove_fcm_token
+    tok = (data.token or "").strip()
+    if tok:
+        await remove_fcm_token(tok)
+    return {"ok": True}
+
+
+async def _notify_payment_found(wallet, new_found: int, balance) -> None:
+    """Best-effort push to the wallet owner's devices when a background scan finds
+    new funds. No-op if push isn't configured or the user has no registered
+    device."""
+    try:
+        from .crud import list_fcm_tokens_for_user
+        from .helpers.fcm import send_fcm
+
+        tokens = await list_fcm_tokens_for_user(wallet.user)
+        if not tokens:
+            return
+        plural = "s" if new_found != 1 else ""
+        body = f"{new_found} new payment{plural} in {wallet.title or 'your wallet'}"
+        if isinstance(balance, int):
+            body += f" · balance {balance:,} sats"
+        await send_fcm(
+            tokens,
+            "Payment received",
+            body,
+            {"type": "payment", "wallet_id": wallet.id},
+        )
+    except Exception as e:
+        logger.warning(f"payment-found push failed for {getattr(wallet, 'id', '?')}: {e}")
+
+
 # How often the background scanner sweeps opted-in wallets to the chain tip.
 BACKGROUND_SCAN_INTERVAL_SECONDS = 1800  # 30 min
 
@@ -970,13 +1020,18 @@ async def run_background_scans() -> None:
             _, b_spend = parse_sp_address(wallet.sp_address)
             resume = last_scan + 1 if last_scan > birth else birth
             logger.info(f"Background scan {wid}: blocks {resume}–{tip}")
-            await scan_wallet(
+            result = await scan_wallet(
                 wallet_id=wid,
                 scan_secret_hex=scan_secret,
                 spend_pub_hex=b_spend.hex(),
                 from_height=resume,
                 to_height=tip,
             )
+            new_found = (result or {}).get("utxos_found", 0)
+            if new_found > 0:
+                await _notify_payment_found(
+                    wallet, new_found, (result or {}).get("balance")
+                )
         except Exception as e:
             logger.warning(f"Background scan failed for {wid}: {e}")
             continue
