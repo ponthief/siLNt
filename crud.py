@@ -112,14 +112,45 @@ async def get_background_scan_secret(wallet_id: str) -> Optional[str]:
     if not row:
         return None
     try:
-        return _pj_decrypt(row["scan_secret"])
+        sk = _pj_decrypt(row["scan_secret"]) or ""
     except Exception:
         return None
+    # A 32-byte key is 64 hex chars — exactly AES-block-aligned — so AESCipher can
+    # leave a trailing padding block on the decrypted string. Extract just the
+    # leading 64-hex key so bytes.fromhex() doesn't choke on trailing bytes.
+    import re
+    m = re.match(r"[0-9a-fA-F]{64}", sk.strip())
+    return m.group(0) if m else None
 
 
 async def list_background_scan_wallet_ids() -> list:
     rows = await db.fetchall("SELECT wallet_id FROM silnt.background_scan")
     return [r["wallet_id"] for r in rows]
+
+
+# ── Push (FCM) device tokens ─────────────────────────────────────────────────
+async def register_fcm_token(user_id: str, token: str) -> None:
+    """Associate a device push token with a user. Re-registering a token that was
+    seen under another user (device reassigned) moves it to the current user."""
+    await db.execute(
+        """INSERT INTO silnt.fcm_tokens (token, user_id)
+           VALUES (:tok, :uid)
+           ON CONFLICT (token) DO UPDATE SET user_id = EXCLUDED.user_id""",
+        {"tok": token, "uid": user_id},
+    )
+
+
+async def remove_fcm_token(token: str) -> None:
+    await db.execute(
+        "DELETE FROM silnt.fcm_tokens WHERE token = :tok", {"tok": token}
+    )
+
+
+async def list_fcm_tokens_for_user(user_id: str) -> list:
+    rows = await db.fetchall(
+        "SELECT token FROM silnt.fcm_tokens WHERE user_id = :uid", {"uid": user_id}
+    )
+    return [r["token"] for r in rows]
 
 
 async def delete_utxos_for_wallet(wallet_id: str) -> None:

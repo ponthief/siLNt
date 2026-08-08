@@ -452,6 +452,10 @@ class BackgroundScanData(BaseModel):
     scan_secret: str
 
 
+class FcmTokenData(BaseModel):
+    token: str  # Firebase Cloud Messaging device token
+
+
 class AdminDeleteAccountData(BaseModel):
     identifier: str            # username or email of the account to delete
     confirm_username: str      # must match the resolved username (typed confirmation)
