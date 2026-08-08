@@ -715,9 +715,14 @@ async def scan_wallet(
                         except Exception as e:
                             logger.warning(f"Could not restore labeled address m={owned.label.m}: {e}")    
                 try:
-                    await insert_utxos_for_wallet(wallet_id, result)
-                    total_found += len(result)
-                    logger.info(f"Block {h}: {len(result)} UTXOs")
+                    # Count only genuinely NEW utxos — re-detecting an existing
+                    # one on a rescan is an upsert, not a discovery, and must not
+                    # inflate the "found" count the UI shows.
+                    new_count = await insert_utxos_for_wallet(wallet_id, result)
+                    total_found += new_count
+                    logger.info(
+                        f"Block {h}: {len(result)} detected, {new_count} new"
+                    )
                 except Exception as ins_err:
                     # Log full DB error server-side for the admin to investigate,
                     # but don't crash the whole scan — just skip this block's results

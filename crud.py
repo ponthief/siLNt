@@ -158,12 +158,21 @@ async def get_utxos_for_wallet(wallet_id: str) -> list[UTXORecord]:
     )
 
 
-async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> None:
+async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> int:
+    """Upsert the given UTXOs. Returns the count of rows that were NEWLY
+    inserted — re-detecting a UTXO that already exists (e.g. on a rescan) is an
+    UPDATE, not a discovery, so it must not be counted as "found"."""
+    newly_inserted = 0
     for utxo in utxos:
         row = utxo.to_db_row(wallet_id)
         # Tolerate rows from a to_db_row() that predates the label_index column
         # (avoids a missing-bind-parameter error if scan.py isn't updated yet).
         row.setdefault("label_index", None)
+        already = await db.fetchone(
+            "SELECT 1 FROM silnt.utxos "
+            "WHERE txid = :txid AND vout = :vout AND wallet_id = :wallet_id",
+            {"txid": row["txid"], "vout": row["vout"], "wallet_id": wallet_id},
+        )
         await db.execute(
             """INSERT INTO silnt.utxos
                  (txid, vout, amount, priv_key_tweak, pub_key, utxo_state, timestamp, wallet_id, label, label_index)
@@ -183,6 +192,9 @@ async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> None:
             """,
             row,
         )
+        if not already:
+            newly_inserted += 1
+    return newly_inserted
 
 
 async def update_unconfirmed_utxo(wallet_id: str, txid: str):
