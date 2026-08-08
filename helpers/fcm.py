@@ -16,32 +16,80 @@ from typing import Optional
 import httpx
 from loguru import logger
 
-_CREDENTIALS_PATH = os.environ.get("SILNT_FCM_CREDENTIALS", "").strip()
 _SCOPES = ["https://www.googleapis.com/auth/firebase.messaging"]
 
 _creds = None  # cached google.oauth2.service_account.Credentials
 
 
-def _get_credentials():
+def _resolve_credentials_path() -> str:
+    """Where the service-account JSON lives. Read at call-time (not import-time)
+    so a restart reliably picks up a freshly-added .env value regardless of
+    import order. Falls back to the LNbits settings object in case this
+    deployment loads .env into pydantic settings but not os.environ."""
+    p = os.environ.get("SILNT_FCM_CREDENTIALS", "").strip()
+    if p:
+        return p
+    try:
+        from lnbits.settings import settings as _s
+
+        v = getattr(_s, "silnt_fcm_credentials", None)
+        if v:
+            return str(v).strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _load_credentials():
+    """Return (creds, reason). On failure creds is None and reason is a
+    human-readable explanation of exactly which link is broken — so callers can
+    tell 'env unset' from 'file missing' from 'google-auth not installed'."""
     global _creds
     if _creds is not None:
-        return _creds
-    if not _CREDENTIALS_PATH or not os.path.exists(_CREDENTIALS_PATH):
-        return None
+        return _creds, ""
+    path = _resolve_credentials_path()
+    if not path:
+        return None, (
+            "SILNT_FCM_CREDENTIALS is not set in the server environment "
+            "(the LNbits process doesn't see it — if it's in .env, make sure "
+            "that .env is actually exported into LNbits' environment, then "
+            "restart)."
+        )
+    if not os.path.exists(path):
+        return None, (
+            f"SILNT_FCM_CREDENTIALS is set but no readable file exists at that "
+            f"path from the LNbits process: {path} (check the path is absolute "
+            f"and the file is readable by the LNbits user)."
+        )
     try:
         from google.oauth2 import service_account
-
+    except Exception as e:
+        return None, (
+            f"The 'google-auth' package isn't installed in the LNbits "
+            f"environment ({e}). Install the extension's dependencies "
+            f"(google-auth) and restart LNbits."
+        )
+    try:
         _creds = service_account.Credentials.from_service_account_file(
-            _CREDENTIALS_PATH, scopes=_SCOPES
+            path, scopes=_SCOPES
         )
     except Exception as e:
-        logger.warning(f"FCM: could not load credentials: {e}")
-        return None
-    return _creds
+        return None, (
+            f"Found the credentials file but couldn't load it as a service "
+            f"account: {e} (is it the service-account JSON, not google-services.json?)."
+        )
+    return _creds, ""
+
+
+def _get_credentials():
+    creds, reason = _load_credentials()
+    if creds is None and reason:
+        logger.warning(f"FCM: {reason}")
+    return creds
 
 
 def push_enabled() -> bool:
-    return _get_credentials() is not None
+    return _load_credentials()[0] is not None
 
 
 def _fresh_access_token(creds) -> str:
@@ -125,11 +173,9 @@ async def send_fcm_report(
     report = {"push_enabled": False, "tokens": len(tokens), "sent": 0,
               "pruned": 0, "errors": []}
 
-    creds = _get_credentials()
+    creds, reason = _load_credentials()
     if not creds:
-        report["errors"].append(
-            "Server has no FCM credentials (SILNT_FCM_CREDENTIALS unset or file missing)."
-        )
+        report["errors"].append(reason or "Server has no FCM credentials.")
         return report
     report["push_enabled"] = True
     if not tokens:
