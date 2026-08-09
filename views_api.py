@@ -968,6 +968,18 @@ async def api_background_scan_disable(
     return {"enabled": False}
 
 
+@silnt_api_router.delete("/api/v1/background-scan/all")
+async def api_background_scan_disable_all(
+    key_info: WalletTypeInfo = Depends(require_trusted_device)
+):
+    """Revoke server-side background scanning for ALL of the user's wallets in one
+    call. Used by the mobile duress action so a coerced unlock also removes the
+    uploaded scan key from the server."""
+    from .crud import disable_all_background_scans_for_user
+    await disable_all_background_scans_for_user(key_info.wallet.user)
+    return {"ok": True}
+
+
 # ── Push notification device tokens (FCM) ─────────────────────────────────────
 @silnt_api_router.post("/api/v1/fcm/token")
 async def api_register_fcm_token(
