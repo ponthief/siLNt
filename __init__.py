@@ -1,4 +1,5 @@
 import asyncio
+import time
 from fastapi import APIRouter
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
@@ -11,6 +12,8 @@ from .views_api import (
     run_bitmail_tamper_sweep,
     run_health_probes,
     run_background_scans,
+    background_tip_advanced,
+    BACKGROUND_SCAN_POLL_SECONDS,
     BACKGROUND_SCAN_INTERVAL_SECONDS,
 )
 from .boltz_swap import silnt_boltz_router
@@ -67,15 +70,24 @@ async def _health_monitor_loop():
         await asyncio.sleep(60)   # every 2 min
 
 async def _background_scan_loop():
-    # Keep opt-in wallets caught up to the chain tip so a user returning after a
-    # while isn't faced with a huge scan. Each sweep skips wallets already at tip
-    # or mid-scan, so a quiet interval is cheap.
+    # Scan opt-in wallets as soon as a new block appears, rather than on a fixed
+    # timer — so a received payment is detected (and pushed) within ~a block
+    # instead of up to the fallback interval. A cheap per-network chain-tip poll
+    # gates the actual sweep; a periodic forced sweep still runs as a safety net
+    # (newly opted-in wallets, a missed tip update, a server restart).
+    last_tip_by_network: dict = {}
+    last_sweep = 0.0
     while True:
         try:
-            await run_background_scans()
+            advanced = await background_tip_advanced(last_tip_by_network)
+            now = time.monotonic()
+            due_fallback = (now - last_sweep) >= BACKGROUND_SCAN_INTERVAL_SECONDS
+            if advanced or due_fallback:
+                await run_background_scans()
+                last_sweep = time.monotonic()
         except Exception as exc:
             logger.error(f"[silnt] background scan loop error: {exc}")
-        await asyncio.sleep(BACKGROUND_SCAN_INTERVAL_SECONDS)
+        await asyncio.sleep(BACKGROUND_SCAN_POLL_SECONDS)
 
 # in async def silnt_start() / wherever the ext starts its tasks:
 def siLNt_start():

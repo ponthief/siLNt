@@ -1015,8 +1015,44 @@ async def _notify_payment_found(wallet, new_found: int, amount_sats) -> None:
         logger.warning(f"payment-found push failed for {getattr(wallet, 'id', '?')}: {e}")
 
 
-# How often the background scanner sweeps opted-in wallets to the chain tip.
+# How often to poll each active network's chain tip for a new block. A sweep is
+# triggered as soon as the tip advances, so a received payment is detected within
+# ~a block instead of waiting out the full interval.
+BACKGROUND_SCAN_POLL_SECONDS = 60
+# Safety-net: sweep at least this often even if no new block was observed (covers
+# newly opted-in wallets, missed tip updates, and server restarts).
 BACKGROUND_SCAN_INTERVAL_SECONDS = 1800  # 30 min
+
+
+async def background_tip_advanced(last_tip_by_network: dict) -> bool:
+    """Poll each active network's chain tip once and report whether a new block
+    has appeared since the previous check. Updates ``last_tip_by_network`` in
+    place. Cheap enough to call every minute — one tip request per network with
+    opted-in wallets, not one per wallet. Never raises."""
+    advanced = False
+    try:
+        from .crud import list_background_scan_networks
+
+        networks = await list_background_scan_networks()
+    except Exception as e:
+        logger.warning(f"background tip check: could not list networks: {e}")
+        return False
+
+    for net in networks:
+        try:
+            blindbit = await get_backend_config(net)
+            if not blindbit.blindbit_url:
+                continue
+            oracle = BlindBitOracleClient(base_url=blindbit.blindbit_url)
+            tip = await oracle.get_chain_tip()
+            if not tip:
+                continue
+            if int(tip) > int(last_tip_by_network.get(net, 0)):
+                last_tip_by_network[net] = int(tip)
+                advanced = True
+        except Exception as e:
+            logger.warning(f"background tip check failed for {net}: {e}")
+    return advanced
 
 
 async def run_background_scans() -> None:
