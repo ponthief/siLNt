@@ -138,14 +138,12 @@ async def start_registration(
         logger.error(f"Token generation failed: {exc}")
         raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not start registration.")
 
-    # Resolve frontend origin so the link points at the Thrilla domain
-    origin = request.headers.get("origin") or request.headers.get("referer") or ""
-    if not origin:
-        origin = f"https://{request.headers.get('host', '')}"
-    origin = origin.rstrip("/")
-    if origin.count("/") > 2:
-        parts = origin.split("/")
-        origin = "/".join(parts[:3])
+    # Resolve the Thrilla web-app origin. Prefers SILNT_FRONTEND_URL so the link
+    # is correct for mobile registrations too (mobile sends no Origin header, so
+    # the request-derived fallback would point at the API host and 404).
+    from .appenv import frontend_base_url
+
+    origin = frontend_base_url(request)
     verify_url = f"{origin}/verify?token={token}"
 
     subject = "Thrilla — Verify your email"

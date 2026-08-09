@@ -93,3 +93,30 @@ def silnt_env(key: str, default: str = "") -> str:
     if v:
         return v
     return default
+
+
+def frontend_base_url(request=None) -> str:
+    """Canonical Thrilla web-app base URL for building email links (verify /
+    reset). Prefers the configured SILNT_FRONTEND_URL so links resolve no matter
+    how the request arrived: a browser sends an Origin/Referer header, but the
+    mobile app's fetch does NOT — so without a configured URL a mobile
+    registration's link falls back to the API host, which doesn't serve the web
+    app's SPA routes (/verify, /reset) and 404s. Falls back to the request
+    origin/host only when SILNT_FRONTEND_URL is unset (web-only deployments)."""
+    configured = silnt_env("SILNT_FRONTEND_URL")
+    if configured:
+        return configured.rstrip("/")
+    origin = ""
+    if request is not None:
+        origin = (
+            request.headers.get("origin")
+            or request.headers.get("referer")
+            or ""
+        )
+        if not origin:
+            origin = f"https://{request.headers.get('host', '')}"
+    origin = origin.rstrip("/")
+    # Strip any path from a Referer down to scheme://host.
+    if origin.count("/") > 2:
+        origin = "/".join(origin.split("/")[:3])
+    return origin
