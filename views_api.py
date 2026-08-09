@@ -986,9 +986,18 @@ async def api_test_fcm(
 
 
 async def _notify_payment_found(wallet, new_found: int, amount_sats) -> None:
-    """Best-effort push to the wallet owner's devices when a scan finds new
-    funds. Shows the amount received (not the wallet balance). No-op if push
-    isn't configured or the user has no registered device."""
+    """Best-effort push when a scan finds new funds.
+
+    Deliberately GENERIC for privacy: an FCM 'notification' message has its
+    title, body and data pass through Google in plaintext (that's how Android
+    displays it while the app is closed). So we intentionally omit the amount,
+    wallet name and count — the sensitive financial metadata — and leave only
+    "a payment arrived". The exact amount is shown ONLY inside the app: the
+    in-app banner is composed locally from scan data and never traverses FCM.
+    (`new_found`/`amount_sats` are kept in the signature for callers but are
+    intentionally NOT put into the message.)
+
+    No-op if push isn't configured or the user has no registered device."""
     try:
         from .crud import list_fcm_tokens_for_user
         from .helpers.fcm import send_fcm
@@ -996,17 +1005,11 @@ async def _notify_payment_found(wallet, new_found: int, amount_sats) -> None:
         tokens = await list_fcm_tokens_for_user(wallet.user)
         if not tokens:
             return
-        where = wallet.title or "your wallet"
-        if isinstance(amount_sats, int) and amount_sats > 0:
-            body = f"Received {amount_sats:,} sats in {where}"
-        else:
-            plural = "s" if new_found != 1 else ""
-            body = f"{new_found} new payment{plural} in {where}"
         await send_fcm(
             tokens,
             "Payment received",
-            body,
-            {"type": "payment", "wallet_id": wallet.id},
+            "You've received a new payment. Open Thrilla to view.",
+            {"type": "payment"},
         )
     except Exception as e:
         logger.warning(f"payment-found push failed for {getattr(wallet, 'id', '?')}: {e}")
