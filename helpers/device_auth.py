@@ -14,12 +14,13 @@ from lnbits.settings import settings as lnbits_settings
 from lnbits.decorators import require_admin_key
 from lnbits.decorators import WalletTypeInfo, require_invoice_key
 from ..crud import get_trusted_device, touch_trusted_device
+from .appenv import silnt_env
 
 MAX_TRUSTED_DEVICES_PER_USER = 5
 DEVICE_COOKIE_PREFIX = "silnt_device_id_"
 DEVICE_COOKIE_MAX_AGE        = 365 * 24 * 3600   # 1 year
 DEVICE_CONFIRM_TOKEN_TTL     = 3600              # 1 hour
-DEVICE_COOKIE_DOMAIN = os.environ.get("SILNT_DEVICE_COOKIE_DOMAIN", "").strip() or None
+DEVICE_COOKIE_DOMAIN = silnt_env("SILNT_DEVICE_COOKIE_DOMAIN") or None
 DEVICE_HEADER = "X-Silnt-Device"
 
 def _is_thrilla_request(request: Request) -> bool:

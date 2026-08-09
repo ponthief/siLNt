@@ -820,7 +820,15 @@ async def api_scan_wallet(
                 spend_secret_hex=data.spend_key,
                 from_height=data.from_height,
                 to_height=data.to_height,
-            )            
+            )
+            # Notify on any newly-found coins, not just when the background sweep
+            # is the finder. Opening the app triggers this interactive scan, which
+            # usually beats the 30-min sweep — so without this, an app-open find
+            # would never notify. The client shows it as an in-app banner (app in
+            # foreground) via the FCM onMessage handler.
+            new_found = (result or {}).get("utxos_found", 0) if isinstance(result, dict) else 0
+            if new_found > 0:
+                await _notify_payment_found(wallet, new_found, (result or {}).get("amount_found"))
         except ValueError as e:
             logger.error(f"Scan value error for {wallet_id}: {e}"); _mark_scan_failed(wallet_id)
         except RuntimeError as e:
@@ -955,10 +963,41 @@ async def api_unregister_fcm_token(
     return {"ok": True}
 
 
-async def _notify_payment_found(wallet, new_found: int, balance) -> None:
-    """Best-effort push to the wallet owner's devices when a background scan finds
-    new funds. No-op if push isn't configured or the user has no registered
-    device."""
+@silnt_api_router.post("/api/v1/fcm/test")
+async def api_test_fcm(
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """Send a diagnostic push to this user's registered devices and report the
+    outcome. Lets the user verify the whole FCM pipeline (credentials on the
+    server + a registered device token) without waiting for a real payment and
+    the 30-min background sweep. The returned report says exactly why nothing
+    arrived if it didn't."""
+    from .crud import list_fcm_tokens_for_user
+    from .helpers.fcm import send_fcm_report
+
+    tokens = await list_fcm_tokens_for_user(key_info.wallet.user)
+    report = await send_fcm_report(
+        tokens,
+        "Thrilla test notification",
+        "If you can see this, push notifications are working.",
+        {"type": "test"},
+    )
+    return report
+
+
+async def _notify_payment_found(wallet, new_found: int, amount_sats) -> None:
+    """Best-effort push when a scan finds new funds.
+
+    Deliberately GENERIC for privacy: an FCM 'notification' message has its
+    title, body and data pass through Google in plaintext (that's how Android
+    displays it while the app is closed). So we intentionally omit the amount,
+    wallet name and count — the sensitive financial metadata — and leave only
+    "a payment arrived". The exact amount is shown ONLY inside the app: the
+    in-app banner is composed locally from scan data and never traverses FCM.
+    (`new_found`/`amount_sats` are kept in the signature for callers but are
+    intentionally NOT put into the message.)
+
+    No-op if push isn't configured or the user has no registered device."""
     try:
         from .crud import list_fcm_tokens_for_user
         from .helpers.fcm import send_fcm
@@ -966,15 +1005,11 @@ async def _notify_payment_found(wallet, new_found: int, balance) -> None:
         tokens = await list_fcm_tokens_for_user(wallet.user)
         if not tokens:
             return
-        plural = "s" if new_found != 1 else ""
-        body = f"{new_found} new payment{plural} in {wallet.title or 'your wallet'}"
-        if isinstance(balance, int):
-            body += f" · balance {balance:,} sats"
         await send_fcm(
             tokens,
             "Payment received",
-            body,
-            {"type": "payment", "wallet_id": wallet.id},
+            "You've received a new payment. Open Thrilla to view.",
+            {"type": "payment"},
         )
     except Exception as e:
         logger.warning(f"payment-found push failed for {getattr(wallet, 'id', '?')}: {e}")
@@ -1030,7 +1065,7 @@ async def run_background_scans() -> None:
             new_found = (result or {}).get("utxos_found", 0)
             if new_found > 0:
                 await _notify_payment_found(
-                    wallet, new_found, (result or {}).get("balance")
+                    wallet, new_found, (result or {}).get("amount_found")
                 )
         except Exception as e:
             logger.warning(f"Background scan failed for {wid}: {e}")
