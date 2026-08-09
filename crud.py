@@ -129,6 +129,18 @@ async def list_background_scan_wallet_ids() -> list:
     return [r["wallet_id"] for r in rows]
 
 
+async def list_background_scan_networks() -> list:
+    """Distinct networks among wallets opted into background scanning. Lets the
+    scan loop poll one chain tip per active network per tick, instead of one per
+    wallet."""
+    rows = await db.fetchall(
+        """SELECT DISTINCT w.network
+             FROM silnt.background_scan b
+             JOIN silnt.wallets w ON w.id = b.wallet_id"""
+    )
+    return [r["network"] for r in rows if r["network"]]
+
+
 # ── Push (FCM) device tokens ─────────────────────────────────────────────────
 async def register_fcm_token(user_id: str, token: str) -> None:
     """Associate a device push token with a user. Re-registering a token that was
