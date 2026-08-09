@@ -828,7 +828,7 @@ async def api_scan_wallet(
             # foreground) via the FCM onMessage handler.
             new_found = (result or {}).get("utxos_found", 0) if isinstance(result, dict) else 0
             if new_found > 0:
-                await _notify_payment_found(wallet, new_found, (result or {}).get("balance"))
+                await _notify_payment_found(wallet, new_found, (result or {}).get("amount_found"))
         except ValueError as e:
             logger.error(f"Scan value error for {wallet_id}: {e}"); _mark_scan_failed(wallet_id)
         except RuntimeError as e:
@@ -985,10 +985,10 @@ async def api_test_fcm(
     return report
 
 
-async def _notify_payment_found(wallet, new_found: int, balance) -> None:
-    """Best-effort push to the wallet owner's devices when a background scan finds
-    new funds. No-op if push isn't configured or the user has no registered
-    device."""
+async def _notify_payment_found(wallet, new_found: int, amount_sats) -> None:
+    """Best-effort push to the wallet owner's devices when a scan finds new
+    funds. Shows the amount received (not the wallet balance). No-op if push
+    isn't configured or the user has no registered device."""
     try:
         from .crud import list_fcm_tokens_for_user
         from .helpers.fcm import send_fcm
@@ -996,10 +996,12 @@ async def _notify_payment_found(wallet, new_found: int, balance) -> None:
         tokens = await list_fcm_tokens_for_user(wallet.user)
         if not tokens:
             return
-        plural = "s" if new_found != 1 else ""
-        body = f"{new_found} new payment{plural} in {wallet.title or 'your wallet'}"
-        if isinstance(balance, int):
-            body += f" · balance {balance:,} sats"
+        where = wallet.title or "your wallet"
+        if isinstance(amount_sats, int) and amount_sats > 0:
+            body = f"Received {amount_sats:,} sats in {where}"
+        else:
+            plural = "s" if new_found != 1 else ""
+            body = f"{new_found} new payment{plural} in {where}"
         await send_fcm(
             tokens,
             "Payment received",
@@ -1060,7 +1062,7 @@ async def run_background_scans() -> None:
             new_found = (result or {}).get("utxos_found", 0)
             if new_found > 0:
                 await _notify_payment_found(
-                    wallet, new_found, (result or {}).get("balance")
+                    wallet, new_found, (result or {}).get("amount_found")
                 )
         except Exception as e:
             logger.warning(f"Background scan failed for {wid}: {e}")

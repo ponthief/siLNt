@@ -593,16 +593,17 @@ async def set_last_scan_height(wallet_id: str, height: int) -> None:
 
 def get_scan_progress(wallet_id: str) -> dict:
     return _scan_progress.get(
-        wallet_id, {"active": False, "current": 0, "total": 0, "found": 0}
+        wallet_id, {"active": False, "current": 0, "total": 0, "found": 0, "amount": 0}
     )
 
 
-def set_scan_progress(wallet_id, current, total, found, active=True):
+def set_scan_progress(wallet_id, current, total, found, active=True, amount=0):
     _scan_progress[wallet_id] = {
         "active": active,
         "current": current,
         "total": total,
         "found": found,
+        "amount": amount,
     }
 
 
@@ -651,6 +652,7 @@ async def scan_wallet(
         if getattr(a, "label", None)
     }
     total_found = 0
+    total_found_amount = 0
     blocks_scanned = 0
     last_scanned_height = start
     total_blocks = end - start + 1
@@ -667,7 +669,8 @@ async def scan_wallet(
             stopped = True
             await set_last_scan_height(wallet_id, last_scanned_height)
             set_scan_progress(
-                wallet_id, blocks_scanned, total_blocks, total_found, active=False
+                wallet_id, blocks_scanned, total_blocks, total_found,
+                active=False, amount=total_found_amount,
             )
             clear_scan_stop(wallet_id)
             break
@@ -727,8 +730,9 @@ async def scan_wallet(
                     # Count only genuinely NEW utxos — re-detecting an existing
                     # one on a rescan is an upsert, not a discovery, and must not
                     # inflate the "found" count the UI shows.
-                    new_count = await insert_utxos_for_wallet(wallet_id, result)
+                    new_count, new_amount = await insert_utxos_for_wallet(wallet_id, result)
                     total_found += new_count
+                    total_found_amount += new_amount
                     logger.info(
                         f"Block {h}: {len(result)} detected, {new_count} new"
                     )
@@ -742,7 +746,10 @@ async def scan_wallet(
             blocks_scanned += 1
             last_scanned_height = h
 
-        set_scan_progress(wallet_id, blocks_scanned, total_blocks, total_found)
+        set_scan_progress(
+            wallet_id, blocks_scanned, total_blocks, total_found,
+            amount=total_found_amount,
+        )
         await set_last_scan_height(wallet_id, last_scanned_height)
 
         # Yield to the event loop between batches so other requests (wallet
@@ -751,9 +758,10 @@ async def scan_wallet(
 
     await set_last_scan_height(wallet_id, last_scanned_height)
     set_scan_progress(
-        wallet_id, blocks_scanned, total_blocks, total_found, active=False
+        wallet_id, blocks_scanned, total_blocks, total_found,
+        active=False, amount=total_found_amount,
     )
-    
+
     try:
         rec = await reconcile_unconfirmed_spent(wallet_id, wallet.network)
         if rec["restored"] or rec["confirmed"]:
@@ -780,9 +788,13 @@ async def scan_wallet(
     logger.info(
         f"Scan done: {blocks_scanned} blocks, {total_found} UTXOs, balance={balance}"
     )
-    set_scan_progress(wallet_id, blocks_scanned, total_blocks, total_found, active=False)
+    set_scan_progress(
+        wallet_id, blocks_scanned, total_blocks, total_found,
+        active=False, amount=total_found_amount,
+    )
     return {
         "utxos_found": total_found,
+        "amount_found": total_found_amount,
         "blocks_scanned": blocks_scanned,
         "final_height": last_scanned_height,
         "balance": balance,

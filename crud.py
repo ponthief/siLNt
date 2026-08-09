@@ -239,11 +239,13 @@ async def get_utxos_for_wallet(wallet_id: str) -> list[UTXORecord]:
     )
 
 
-async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> int:
-    """Upsert the given UTXOs. Returns the count of rows that were NEWLY
-    inserted — re-detecting a UTXO that already exists (e.g. on a rescan) is an
-    UPDATE, not a discovery, so it must not be counted as "found"."""
+async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> tuple:
+    """Upsert the given UTXOs. Returns (count, amount_sats) of rows that were
+    NEWLY inserted — re-detecting a UTXO that already exists (e.g. on a rescan)
+    is an UPDATE, not a discovery, so it must not be counted as "found". The
+    amount is the summed value of just those new rows (used for notifications)."""
     newly_inserted = 0
+    newly_amount = 0
     for utxo in utxos:
         row = utxo.to_db_row(wallet_id)
         # Tolerate rows from a to_db_row() that predates the label_index column
@@ -275,7 +277,11 @@ async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> int:
         )
         if not already:
             newly_inserted += 1
-    return newly_inserted
+            try:
+                newly_amount += int(row.get("amount") or 0)
+            except (TypeError, ValueError):
+                pass
+    return newly_inserted, newly_amount
 
 
 async def update_unconfirmed_utxo(wallet_id: str, txid: str):
