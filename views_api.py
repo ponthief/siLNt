@@ -585,14 +585,16 @@ async def api_preview_wallet_address(
         raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
 
     label_index = data.label_index
-    if label_index is None or label_index <= 0:
-        # m=0 is the BIP-352 change label — never hand it out; bump to next free.
-        label_index = await get_next_label_index(wallet_id)
-    elif label_index == 1:
-        # m=1 is the legacy change index (still scanned) — keep it reserved so a
-        # user label can't collide with pre-fix change outputs.
-        label_index = await get_next_label_index(wallet_id)
-    elif await label_index_taken(wallet_id, label_index):
+    # Only honor an explicit index if it's a real, free labeled slot. Anything
+    # else — None, a reserved index (0 change / 1 legacy change), one outside the
+    # always-scanned range, or an already-taken slot — falls back to the next
+    # free slot, so a previewed address can never land outside the scan set (see
+    # the MAX_ADDRESSES_PER_WALLET / BIP352_LABELED_ADDRESS_INDICES coupling).
+    if (
+        label_index is None
+        or label_index not in BIP352_LABELED_ADDRESS_INDICES
+        or await label_index_taken(wallet_id, label_index)
+    ):
         label_index = await get_next_label_index(wallet_id)
     spend_pub_hex = get_spend_pub_from_secret(data.spend_key)
     hrp = "sp" if wallet.network == "mainnet" else "tsp"
@@ -680,16 +682,23 @@ async def api_save_generated_wallet_address(
             status_code=HTTPStatus.CONFLICT,
             detail="This address is already saved on this wallet. Generate a new one.",
         )
-    # Determine the label_index — trust server, not stale client state
+    # Determine the label_index — trust server, not stale client state.
     label_index = data.label_index
-    if label_index is None or label_index <= 0:
-        # m=0 is the BIP-352 change label — never hand it out; bump to next free.
-        label_index = await get_next_label_index(wallet_id)
-    elif label_index == 1:
-        # m=1 is the legacy change index (still scanned) — keep it reserved.
-        label_index = await get_next_label_index(wallet_id)
-    elif await label_index_taken(wallet_id, label_index):
-        # Bump to next free instead of erroring
+    # A saved labeled address MUST land on an always-scanned index, or it would
+    # silently stop being detected if later deleted (see the
+    # MAX_ADDRESSES_PER_WALLET / BIP352_LABELED_ADDRESS_INDICES coupling). Unlike
+    # preview, save can't regenerate the address (it has no keys) — the client's
+    # sp_address is bound to its index — so an out-of-range/reserved explicit
+    # index can't be safely remapped: reject it rather than persist a mismatched,
+    # unscannable row.
+    if label_index is not None and label_index not in BIP352_LABELED_ADDRESS_INDICES:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Invalid label index; regenerate the address and try again.",
+        )
+    # Auto-pick (None) or a race on an already-taken slot → next free in-range
+    # slot. The cap check above guarantees a free scanned slot exists here.
+    if label_index is None or await label_index_taken(wallet_id, label_index):
         label_index = await get_next_label_index(wallet_id)
 
     try:
