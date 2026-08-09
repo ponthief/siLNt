@@ -15,7 +15,10 @@ from .helpers.wallet import (
     generate_labeled_sp_address,
     get_spend_pub_from_secret,
 )
-from .helpers.scan import scan_wallet, get_scan_progress, request_scan_stop, get_tx_status
+from .helpers.scan import (
+    scan_wallet, get_scan_progress, request_scan_stop, get_tx_status,
+    BIP352_LABELED_ADDRESS_INDICES,
+)
 from .helpers.address_resolver import bip353_resolve
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, Cookie
 from lnbits.core.models import WalletTypeInfo
@@ -234,7 +237,24 @@ from .models import (
     RECENT_REJECT_COOLDOWN,
 )
 
+# COUPLED to the always-scanned labeled indices in helpers/scan.py
+# (BIP352_LABELED_ADDRESS_INDICES). get_next_label_index() hands out the lowest
+# free index >= 2, and this cap stops new saves once that many labeled rows
+# exist, so the highest index the server ever assigns is MAX_ADDRESSES_PER_WALLET
+# + 1. Every index in 2..(cap+1) MUST be in BIP352_LABELED_ADDRESS_INDICES,
+# because that set is scanned regardless of whether a saved-address row exists —
+# which is exactly what keeps a *deleted* labeled address still detectable (its
+# label stays in the scan set, so payments to it are still found and the row is
+# re-created). Raise this cap and you MUST widen BIP352_LABELED_ADDRESS_INDICES
+# to match (or switch scanning to a high-water mark); otherwise a deleted
+# high-index labeled address would silently stop being detected. The assert below
+# fails fast at import if the two ever drift apart.
 MAX_ADDRESSES_PER_WALLET = 2
+assert set(range(2, MAX_ADDRESSES_PER_WALLET + 2)) <= set(BIP352_LABELED_ADDRESS_INDICES), (
+    "MAX_ADDRESSES_PER_WALLET outgrew the always-scanned labeled indices "
+    "(BIP352_LABELED_ADDRESS_INDICES); a deleted labeled address at an unscanned "
+    "index would stop being detected. Widen the scanned set or use a high-water mark."
+)
 BIP352_CHANGE_LABEL_INDEX = 0
 BITMAIL_MAX_ACQUISITIONS = 3
 BLINDBIT_SYNC_TOLERANCE = 2
