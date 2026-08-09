@@ -67,15 +67,13 @@ async def request_password_reset(email: str, request: Request) -> dict:
             logger.error(f"Reset key generation failed: {exc}")
             return generic
 
-        # ── Build reset URL from request origin ───────────────────────────────
-        origin = request.headers.get("origin") or request.headers.get("referer") or ""
-        if not origin:
-            origin = f"https://{request.headers.get('host', '')}"
-        origin = origin.rstrip("/")
-        # If referer has a path, strip it down to origin
-        if origin.count("/") > 2:
-            parts = origin.split("/")
-            origin = "/".join(parts[:3])
+        # ── Build reset URL from the canonical frontend origin ─────────────────
+        # Prefers SILNT_FRONTEND_URL so reset links work for the mobile app too
+        # (no Origin header → the request-derived fallback would hit the API host
+        # and 404 on the SPA /reset route).
+        from .appenv import frontend_base_url
+
+        origin = frontend_base_url(request)
         reset_url = f"{origin}/reset?key={reset_key}"
 
         # ── Compose email ─────────────────────────────────────────────────────
