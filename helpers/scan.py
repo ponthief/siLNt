@@ -32,6 +32,13 @@ SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 # at the standard m=0.
 BIP352_CHANGE_LABEL_INDEX = 0
 BIP352_LEGACY_CHANGE_LABEL_INDICES = [1]
+# The labeled-address indices the receiver ALWAYS scans, whether or not a saved
+# wallet_addresses row exists for them. This is what makes deleting a labeled
+# address safe: its label stays in the scan set, so payments keep being detected
+# (and ensure_labeled_address_row re-creates the row). COUPLED to
+# MAX_ADDRESSES_PER_WALLET in views_api.py — this set must cover every index the
+# assigner can hand out (2 .. cap+1). If you widen this, you may raise that cap;
+# if you raise that cap, you MUST widen this (an assert there enforces it).
 BIP352_LABELED_ADDRESS_INDICES=[2,3]
 # BIP-352 v1.1.0 (March 2026): a recipient group holds at most K_max = 2323
 # outputs — the most P2TR outputs that fit in a 100,000-vByte standard tx.
