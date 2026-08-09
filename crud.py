@@ -98,6 +98,16 @@ async def disable_background_scan(wallet_id: str) -> None:
     )
 
 
+async def disable_all_background_scans_for_user(user_id: str) -> None:
+    """Remove the uploaded scan key for every wallet the user owns. Used by the
+    mobile duress action so a coerced unlock also revokes server-side scanning."""
+    await db.execute(
+        """DELETE FROM silnt.background_scan
+           WHERE wallet_id IN (SELECT id FROM silnt.wallets WHERE "user" = :uid)""",
+        {"uid": user_id},
+    )
+
+
 async def is_background_scan_enabled(wallet_id: str) -> bool:
     row = await db.fetchone(
         "SELECT 1 FROM silnt.background_scan WHERE wallet_id = :wid", {"wid": wallet_id}
