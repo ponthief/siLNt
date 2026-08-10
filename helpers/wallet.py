@@ -11,7 +11,7 @@ from embit import bip32, bip39, ec, finalizer, script
 from embit.networks import NETWORKS
 from binascii import hexlify
 from .curve import bech32_encode, Encoding
-from .curve import pubkey_point_gen_from_int, int_from_bytes, Point
+from .curve import int_from_bytes, Point
 from loguru import logger
 from lnbits.utils.crypto import AESCipher
 from cryptography.fernet import Fernet
@@ -28,16 +28,17 @@ from embit.networks import NETWORKS
 from .curve import (
     decode,
     convertbits,
-    pubkey_point_gen_from_int,
     int_from_bytes,
-    point_add,
-    point_mul,
     serP,
     ser256,
     has_even_y,
     G,
     p as CURVE_P,
 )
+# EC scalar ops via libsecp256k1 (constant-time, ~100x faster) — validated
+# byte-for-byte against curve.py's pure-Python versions
+# (helpers/_curve_equivalence_check.py).
+from .curve_native import pubkey_point_gen_from_int, point_add, point_mul
 from embit.ec import SchnorrSig
 from mnemonic import Mnemonic
 SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
