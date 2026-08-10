@@ -4,24 +4,29 @@ Run on a machine with coincurve + libsecp256k1 installed:
 
     cd helpers && python _curve_equivalence_check.py
 
-Fuzzes the three EC operations wallet.py depends on across random vectors and
-asserts byte-for-byte identical output, then benchmarks the speedup. If it
-prints "OK", curve_native is a safe drop-in and you can point wallet.py's EC
-imports at it. A single MISMATCH means DO NOT SWAP (it would change derived
-addresses/keys → unrecoverable wallets).
+Asserts curve_native produces byte-for-byte identical output to the pure-Python
+curve across random vectors, then benchmarks the speedup. "OK" = safe drop-in;
+any MISMATCH = DO NOT SWAP (it would change derived addresses/keys).
+
+Note: the pure-Python point_mul is very slow (~tens of ms each), so the slow
+reference is only exercised a small number of times. Random points are
+generated with the fast coincurve path; their correctness is covered separately
+by the pubkey_gen check.
 """
 import secrets
+import sys
 import time
 
 try:
     import curve as ref
     import curve_native as nat
-except ImportError:  # run as a module: python -m helpers._curve_equivalence_check
+except ImportError:  # python -m helpers._curve_equivalence_check
     from . import curve as ref
     from . import curve_native as nat
 
 N = nat.N
-ROUNDS = 500
+SLOW = 60    # rounds that invoke the slow pure-Python point_mul
+FAST = 400   # rounds that only use fast ops (point_add / serP)
 
 
 def rand_scalar() -> int:
@@ -29,11 +34,12 @@ def rand_scalar() -> int:
 
 
 def rand_point():
-    return ref.pubkey_point_gen_from_int(rand_scalar())
+    # Fast point generation (coincurve). Correctness of this path is asserted by
+    # the pubkey_gen check below, so it's safe to use it to build test inputs.
+    return nat.pubkey_point_gen_from_int(rand_scalar())
 
 
 def neg(P):
-    # -(x, y) = (x, p - y) over the field prime.
     return (P[0], (ref.p - P[1]) % ref.p)
 
 
@@ -42,32 +48,46 @@ def check(name, a, b):
         raise AssertionError(f"MISMATCH in {name}:\n  ref   = {a}\n  native= {b}")
 
 
+def phase(msg):
+    print(msg, end=" ", flush=True)
+
+
 def main() -> None:
-    for _ in range(ROUNDS):
+    print(f"Running equivalence check (SLOW={SLOW}, FAST={FAST})...\n")
+
+    phase("pubkey_gen...")
+    for _ in range(SLOW):
         s = rand_scalar()
         check("pubkey_gen",
               ref.pubkey_point_gen_from_int(s),
               nat.pubkey_point_gen_from_int(s))
+    print("ok")
 
-    for _ in range(ROUNDS):
+    phase("point_add (add/double/inverse)...")
+    for _ in range(FAST):
         P, Q = rand_point(), rand_point()
         check("add", ref.point_add(P, Q), nat.point_add(P, Q))
         check("double", ref.point_add(P, P), nat.point_add(P, P))
         check("inverse", ref.point_add(P, neg(P)), nat.point_add(P, neg(P)))
+    print("ok")
 
-    for _ in range(ROUNDS):
+    phase("point_mul...")
+    for _ in range(SLOW):
         P, d = rand_point(), rand_scalar()
         check("mul", ref.point_mul(P, d), nat.point_mul(P, d))
+    print("ok")
 
-    for _ in range(ROUNDS):
+    phase("serP...")
+    for _ in range(FAST):
         P = rand_point()
         check("serP", ref.serP(P), nat.serP(P))
+    print("ok")
 
-    print(f"OK: {ROUNDS} rounds each — pubkey_gen, add/double/inverse, mul, serP all match")
+    print("\nOK: all vectors match — curve_native is a byte-for-byte drop-in.\n")
 
     # Benchmark the scan hot-path op (scalar * point).
-    pts = [rand_point() for _ in range(200)]
-    scs = [rand_scalar() for _ in range(200)]
+    pts = [rand_point() for _ in range(SLOW)]
+    scs = [rand_scalar() for _ in range(SLOW)]
     t0 = time.perf_counter()
     for P, d in zip(pts, scs):
         ref.point_mul(P, d)
@@ -77,9 +97,13 @@ def main() -> None:
     t2 = time.perf_counter()
     pure, native = t1 - t0, t2 - t1
     speedup = pure / native if native else float("inf")
-    print(f"point_mul x200: pure-Python {pure:.3f}s | coincurve {native:.3f}s "
+    print(f"point_mul x{SLOW}: pure-Python {pure:.3f}s | coincurve {native:.4f}s "
           f"| {speedup:.0f}x faster")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except AssertionError as e:
+        print("\nFAILED — do NOT swap:\n" + str(e))
+        sys.exit(1)
