@@ -40,9 +40,10 @@ from .helpers.email_verification import (
 from mnemonic import Mnemonic
 from .helpers.dust_check import evaluate_dust_for_wallet
 from .helpers.scan_rate_limiter import check_scan_allowed, mark_scan_finished
+from .helpers.invite_rate_limiter import check_invite_allowed, record_invite
 from .helpers.forgot_password import request_password_reset
 from .helpers.transactions import get_wallet_transaction_detail, list_wallet_transactions
-from lnbits.core.crud import get_account, get_account_by_username
+from lnbits.core.crud import get_account, get_account_by_username, get_account_by_email
 from lnbits.core.crud.users import delete_account
 from lnbits.core.services.notifications import send_email_notification
 from .helpers.device_auth import (
@@ -220,6 +221,7 @@ from .models import (
     ApproveBip353Request,
     RejectBip353Request,
     RestoreUtxoRequest,
+    InviteRequest,
     ImportDescriptorData,
     CreateInvoiceData,
     PayInvoiceData,
@@ -1645,6 +1647,87 @@ async def api_forgot_password(data: ForgotPasswordRequest, request: Request) -> 
             detail="Valid email address required.",
         )
     return await request_password_reset(data.email.strip().lower(), request)
+
+
+_INVITE_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+@silnt_api_router.post(
+    "/api/v1/invite", dependencies=[Depends(require_trusted_device)]
+)
+async def api_send_invite(
+    data: InviteRequest,
+    request: Request,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+) -> dict:
+    """Invite a friend to Thrilla by email.
+
+    Sends a fixed invite template (naming the inviter) with a link to the
+    sign-up page. Rate-limited per user; requires a trusted device. The invitee
+    email is used only to send this one message — it is not stored.
+    """
+    email = (data.email or "").strip().lower()
+    if not _INVITE_EMAIL_RE.match(email) or len(email) > 254:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Enter a valid email address.",
+        )
+    if not lnbits_settings.lnbits_email_notifications_enabled:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail="Email sending isn't available right now. Try again later.",
+        )
+
+    user_id = key_info.wallet.user
+    check_invite_allowed(user_id, email)
+
+    # Don't email addresses that already have an account (avoids nagging existing
+    # users). The response is identical either way, so this doesn't reveal
+    # whether an address is registered.
+    already = await get_account_by_email(email)
+    if not already:
+        inviter = await get_account(user_id)
+        inviter_name = (inviter.username if inviter else None) or "A Thrilla user"
+
+        from .helpers.appenv import frontend_base_url
+
+        origin = frontend_base_url(request)
+        signup_url = f"{origin}/register"
+        subject = f"{inviter_name} invited you to try Thrilla"
+        body = (
+            f"Hi,\n\n"
+            f"{inviter_name} is using Thrilla — a Bitcoin wallet built on Silent "
+            f"Payments, so you can receive to one reusable address without "
+            f"reusing it on-chain — and thought you'd want to try it.\n\n"
+            f"Create your free account here:\n\n"
+            f"    {signup_url}\n\n"
+            f"Not interested? You can ignore this email — you won't be contacted "
+            f"again.\n\n"
+            f"— The Thrilla team"
+        )
+        try:
+            res = await send_email_notification(
+                to_emails=[email], message=body, subject=subject
+            )
+            if res.get("status") != "ok":
+                logger.warning(f"Invite email failed: {res}")
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_GATEWAY,
+                    detail="Could not send the invitation. Please try again later.",
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning(f"Invite email raised: {exc}")
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_GATEWAY,
+                detail="Could not send the invitation. Please try again later.",
+            )
+        logger.info(f"Invite sent by {user_id} to {email}")
+
+    record_invite(user_id, email)
+    return {"success": True, "message": f"Invitation sent to {email}."}
+
 
 # UTXO Labels
 @silnt_api_router.put("/api/v1/utxos/{txid}/label")
