@@ -158,6 +158,9 @@ class SetupBip353Request(BaseModel):
 class ForgotPasswordRequest(BaseModel):
     email: str
 
+class InviteRequest(BaseModel):
+    email: str
+
 class UpdateUtxoLabel(BaseModel):
     label: str = ''
     wallet_id: str
