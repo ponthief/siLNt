@@ -842,13 +842,27 @@ async def api_scan_wallet(
     )
     user_id = key_info.wallet.user
 
+    # Scanning only needs the scan key + the spend PUBLIC key. Derive the spend
+    # pubkey from the wallet's own sp_address (exactly like the background
+    # scanner) instead of accepting the spend secret — a scan can then never
+    # carry spend-capable material. data.spend_key is ignored if present.
+    from .helpers.wallet import parse_sp_address
+    try:
+        _, _b_spend = parse_sp_address(wallet.sp_address)
+        spend_pub_hex = _b_spend.hex()
+    except Exception:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Wallet has no valid Silent Payments address to scan.",
+        )
+
     async def _run_scan():
         result = None
         try:
             result = await scan_wallet(
                 wallet_id=wallet_id,
                 scan_secret_hex=data.scan_secret,
-                spend_secret_hex=data.spend_key,
+                spend_pub_hex=spend_pub_hex,
                 from_height=data.from_height,
                 to_height=data.to_height,
             )
