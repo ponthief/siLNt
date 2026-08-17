@@ -82,7 +82,11 @@ class ScanWalletRequest(BaseModel):
     from_height: Optional[int] = None
     to_height: Optional[int] = None
     scan_secret: str
-    spend_key: str
+    # Deprecated and ignored: scanning only needs the scan key + the spend PUBLIC
+    # key, which the server derives from the wallet's own sp_address. The spend
+    # secret is never required to scan, so clients no longer send it. Kept
+    # Optional so older clients that still include it don't 422.
+    spend_key: Optional[str] = None
 
 
 class UtxoForTx(BaseModel):
