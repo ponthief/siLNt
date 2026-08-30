@@ -337,6 +337,15 @@
   .sideload { margin-top: 18px; font-size: 12.5px; color: var(--faint); line-height: 1.6; border: 1px dashed var(--border-bright); border-radius: var(--radius); padding: 16px 20px; }
   .sideload strong { color: var(--dim); font-weight: 500; }
   .also { margin-top: 20px; font-size: 13px; color: var(--faint); line-height: 1.6; }
+  .shots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  @media (max-width: 680px){ .shots { grid-template-columns: 1fr; } }
+  .shot { display: flex; flex-direction: column; gap: 12px; max-width: 320px; margin: 0 auto; }
+  .shot img {
+    width: 100%; height: auto; display: block;
+    border: 1px solid var(--border); border-radius: 12px;
+    background: var(--panel);
+  }
+  .shot figcaption { font-size: 12.5px; color: var(--faint); line-height: 1.55; }
 
   /* ─── get-started steps ─── */
   .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px,1fr)); gap: 18px; }
@@ -375,7 +384,7 @@
 <header class="wrap tab-home">
   <img class="hero-mascot reveal d1" src="thrilla-icon.png" alt="Thrilla mascot — a celebrating Bitcoin coin">
   <div class="eyebrow reveal d1"><span class="dot"></span> Self-custodial · Silent Payments · Android</div>
-  <h1 class="reveal d2">A friends-and-family wallet<br>with an address you can <em>actually say out loud.</em></h1>
+  <h1 class="reveal d2">A <em>friends-and-family</em> wallet.</h1>
   <p class="lead reveal d3">One reusable <strong>Silent Payment</strong> address you can publish anywhere — every payment still lands on a fresh, unlinkable output. Your spend key never leaves your phone.</p>
   <div class="hero-actions reveal d4">
     <a class="btn btn-primary" href="https://github.com/ponthief/thrilla/raw/master/thrilla.apk">Download for Android <span class="arrow">→</span></a>
@@ -427,6 +436,28 @@
   <div class="sideload">
     <strong>Installing:</strong> Android blocks apps from outside the Play Store — when you open the file, allow installs from your browser, then continue.
   </div>
+</section>
+
+<section class="wrap" id="shots">
+  <div class="sec-head">
+    <div class="sec-tag">In the app</div>
+    <div class="sec-title">What you actually get</div>
+  </div>
+  <div class="shots">
+    <figure class="shot">
+      <img loading="lazy" src="screenshots/receive-bitmail.jpg" alt="The Receive screen: a QR code for a reusable Silent Payments address, with a form to claim a BitMail name">
+      <figcaption>Your reusable address as a QR — and a BitMail name to put in front of it.</figcaption>
+    </figure>
+    <figure class="shot">
+      <img loading="lazy" src="screenshots/coin-control.jpg" alt="The Coins screen listing unspent coins with amounts, a label action and a freeze button on each">
+      <figcaption>Every coin listed, labelled and freezable, with dust counted separately.</figcaption>
+    </figure>
+    <figure class="shot">
+      <img loading="lazy" src="screenshots/scan.jpg" alt="The Scan screen showing the chain tip, the height scanned to, and a button to scan the remaining blocks">
+      <figcaption>Scanning the chain for the payments only your key can find.</figcaption>
+    </figure>
+  </div>
+  <p class="also">Screens from the Signet and mainnet builds — identical bar the network they talk to.</p>
 </section>
 
 <section class="wrap" id="what">
