@@ -3,12 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Thrilla — Silent Payments & BitMail, self-custodial</title>
-<meta name="description" content="Thrilla brings Silent Payments, collaborative PayJoin, and email-style BitMail addresses to a trusted circle of users on top of LNbits, BlindBit, and Fulcrum. Your seeds never touch the server.">
+<title>Thrilla — a self-custodial Silent Payments wallet for Android</title>
+<meta name="description" content="Thrilla is a self-custodial Bitcoin wallet built on Silent Payments: one reusable address, unlinkable payments, and email-style BitMail names. Download the Android app for mainnet or Signet.">
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="apple-touch-icon" href="thrilla-icon.png">
-<meta property="og:title" content="Thrilla — Silent Payments & BitMail">
-<meta property="og:description" content="A self-custodial friends-and-family Bitcoin wallet: private Silent Payments to the outside world, collaborative PayJoin within your circle. Your keys never touch the server.">
+<meta property="og:title" content="Thrilla — a Silent Payments wallet for Android">
+<meta property="og:description" content="A self-custodial Bitcoin wallet built on Silent Payments. Android builds for mainnet and Signet — your spend key never leaves your phone.">
 <meta property="og:image" content="thrilla-icon.png">
 <meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -315,6 +315,45 @@
   .tab-btn.active { color: var(--orange); border-color: var(--border-bright); background: var(--panel); }
   .tab-panel { display: none; animation: rise .5s cubic-bezier(.2,.7,.2,1); }
   .tab-panel.active { display: block; }
+
+  /* ─── download cards ─── */
+  .dl-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 680px){ .dl-grid { grid-template-columns: 1fr; } }
+  .dl-card {
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--panel); padding: 26px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .dl-card.main { border-color: rgba(247,147,26,.3); background: linear-gradient(180deg, var(--orange-dim), var(--panel)); }
+  .dl-card.test { border-color: rgba(63,185,80,.28); background: linear-gradient(180deg, rgba(63,185,80,.05), var(--panel)); }
+  .dl-net { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; }
+  .dl-card.main .dl-net { color: var(--orange); }
+  .dl-card.test .dl-net { color: var(--green); }
+  .dl-card h3 { font-family: var(--display); font-weight: 500; font-size: 22px; letter-spacing: -.01em; }
+  .dl-card p { font-size: 13.5px; color: var(--dim); line-height: 1.55; flex: 1; }
+  .dl-card .btn { justify-content: center; }
+  .dl-meta { font-size: 11.5px; color: var(--faint); }
+  .dl-meta a { color: var(--dim); }
+  .sideload { margin-top: 18px; font-size: 12.5px; color: var(--faint); line-height: 1.6; border: 1px dashed var(--border-bright); border-radius: var(--radius); padding: 16px 20px; }
+  .sideload strong { color: var(--dim); font-weight: 500; }
+  .also { margin-top: 20px; font-size: 13px; color: var(--faint); line-height: 1.6; }
+  .shots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  @media (max-width: 680px){ .shots { grid-template-columns: 1fr; } }
+  .shot { display: flex; flex-direction: column; gap: 12px; max-width: 320px; margin: 0 auto; }
+  .shot img {
+    width: 100%; height: auto; display: block;
+    border: 1px solid var(--border); border-radius: 12px;
+    background: var(--panel);
+  }
+  .shot figcaption { font-size: 12.5px; color: var(--faint); line-height: 1.55; }
+
+  /* ─── get-started steps ─── */
+  .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px,1fr)); gap: 18px; }
+  .stp { display: flex; gap: 14px; align-items: flex-start; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); padding: 22px; }
+  .stp .n { flex-shrink: 0; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-size: 14px; font-weight: 600; color: var(--green); background: var(--green-dim); border: 1px solid var(--border-bright); }
+  .stp h4 { font-size: 14.5px; font-weight: 600; margin-bottom: 5px; }
+  .stp p { font-size: 13px; color: var(--dim); line-height: 1.55; }
+  .stp a { color: var(--green); text-decoration: none; border-bottom: 1px solid var(--border-bright); }
 </style>
 </head>
 <body>
@@ -328,8 +367,8 @@
       <a href="#" onclick="showTab('how');return false">How it works</a>
       <a class="nav-social" href="https://x.com/thrillabtc" target="_blank" rel="noopener noreferrer" title="Thrilla on X" aria-label="Thrilla on X">𝕏</a>
       <a class="nav-social" href="https://t.me/thrilla_btc" target="_blank" rel="noopener noreferrer" title="Thrilla on Telegram" aria-label="Thrilla on Telegram">✈</a>
-      <a class="nav-ghost-btn" href="https://github.com/ponthief/siLNt/tree/master" target="_blank" rel="noopener noreferrer">View it in GitHub</a>
-      <a class="cta" href="https://signet.thrilla.me">Try on Signet →</a>
+      <a class="nav-ghost-btn" href="https://github.com/ponthief/thrilla" target="_blank" rel="noopener noreferrer">GitHub</a>
+      <a class="cta" href="#" onclick="showTab('home');document.getElementById('get').scrollIntoView({behavior:'smooth'});return false">Get the app →</a>
     </div>
   </nav>
 </div>
@@ -344,14 +383,14 @@
 <div class="tab-panel active" id="tab-home">
 <header class="wrap tab-home">
   <img class="hero-mascot reveal d1" src="thrilla-icon.png" alt="Thrilla mascot — a celebrating Bitcoin coin">
-  <div class="eyebrow reveal d1"><span class="dot"></span> Self-custodial · Silent Payments · PayJoin · Friends &amp; family</div>
-  <h1 class="reveal d2">A friends-and-family wallet<br>with an address you can <em>actually say out loud.</em></h1>
-  <p class="lead reveal d3">Thrilla is a self-custodial <strong>friends-and-family</strong> wallet built on LNbits. Inside your circle you transact with <strong>collaborative PayJoin</strong>; to the outside world you receive with maximum-privacy <strong>Silent Payments</strong> and share a human-readable <strong>BitMail</strong> name. Powered by a BlindBit Oracle and a Fulcrum electrum server — your keys stay on your device and never reach the server.</p>
+  <div class="eyebrow reveal d1"><span class="dot"></span> Self-custodial · Silent Payments · Android</div>
+  <h1 class="reveal d2">A <em>friends-and-family</em> wallet.</h1>
+  <p class="lead reveal d3">One reusable <strong>Silent Payment</strong> address you can publish anywhere — every payment still lands on a fresh, unlinkable output. Your spend key never leaves your phone.</p>
   <div class="hero-actions reveal d4">
-    <a class="btn btn-primary" href="https://signet.thrilla.me">Launch the Signet demo <span class="arrow">→</span></a>
-    <a class="btn btn-ghost" href="#" onclick="showTab('privacy');return false">Why it matters <span class="arrow">→</span></a>
+    <a class="btn btn-primary" href="https://github.com/ponthief/thrilla/raw/master/thrilla.apk">Download for Android <span class="arrow">→</span></a>
+    <a class="btn btn-ghost" href="#" onclick="document.getElementById('get').scrollIntoView({behavior:'smooth'});return false">Signet test build <span class="arrow">→</span></a>
   </div>
-  <div class="signet-note reveal d4"><span class="signet-badge">SIGNET</span> Test it with worthless coins first — no real funds required. Active development is ongoing, so the platform may briefly go offline from time to time.</div>
+  <div class="signet-note reveal d4"><span class="signet-badge">HEADS UP</span> Experimental software under active development — try the Signet build first, with coins that aren't worth anything.</div>
 
   <div class="demo reveal d5">
     <div class="demo-bar"><span class="d"></span><span class="d"></span><span class="d"></span><span>thrilla — receive</span></div>
@@ -359,140 +398,148 @@
       <div class="demo-cell">
         <div class="k">Silent Payment address</div>
         <div class="v addr">sp1qq2f8…d9k3 · reusable forever</div>
-        <div class="meta">One static code. Every payment lands on a fresh, unlinkable output only you can detect.</div>
+        <div class="meta">One code. Every payment lands on a fresh output only you can detect.</div>
       </div>
       <div class="demo-cell">
         <div class="k">BitMail address</div>
         <div class="v mail">alice@mydomain.net</div>
-        <div class="meta">The same payment code, wrapped in an email-style name your friends can remember.</div>
+        <div class="meta">The same code, as a name people can remember.</div>
       </div>
     </div>
   </div>
 </header>
 
-<section class="wrap" id="circle">
-  <div class="ff reveal">
-    <div class="ff-tag">Who it's for</div>
-    <h3>A friends-and-family wallet — trust inside, privacy outside</h3>
-    <p>Thrilla is designed for a <strong>known circle</strong> — friends, family, a small community — sharing one LNbits instance. Within that circle there's an expected level of trust, so members can transact <strong>collaboratively via PayJoin</strong>: two people co-sign a single transaction that improves privacy and consolidates coins, without a middleman.</p>
-    <p>Toward the <strong>outside world</strong>, you present your <strong>Silent Payment</strong> address — reusable, unlinkable, and safe to publish — so the public ledger never becomes a map of who pays you. Friendly trust on the inside, maximum privacy on the outside.</p>
-    <p><strong>Your keys are your responsibility.</strong> Thrilla is self-custodial: every member generates and holds their own keys on their own device. No one — not other members, not the server operator — can move your Silent Payment funds for you, and no one can recover them if you lose your backup.</p>
+<section class="wrap" id="get">
+  <div class="sec-head">
+    <div class="sec-tag">Get the app</div>
+    <div class="sec-title">Two builds, side by side</div>
+    <p class="sec-sub">Android APKs, sideloaded. Separate apps — the test build sits happily next to the real one.</p>
   </div>
+
+  <div class="dl-grid">
+    <div class="dl-card main">
+      <div class="dl-net">Mainnet · real bitcoin</div>
+      <h3>Thrilla</h3>
+      <p>Real funds. You hold the only key that can spend them.</p>
+      <a class="btn btn-primary" href="https://github.com/ponthief/thrilla/raw/master/thrilla.apk">Download APK <span class="arrow">↓</span></a>
+      <div class="dl-meta">Latest build · Android 6+ · ~74 MB</div>
+    </div>
+    <div class="dl-card test">
+      <div class="dl-net">Signet · test network</div>
+      <h3>Thrilla (Signet)</h3>
+      <p>The same wallet on a test network. Coins are worthless — try everything here first.</p>
+      <a class="btn btn-ghost" href="https://github.com/ponthief/thrilla/raw/master/thrilla-signet.apk">Download APK <span class="arrow">↓</span></a>
+      <div class="dl-meta">Android 6+ · or run it in a browser at <a href="https://signet.thrilla.me">signet.thrilla.me</a></div>
+    </div>
+  </div>
+
+  <div class="sideload">
+    <strong>Installing:</strong> Android blocks apps from outside the Play Store — when you open the file, allow installs from your browser, then continue.
+  </div>
+</section>
+
+<section class="wrap" id="shots">
+  <div class="sec-head">
+    <div class="sec-tag">In the app</div>
+    <div class="sec-title">What you actually get</div>
+  </div>
+  <div class="shots">
+    <figure class="shot">
+      <img loading="lazy" src="screenshots/receive-bitmail.jpg" alt="The Receive screen: a QR code for a reusable Silent Payments address, with a form to claim a BitMail name">
+      <figcaption>Your reusable address as a QR — and a BitMail name to put in front of it.</figcaption>
+    </figure>
+    <figure class="shot">
+      <img loading="lazy" src="screenshots/coin-control.jpg" alt="The Coins screen listing unspent coins with amounts, a label action and a freeze button on each">
+      <figcaption>Every coin listed, labelled and freezable, with dust counted separately.</figcaption>
+    </figure>
+    <figure class="shot">
+      <img loading="lazy" src="screenshots/scan.jpg" alt="The Scan screen showing the chain tip, the height scanned to, and a button to scan the remaining blocks">
+      <figcaption>Scanning the chain for the payments only your key can find.</figcaption>
+    </figure>
+  </div>
+  <p class="also">Screens from the Signet and mainnet builds — identical bar the network they talk to.</p>
 </section>
 
 <section class="wrap" id="what">
   <div class="sec-head">
     <div class="sec-tag">What it does</div>
     <div class="sec-title">Reusable addresses without the privacy tax</div>
-    <p class="sec-sub">Traditional Bitcoin forces a trade-off: reuse one address and leak your whole history, or generate endless new ones and drown in bookkeeping. Silent Payments end that compromise — and collaborative PayJoin lets your circle transact together with better privacy.</p>
+    <p class="sec-sub">Reuse one ordinary address and leak your history; generate new ones forever and drown in bookkeeping. Silent Payments end that trade-off.</p>
   </div>
   <div class="grid">
     <div class="card">
       <span class="icon">🔇</span>
       <h3>Silent Payments</h3>
-      <p>Publish a single static address. Senders derive a unique on-chain output for each payment using shared-secret cryptography, so nothing on the blockchain links your payments together — yet only you can find and spend them.</p>
+      <p>Publish one address. Each sender derives a different on-chain output, so nothing links your payments — yet only you can spend them.</p>
       <span class="tag">Reusable &amp; unlinkable</span>
-    </div>
-    <div class="card">
-      <span class="icon">🤝</span>
-      <h3>Collaborative PayJoin</h3>
-      <p>Pay another member of your instance with a transaction you <strong>both</strong> contribute inputs to. This breaks the common "all inputs share one owner" assumption that chain-analysis relies on, and can consolidate UTXOs at the same time. Designed for the trusted circle — both sides co-sign one transaction, no third party in between.</p>
-      <span class="tag">Within your circle</span>
     </div>
     <div class="card">
       <span class="icon">✉️</span>
       <h3>BitMail</h3>
-      <p>Long payment codes are hard to share. BitMail maps a friendly <em>name@domain</em> to your Silent Payment address over DNS, so you can hand someone <strong>alice@mydomain.net</strong> instead of a 116-character string.</p>
+      <p>Hand someone <strong>alice@mydomain.net</strong> instead of a 116-character string. Resolves over DNS.</p>
       <span class="tag">DNS-backed</span>
     </div>
     <div class="card">
-      <span class="icon">⚡</span>
-      <h3>Lightning wallet <span class="soon">On mainnet</span></h3>
-      <p>Each account will include a built-in Lightning wallet for instant, low-fee spending — the natural pairing with Silent Payments for private receiving. <strong>Arriving when Thrilla launches on mainnet;</strong> the current Signet release focuses on Silent Payments and PayJoin.</p>
-      <span class="tag">Coming at mainnet launch</span>
+      <span class="icon">🤝</span>
+      <h3>Collaborative PayJoin</h3>
+      <p>Pay another member with a transaction you both put inputs into, breaking the "one owner per transaction" assumption.</p>
+      <span class="tag">Within your circle</span>
     </div>
-    <div class="card">
-      <span class="icon">🔁</span>
-      <h3>On-chain ↔ Lightning swaps <span class="soon">On mainnet</span></h3>
-      <p>Move Silent Payment funds into Lightning without an exchange, via non-custodial submarine swaps through <strong>Boltz</strong>. <strong>This will become available once Thrilla launches on mainnet</strong> alongside the Lightning wallet.</p>
-      <span class="tag">Coming at mainnet launch</span>
-    </div>
-    <div class="card">
-      <span class="icon">👥</span>
-      <h3>Multi-user by design</h3>
-      <p>One deployment serves a circle of independent users, each with their own wallet, addresses, and device trust. Thrilla rides on LNbits' account model, so onboarding a new person is just another login.</p>
-      <span class="tag">One instance, many wallets</span>
-    </div>
+  </div>
+  <p class="also">Plus: coin control with dust flagging · biometric or PIN lock, and a duress PIN that wipes this device's keys · Lightning and on-chain ↔ Lightning swaps coming.</p>
+</section>
+
+<section class="wrap" id="circle">
+  <div class="ff reveal">
+    <div class="ff-tag">Who it's for</div>
+    <h3>Trust inside, privacy outside</h3>
+    <p>Thrilla is built for a <strong>known circle</strong> sharing one LNbits instance: members pay each other by PayJoin, and everyone shows the outside world a Silent Payment address that's safe to publish. <strong>Your keys are your responsibility</strong> — no one can move your funds, or recover them if you lose your backup.</p>
   </div>
 </section>
 
-<section class="wrap" id="account">
+<section class="wrap" id="start">
   <div class="sec-head">
-    <div class="sec-tag" style="color:var(--green)">Before you start</div>
-    <div class="sec-title">Create an account to secure your device</div>
-    <p class="sec-sub">Thrilla ties each wallet to securely authenticated devices. Creating an account is what makes that possible — and it only takes a moment.</p>
+    <div class="sec-tag" style="color:var(--green)">Getting started</div>
+    <div class="sec-title">Three steps to your first payment</div>
   </div>
-
-  <div class="onboard-note reveal">
-    <div class="ic">📧</div>
-    <div>
-      <h4>Account creation is required</h4>
-      <p>To use Thrilla you must <strong>create an account</strong>. This is what lets the app <strong>securely authenticate your device</strong>: each new device is confirmed via an email link before it can access a wallet, so a password alone is never enough to reach your funds from an unknown machine.</p>
-      <p>The confirmation email comes from <strong><span class="mailref" data-user="thrilla" data-domain="bitaurus.net"></span></strong>. If you don't see it within a minute, <strong>check your spam or junk folder</strong> and mark it as "not spam" so future messages arrive in your inbox.</p>
-    </div>
-  </div>
-</section>
-
-<section class="wrap" id="fund">
-  <div class="sec-head">
-    <div class="sec-tag" style="color:var(--green)">Get started</div>
-    <div class="sec-title">Fund your wallet with free Signet coins</div>
-    <p class="sec-sub">Signet coins have no monetary value — they exist purely for testing. Grab some from a faucet and send your first Silent Payment in minutes.</p>
-  </div>
-
-  <div class="fund-steps" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;">
-    <div class="fund-step" style="display:flex;gap:16px;align-items:flex-start;border:1px solid var(--border);border-radius:var(--radius);background:var(--panel);padding:22px;">
-      <div class="n" style="flex-shrink:0;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-weight:600;font-size:15px;color:var(--green);background:var(--green-dim);border:1px solid var(--border-bright);">1</div>
+  <div class="steps">
+    <div class="stp">
+      <div class="n">1</div>
       <div>
-        <h4 style="font-size:15px;font-weight:600;margin-bottom:6px;">Create an account &amp; confirm your device</h4>
-        <p style="font-size:13.5px;color:var(--dim);line-height:1.55;">Sign up, then click the confirmation link emailed from <span class="mailref" data-user="thrilla" data-domain="bitaurus.net"></span> (check spam if needed). Generate a Silent Payment wallet and copy your <span style="color:var(--orange)">sp1q…</span> address.</p>
+        <h4>Create an account</h4>
+        <p>Each device is confirmed by an email link from <span class="mailref" data-user="thrilla" data-domain="bitaurus.net"></span> — check spam. A password alone can't reach your funds.</p>
       </div>
     </div>
-    <div class="fund-step" style="display:flex;gap:16px;align-items:flex-start;border:1px solid var(--border);border-radius:var(--radius);background:var(--panel);padding:22px;">
-      <div class="n" style="flex-shrink:0;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-weight:600;font-size:15px;color:var(--green);background:var(--green-dim);border:1px solid var(--border-bright);">2</div>
+    <div class="stp">
+      <div class="n">2</div>
       <div>
-        <h4 style="font-size:15px;font-weight:600;margin-bottom:6px;">Claim coins from the Signet faucet</h4>
-        <p style="font-size:13.5px;color:var(--dim);line-height:1.55;">Paste your address into the faucet and request test coins. They'll arrive on-chain shortly — scan your wallet to detect them.</p>
-        <a class="btn btn-ghost" style="margin-top:14px;font-size:13px;padding:9px 16px;" href="https://silentpayments.dev/faucet/signet" target="_blank" rel="noopener noreferrer">
-          Open the Signet faucet <span class="arrow">→</span>
-        </a>
+        <h4>Make a wallet, keep the seed</h4>
+        <p>Keys are derived on your phone. Write the seed down — it's the only way back.</p>
       </div>
     </div>
-    <div class="fund-step" style="display:flex;gap:16px;align-items:flex-start;border:1px solid var(--border);border-radius:var(--radius);background:var(--panel);padding:22px;">
-      <div class="n" style="flex-shrink:0;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-weight:600;font-size:15px;color:var(--green);background:var(--green-dim);border:1px solid var(--border-bright);">3</div>
+    <div class="stp">
+      <div class="n">3</div>
       <div>
-        <h4 style="font-size:15px;font-weight:600;margin-bottom:6px;">Send, receive, PayJoin &amp; explore</h4>
-        <p style="font-size:13.5px;color:var(--dim);line-height:1.55;">Try a payment, claim a BitMail name, do a collaborative PayJoin with another member, and watch unlinkable outputs land — all risk-free with worthless coins.</p>
+        <h4>Fund it and send</h4>
+        <p>On Signet, take free coins from the <a href="https://silentpayments.dev/faucet/signet" target="_blank" rel="noopener noreferrer">faucet</a>. On mainnet, send yourself a small amount first.</p>
       </div>
     </div>
   </div>
-  <div class="signet-note" style="margin-top:22px"><span class="signet-badge">SIGNET</span> The faucet at silentpayments.dev dispenses test coins only — never send real Bitcoin to a Signet address.</div>
 </section>
 
 <section class="wrap">
   <div class="final">
-    <h2>Try Thrilla on Signet</h2>
-    <p>Create an account, generate a Silent Payment address, claim a BitMail name, and try a collaborative PayJoin with a friend — all with worthless test coins. No risk, no real funds.</p>
-    <a class="btn btn-primary" href="https://signet.thrilla.me" style="font-size:15px;padding:16px 30px;">Open signet.thrilla.me <span class="arrow">→</span></a>
-    <div style="margin-top:18px">
-      <a href="https://silentpayments.dev/faucet/signet" target="_blank" rel="noopener noreferrer" style="color:var(--green);font-size:13.5px;text-decoration:none;border-bottom:1px solid var(--border-bright);padding-bottom:2px">Need test coins? Use the Signet faucet →</a>
+    <h2>Get Thrilla</h2>
+    <p>A reusable address that doesn't cost you your privacy.</p>
+    <div class="hero-actions" style="justify-content:center">
+      <a class="btn btn-primary" href="https://github.com/ponthief/thrilla/raw/master/thrilla.apk">Mainnet APK <span class="arrow">↓</span></a>
+      <a class="btn btn-ghost" href="https://github.com/ponthief/thrilla/raw/master/thrilla-signet.apk">Signet APK <span class="arrow">↓</span></a>
     </div>
     <div class="social-line">
       <a href="https://x.com/thrillabtc" target="_blank" rel="noopener noreferrer">𝕏 @thrillabtc</a>
       <a href="https://t.me/thrilla_btc" target="_blank" rel="noopener noreferrer">✈ Telegram</a>
-      <a href="https://github.com/ponthief/siLNt/tree/master" target="_blank" rel="noopener noreferrer">&lt;/&gt; Source on GitHub</a>
+      <a href="https://github.com/ponthief/thrilla" target="_blank" rel="noopener noreferrer">&lt;/&gt; Source</a>
     </div>
-    <div class="signet-note" style="justify-content:center;margin-top:18px;"><span class="signet-badge">SIGNET</span> Test network · Lightning &amp; Boltz swaps arrive at mainnet launch · coins have no monetary value</div>
   </div>
 </section>
 </div>
@@ -503,26 +550,24 @@
   <div class="sec-head">
     <div class="sec-tag">Why it matters</div>
     <div class="sec-title">Privacy that holds up on a public ledger</div>
-    <p class="sec-sub">Every Bitcoin transaction is permanent and public. The way you receive funds decides whether that ledger becomes a map of your financial life — or stays just noise to everyone but you.</p>
+    <p class="sec-sub">Every transaction is permanent and public. How you receive decides whether that ledger becomes a map of your life.</p>
   </div>
 
   <div class="compare">
     <div class="col bad">
       <div class="label">⚠ Reusing one normal address</div>
       <ul>
-        <li>Every payment to you is <strong>visibly clustered</strong> under the same address forever.</li>
-        <li>Anyone you've paid, or who's paid you, can see your <strong>total balance and history</strong>.</li>
-        <li>Posting an address publicly ties your <strong>real-world identity</strong> to all of it.</li>
-        <li>Chain-analysis firms link it to past and future activity automatically.</li>
+        <li>Every payment to you is <strong>clustered</strong> under one address, forever.</li>
+        <li>Anyone who has paid you sees your <strong>balance and history</strong>.</li>
+        <li>Posting it publicly ties your <strong>identity</strong> to all of it.</li>
       </ul>
     </div>
     <div class="col good">
       <div class="label">✓ One Silent Payment address</div>
       <ul>
-        <li>Each payment lands on a <strong>fresh, unique output</strong> with no on-chain link to the others.</li>
-        <li>Observers see unrelated outputs — your <strong>balance and history stay private</strong>.</li>
-        <li>You can publish the same address <strong>anywhere</strong> without creating a public trail.</li>
-        <li>Only you, with your scan key, can even tell which outputs are yours.</li>
+        <li>Each payment lands on a <strong>fresh output</strong>, unlinked to the rest.</li>
+        <li>Observers see unrelated outputs — your <strong>history stays private</strong>.</li>
+        <li>Publish it <strong>anywhere</strong>; only your scan key finds your coins.</li>
       </ul>
     </div>
   </div>
@@ -530,43 +575,29 @@
   <div class="privacy-points">
     <div class="pp">
       <h4>No address reuse, ever</h4>
-      <p>Share one static code for years. Each sender derives a different on-chain destination, so reuse of the public address never becomes reuse on the chain.</p>
+      <p>Share one code for years; reuse of the public address never becomes reuse on the chain.</p>
     </div>
     <div class="pp">
-      <h4>Unlinkable payments</h4>
-      <p>Two payments to the same Silent Payment address produce outputs that look entirely unrelated to any third party — there's no common key or address joining them.</p>
+      <h4>Nothing to coordinate</h4>
+      <p>No asking senders for a fresh address, no invoice trail showing who paid what.</p>
     </div>
     <div class="pp">
-      <h4>Collaborative PayJoin inside the circle</h4>
-      <p>When members pay each other, both contribute inputs to one transaction. That defeats the "single owner of all inputs" heuristic chain-analysis leans on — privacy that comes from cooperation, not just cryptography.</p>
-    </div>
-    <div class="pp">
-      <h4>Receiver-side privacy</h4>
-      <p>You don't have to interact with the sender or hand out a new address each time. No address-request dance, no leaking which invoice belongs to whom.</p>
-    </div>
-    <div class="pp">
-      <h4>Safe to publish</h4>
-      <p>Put your address — or your BitMail name — on a profile, an invoice, or a donation page. Public exposure no longer means a public spending history.</p>
-    </div>
-    <div class="pp">
-      <h4>Resistant to chain analysis</h4>
-      <p>Clustering heuristics rely on address reuse and linkable, single-owner inputs. Silent Payments and PayJoin remove both signals, breaking the usual surveillance assumptions.</p>
+      <h4>Fewer signals to analyse</h4>
+      <p>Clustering relies on address reuse and single-owner inputs. This removes both.</p>
     </div>
   </div>
 
   <div class="caveats">
     <div class="ch">
-      <span class="t">What Silent Payments &amp; PayJoin don't do</span>
+      <span class="t">What this doesn't do</span>
       <span class="badge">Straight talk</span>
     </div>
     <ul>
-      <li>Silent Payments protect the <strong>receiving</strong> side. The coins you spend still carry their own prior history, so good coin selection and labeling still matter.</li>
-      <li>They <strong>aren't a mixer.</strong> Amounts and the timing of transactions remain visible on-chain, even if the links between your received outputs aren't.</li>
-      <li>PayJoin assumes a <strong>trusted counterparty</strong> in your circle — it's a friends-and-family feature, and the other member sees their side of the transaction.</li>
-      <li>Network-level privacy is <strong>separate.</strong> Who broadcasts a transaction and from what IP isn't covered here — pair with Tor or your own node for that layer.</li>
-      <li>Your <strong>keys are your responsibility.</strong> Self-custody means there's no password reset for your funds — lose your backup and the coins are gone; no one can recover them for you.</li>
-      <li>BitMail resolves over <strong>DNS</strong>, so the resolver and the domain operator can see which name was looked up. The payment itself stays private; the lookup is a normal DNS query.</li>
-      <li>Privacy depends on <strong>how you use it.</strong> Linking an output to your identity elsewhere (an exchange, a public post) can still de-anonymize that specific payment.</li>
+      <li>It protects the <strong>receiving</strong> side. Coins you spend still carry their history, so coin control still matters.</li>
+      <li>It <strong>isn't a mixer</strong> — amounts and timing stay visible, even when the links don't exist.</li>
+      <li>Network privacy is <strong>separate</strong>: who broadcasts, and from which IP, isn't covered here.</li>
+      <li>BitMail lookups are <strong>ordinary DNS queries</strong>, visible to the resolver. The payment stays private.</li>
+      <li>Your <strong>keys are your responsibility</strong> — there's no password reset for funds.</li>
     </ul>
   </div>
 </section>
@@ -578,105 +609,94 @@
   <div class="sec-head">
     <div class="sec-tag">How it works</div>
     <div class="sec-title">Layers doing one job</div>
-    <p class="sec-sub">Thrilla is the interface. The cryptography, scanning, and collaborative transactions are handled by open components underneath it.</p>
+    <p class="sec-sub">Thrilla is the interface. Open components do the work underneath.</p>
   </div>
   <div class="stack">
     <div class="step">
       <div class="layer">Layer 01 · Interface</div>
       <h4>Thrilla — the wallet you see</h4>
-      <p>A fast web app that builds and signs Silent Payment and PayJoin transactions locally, manages your BitMail address, and shows balances and activity. All signing happens in your browser; the server only ever sees what it strictly needs to.</p>
+      <p>Derives keys and signs on your device. The server only broadcasts what you already signed.</p>
     </div>
     <div class="step">
       <div class="layer">Layer 02 · Backend</div>
       <h4>LNbits — accounts &amp; orchestration</h4>
-      <p>Thrilla runs as an LNbits extension. LNbits provides the multi-user account system, authentication, and device confirmation, letting a single self-hosted instance serve a whole circle securely and independently. (The built-in Lightning wallet activates at mainnet launch.)</p>
+      <p>Thrilla ships as an LNbits extension, inheriting multi-user accounts, auth, and device confirmation.</p>
     </div>
     <div class="step">
       <div class="layer">Layer 03 · Indexing</div>
       <h4>BlindBit &amp; Fulcrum — indexing the chain</h4>
-      <p>Finding your Silent Payment outputs means scanning the chain with your scan key. A BlindBit Oracle precomputes the tweak and UTXO indexes so your wallet can detect incoming payments quickly, and a Fulcrum electrum server supplies fast address and transaction lookups — all without your spend key ever leaving your device.</p>
+      <p>BlindBit precomputes tweak and UTXO data so scanning is quick; Fulcrum serves lookups. Neither sees your spend key.</p>
     </div>
     <div class="step">
-      <div class="layer">Layer 04 · Swaps <span class="soon">On mainnet</span></div>
+      <div class="layer">Layer 04 · Swaps <span class="soon">Soon</span></div>
       <h4>Boltz — on-chain ↔ Lightning</h4>
-      <p>Once Thrilla launches on mainnet, swaps will talk directly to a Boltz submarine-swap backend: you fund a lockup address from your SP wallet, Boltz pays your Lightning invoice, and the swap stays non-custodial — a failed swap is refundable on-chain with a key only your wallet holds.</p>
+      <p>Non-custodial submarine swaps — a failed swap refunds on-chain with a key only your wallet holds.</p>
     </div>
   </div>
 </section>
+
 <section class="sec-security" id="security">
   <div class="wrap">
     <div class="sec-head">
       <div class="sec-tag" style="color:var(--green)">Security model</div>
       <div class="sec-title">The server never holds your keys</div>
-      <p class="sec-sub">Self-custody isn't a slogan here — it's enforced by where the secrets physically live. Thrilla is built so that a full server compromise still can't move your Silent Payment coins. Those keys are yours to hold and yours to back up.</p>
+      <p class="sec-sub">A full server compromise still can't move your coins.</p>
     </div>
     <div class="vault">
       <div class="vault-item">
         <div class="ic">🔑</div>
         <div>
-          <h4>Seeds are never stored server-side</h4>
-          <p>Your mnemonic and the keys derived from it are generated and held client-side, encrypted in your own browser. The server derives keys transiently during setup and discards them — there is no seed column in the database to leak. Backing up your seed is your responsibility.</p>
+          <h4>Seeds never reach the server</h4>
+          <p>Generated and held on your device. There's no seed column in the database to leak — and no one to recover it for you.</p>
         </div>
       </div>
       <div class="vault-item">
         <div class="ic">📱</div>
         <div>
           <h4>Account + device confirmation</h4>
-          <p>Using Thrilla requires creating an account. New devices must then be explicitly confirmed via an email link (sent from <span class="mailref" data-user="thrilla" data-domain="bitaurus.net"></span> — check spam) before they can access a wallet, so a stolen password alone can't reach your funds from an unknown machine.</p>
+          <p>A new device must be confirmed by email before it reaches a wallet, so a stolen password isn't enough.</p>
         </div>
       </div>
       <div class="vault-item">
         <div class="ic">✍️</div>
         <div>
           <h4>Local signing</h4>
-          <p>Transactions — including collaborative PayJoins — are constructed and signed in your browser using keys that never travel over the wire. The backend only broadcasts the finished, signed transaction — it can't author one on your behalf.</p>
+          <p>Transactions, PayJoins included, are signed on your device. The backend can't author one for you.</p>
         </div>
       </div>
       <div class="vault-item">
-        <div class="ic">🤝</div>
+        <div class="ic">👁</div>
         <div>
-          <h4>Collaborative, not custodial</h4>
-          <p>A PayJoin between members is co-signed by both parties on a single transaction. Each side signs locally with their own keys; neither the other member nor the server can spend on your behalf.</p>
-        </div>
-      </div>
-      <div class="vault-item">
-        <div class="ic">🏠</div>
-        <div>
-          <h4>Self-hostable, end to end</h4>
-          <p>Run your own LNbits, BlindBit Oracle, and Fulcrum server (and, at mainnet, a Boltz backend) and the entire stack is yours — no third party sits between you and the chain, and no analytics company profiles your spending.</p>
-        </div>
-      </div>
-      <div class="vault-item">
-        <div class="ic">🔍</div>
-        <div>
-          <h4>Verifiable, open components</h4>
-          <p>Thrilla, LNbits, BlindBit, and Fulcrum are open and inspectable. The cryptography follows the open Silent Payments standard rather than a proprietary scheme you'd have to take on trust.</p>
+          <h4>Scanning is opt-in</h4>
+          <p>Background scanning uploads your <em>scan</em> key only: it can detect coins, never spend them, and you can turn it off.</p>
         </div>
       </div>
     </div>
   </div>
 </section>
+
 <section class="wrap" id="foundation">
   <div class="sec-head">
     <div class="sec-tag">Built on</div>
-    <div class="sec-title">Standing on solid, open foundations</div>
+    <div class="sec-title">Open foundations</div>
+    <p class="sec-sub">Every piece is open source and self-hostable — run your own and nothing sits between you and the chain.</p>
   </div>
   <div class="foundation">
     <div class="pill">
       <div class="name">LNbits <span class="badge">accounts + API</span></div>
-      <div class="role">Multi-user, self-hosted Bitcoin &amp; Lightning backend. Thrilla ships as an LNbits extension, inheriting its battle-tested auth, account model, and device confirmation.</div>
+      <div class="role">Multi-user, self-hosted Bitcoin backend. Thrilla is an extension on top.</div>
     </div>
     <div class="pill">
-      <div class="name">BlindBit <span class="badge">SP Oracle</span></div>
-      <div class="role">A Silent Payments indexer that precomputes tweak and UTXO data, so wallets can scan for incoming payments fast — without exposing spend keys.</div>
-    </div>
-    <div class="pill">
-      <div class="name">Boltz <span class="badge">swaps · on mainnet</span></div>
-      <div class="role">A non-custodial submarine-swap service. At mainnet launch, Thrilla will talk to a Boltz backend directly to move funds between on-chain Silent Payments and Lightning, trust-minimized.</div>
+      <div class="name">BlindBit <span class="badge">SP oracle</span></div>
+      <div class="role">Silent Payments indexer — precomputed tweak and UTXO data for fast scanning.</div>
     </div>
     <div class="pill">
       <div class="name">Fulcrum <span class="badge">electrum server</span></div>
-      <div class="role">A fast electrum server providing address and transaction lookups, so your wallet can verify balances and build transactions without trusting a third-party explorer.</div>
+      <div class="role">Address and transaction lookups without a third-party explorer.</div>
+    </div>
+    <div class="pill">
+      <div class="name">Boltz <span class="badge">swaps · soon</span></div>
+      <div class="role">Non-custodial swaps between on-chain funds and Lightning.</div>
     </div>
   </div>
 </section>
@@ -686,18 +706,18 @@
   <footer>
     <div>
       <div style="margin-bottom:8px;color:var(--dim)">Thrilla · self-custodial Silent Payments, PayJoin &amp; BitMail</div>
-      <div class="disclaim">Thrilla is experimental software currently on the Signet test network. Because it's under active testing, the platform may go down for short periods without notice. It is a friends-and-family wallet: self-custody means you are solely responsible for safeguarding your own keys and backups. Lightning and Boltz swaps arrive at mainnet launch. Nothing here is financial advice.</div>
+      <div class="disclaim">Experimental software. The mainnet build holds real bitcoin; Signet coins have no value. Self-custody means you alone are responsible for your keys and backups. Not financial advice.</div>
       <div class="social-line" style="margin-top:10px;justify-content:flex-start;">
         <a href="https://x.com/thrillabtc" target="_blank" rel="noopener noreferrer">𝕏 @thrillabtc</a>
         <a href="https://t.me/thrilla_btc" target="_blank" rel="noopener noreferrer">✈ Telegram</a>
-        <a href="https://github.com/ponthief/siLNt/tree/master" target="_blank" rel="noopener noreferrer">&lt;/&gt; GitHub</a>
+        <a href="https://github.com/ponthief/thrilla" target="_blank" rel="noopener noreferrer">&lt;/&gt; GitHub</a>
       </div>
     </div>
     <div style="display:flex;gap:22px;align-items:flex-start;">
       <a href="#" onclick="showTab('home');return false">Home</a>
       <a href="#" onclick="showTab('privacy');return false">Privacy</a>
       <a href="#" onclick="showTab('how');return false">How</a>
-      <a href="https://signet.thrilla.me">Signet</a>
+      <a href="https://signet.thrilla.me">Web app</a>
     </div>
   </footer>
 </div>
