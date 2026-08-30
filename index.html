@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Thrilla — a self-custodial Silent Payments wallet for Android</title>
 <meta name="description" content="Thrilla is a self-custodial Bitcoin wallet built on Silent Payments: one reusable address, unlinkable payments, and email-style BitMail names. Download the Android app for mainnet or Signet.">
-<link rel="icon" type="image/png" href="favicon.png">
+<link rel="icon" type="image/png" href="thrilla-icon.png">
 <link rel="apple-touch-icon" href="thrilla-icon.png">
 <meta property="og:title" content="Thrilla — a Silent Payments wallet for Android">
 <meta property="og:description" content="A self-custodial Bitcoin wallet built on Silent Payments. Android builds for mainnet and Signet — your spend key never leaves your phone.">
@@ -317,8 +317,8 @@
   .tab-panel.active { display: block; }
 
   /* ─── download cards ─── */
-  .dl-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-  @media (max-width: 680px){ .dl-grid { grid-template-columns: 1fr; } }
+  .dl-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  @media (max-width: 900px){ .dl-grid { grid-template-columns: 1fr; } }
   .dl-card {
     border: 1px solid var(--border); border-radius: var(--radius);
     background: var(--panel); padding: 26px;
@@ -326,6 +326,7 @@
   }
   .dl-card.main { border-color: rgba(247,147,26,.3); background: linear-gradient(180deg, var(--orange-dim), var(--panel)); }
   .dl-card.test { border-color: rgba(63,185,80,.28); background: linear-gradient(180deg, rgba(63,185,80,.05), var(--panel)); }
+  .dl-card.web { border-color: var(--border-bright); }
   .dl-net { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; }
   .dl-card.main .dl-net { color: var(--orange); }
   .dl-card.test .dl-net { color: var(--green); }
@@ -388,7 +389,7 @@
   <p class="lead reveal d3">One reusable <strong>Silent Payment</strong> address you can publish anywhere — every payment still lands on a fresh, unlinkable output. Your spend key never leaves your phone.</p>
   <div class="hero-actions reveal d4">
     <a class="btn btn-primary" href="https://github.com/ponthief/thrilla/raw/master/thrilla.apk">Download for Android <span class="arrow">→</span></a>
-    <a class="btn btn-ghost" href="#" onclick="document.getElementById('get').scrollIntoView({behavior:'smooth'});return false">Signet test build <span class="arrow">→</span></a>
+    <a class="btn btn-ghost" href="https://signet.thrilla.me">Try it in your browser <span class="arrow">→</span></a>
   </div>
   <div class="signet-note reveal d4"><span class="signet-badge">HEADS UP</span> Experimental software under active development — try the Signet build first, with coins that aren't worth anything.</div>
 
@@ -412,8 +413,8 @@
 <section class="wrap" id="get">
   <div class="sec-head">
     <div class="sec-tag">Get the app</div>
-    <div class="sec-title">Two builds, side by side</div>
-    <p class="sec-sub">Android APKs, sideloaded. Separate apps — the test build sits happily next to the real one.</p>
+    <div class="sec-title">Three ways in</div>
+    <p class="sec-sub">Two Android builds, sideloaded — the test one sits happily next to the real one — or the same wallet in a browser.</p>
   </div>
 
   <div class="dl-grid">
@@ -429,12 +430,21 @@
       <h3>Thrilla (Signet)</h3>
       <p>The same wallet on a test network. Coins are worthless — try everything here first.</p>
       <a class="btn btn-ghost" href="https://github.com/ponthief/thrilla/raw/master/thrilla-signet.apk">Download APK <span class="arrow">↓</span></a>
-      <div class="dl-meta">Android 6+ · or run it in a browser at <a href="https://signet.thrilla.me">signet.thrilla.me</a></div>
+      <div class="dl-meta">Android 6+ · ~74 MB</div>
+    </div>
+    <div class="dl-card web">
+      <div class="dl-net">Browser · Signet</div>
+      <h3>Web app</h3>
+      <p>No install at all. The same wallet in a tab — keys stay encrypted in that browser, not on the server.</p>
+      <a class="btn btn-ghost" href="https://signet.thrilla.me">Open signet.thrilla.me <span class="arrow">→</span></a>
+      <div class="dl-meta">Signet only · nothing to sideload</div>
     </div>
   </div>
 
   <div class="sideload">
-    <strong>Installing:</strong> Android blocks apps from outside the Play Store — when you open the file, allow installs from your browser, then continue.
+    <strong>Installing the APK:</strong> Android blocks apps from outside the Play Store — when you open the file, allow installs from your browser, then continue.
+    <br><br>
+    <strong>Using more than one:</strong> your account is the same everywhere, but your keys are not — they're generated on the device you're using and stay there, in the phone's keystore or encrypted in that browser. The server never holds anything that can spend, so a second device (or the browser, after the app) starts empty until you <strong>import your recovery phrase</strong> there.
   </div>
 </section>
 
