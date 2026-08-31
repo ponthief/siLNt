@@ -20,15 +20,17 @@
 
 <header class="topbar">
   <div class="bar">
-    <a class="brand" href="index.html"><img src="thrilla-icon.png" alt=""> Thrilla</a>
-    <span class="only-btc">₿ Bitcoin only</span>
-    <div class="spacer"></div>
     <details class="menu" id="menu">
-      <summary aria-haspopup="menu">Menu <span class="chev">▾</span></summary>
-      <nav class="menu-panel" aria-label="Site">
+      <summary aria-label="Menu" title="Menu"><span class="burger" aria-hidden="true"></span></summary>
+      <div class="drawer-backdrop"></div>
+      <nav class="drawer" aria-label="Site">
+        <div class="drawer-head">
+          <span>Thrilla</span>
+          <button type="button" class="drawer-close" aria-label="Close menu">✕</button>
+        </div>
         <a href="index.html">Home</a>
-        <a href="download.html" aria-current="page">Download</a>
-        <a href="download.html#try">Try it</a>
+        <a href="download.html" aria-current="page">Download <span class="ext">APKs</span></a>
+        <a href="https://signet.thrilla.me">Try it <span class="ext">↗</span></a>
         <a href="index.html#screens">Screenshots</a>
         <a href="privacy.html">Privacy</a>
         <a href="how-it-works.html">How it works</a>
@@ -39,6 +41,9 @@
         <a href="https://t.me/thrilla_btc" target="_blank" rel="noopener noreferrer">Telegram <span class="ext">↗</span></a>
       </nav>
     </details>
+    <a class="brand" href="index.html"><img src="thrilla-icon.png" alt=""> Thrilla</a>
+    <span class="only-btc">₿ Bitcoin only</span>
+    <div class="spacer"></div>
     <a class="btn btn-primary btn-sm" href="https://github.com/ponthief/thrilla/raw/master/thrilla.apk">Get the app ↓</a>
   </div>
 </header>
@@ -133,9 +138,14 @@
   (function () {
     var menu = document.getElementById('menu');
     if (!menu) return;
+    function close() { menu.open = false; }
     document.addEventListener('click', function (e) {
-      if (menu.open && !menu.contains(e.target)) menu.open = false;
+      if (menu.open && !menu.contains(e.target)) close();
     });
+    var backdrop = menu.querySelector('.drawer-backdrop');
+    if (backdrop) backdrop.addEventListener('click', close);
+    var closeBtn = menu.querySelector('.drawer-close');
+    if (closeBtn) closeBtn.addEventListener('click', close);
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape' && menu.open) { menu.open = false; menu.querySelector('summary').focus(); }
     });

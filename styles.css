@@ -68,34 +68,54 @@ section:last-of-type { border-bottom: 0; }
 .bar .spacer { flex: 1; }
 
 /* <details> gives a click-to-open menu with no JavaScript; the script only
-   closes it on outside-click and Escape. */
-.menu { position: relative; }
+   closes it on outside-click and Escape. The panel is a left drawer, so the
+   menu reads as "on the left" even though the button lives in the top bar. */
 .menu summary {
-  list-style: none; cursor: pointer; user-select: none;
-  display: inline-flex; align-items: center; gap: 8px;
-  font-size: 14px; font-weight: 600;
-  padding: 8px 14px; border-radius: 9px;
-  border: 1px solid var(--border-bright); background: var(--panel);
+  list-style: none; cursor: pointer;
+  width: 40px; height: 40px; display: grid; place-items: center;
+  border: 1px solid var(--border-bright); border-radius: 9px; background: var(--panel);
 }
 .menu summary::-webkit-details-marker { display: none; }
 .menu summary:hover { border-color: var(--dim); }
-.menu .chev { font-size: 11px; color: var(--faint); transition: transform .15s; }
-.menu[open] .chev { transform: rotate(180deg); }
-.menu-panel {
-  position: absolute; right: 0; top: calc(100% + 8px); z-index: 60;
-  min-width: 232px; display: flex; flex-direction: column;
-  padding: 7px; border: 1px solid var(--border-bright); border-radius: 12px;
-  background: var(--panel); box-shadow: var(--shadow);
+.burger, .burger::before, .burger::after {
+  display: block; width: 17px; height: 2px; border-radius: 2px; background: var(--ink);
 }
-.menu-panel a {
-  text-decoration: none; font-size: 14px; color: var(--dim);
-  padding: 9px 12px; border-radius: 8px;
+.burger { position: relative; }
+.burger::before, .burger::after { content: ""; position: absolute; left: 0; }
+.burger::before { top: -6px; }
+.burger::after { top: 6px; }
+
+.drawer-backdrop { position: fixed; inset: 0; z-index: 60; background: rgba(22,19,15,.35); }
+.drawer {
+  position: fixed; left: 0; top: 0; z-index: 61;
+  width: min(276px, 84vw); height: 100vh; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 18px 14px;
+  background: var(--panel); border-right: 1px solid var(--border-bright);
+  box-shadow: 0 0 40px rgba(22,19,15,.16);
+  animation: drawer-in .18s ease-out;
+}
+@keyframes drawer-in { from { transform: translateX(-100%); } to { transform: none; } }
+.drawer-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--faint); padding: 2px 6px 10px 12px;
+}
+.drawer-close {
+  border: 0; background: transparent; cursor: pointer;
+  color: var(--faint); font-size: 15px; line-height: 1;
+  padding: 6px 8px; border-radius: 7px;
+}
+.drawer-close:hover { background: var(--bg-2); color: var(--ink); }
+.drawer a {
+  text-decoration: none; font-size: 14.5px; color: var(--dim);
+  padding: 10px 12px; border-radius: 8px;
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
-.menu-panel a:hover { background: var(--bg-2); color: var(--ink); }
-.menu-panel a[aria-current="page"] { color: var(--ink); font-weight: 600; background: var(--orange-dim); }
-.menu-panel a .ext { font-size: 11px; color: var(--faint); }
-.menu-sep { height: 1px; background: var(--border); margin: 6px 4px; }
+.drawer a:hover { background: var(--bg-2); color: var(--ink); }
+.drawer a[aria-current="page"] { color: var(--ink); font-weight: 600; background: var(--orange-dim); }
+.drawer a .ext { font-size: 11px; color: var(--faint); }
+.menu-sep { height: 1px; background: var(--border); margin: 8px 6px; }
 
 /* ── type ────────────────────────────────────────────────────────────────── */
 h1, h2, h3, .sec-title { font-family: var(--display); letter-spacing: -.02em; text-wrap: balance; }
