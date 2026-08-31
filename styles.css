@@ -116,6 +116,10 @@ section:last-of-type { border-bottom: 0; }
 .drawer a[aria-current="page"] { color: var(--ink); font-weight: 600; background: var(--orange-dim); }
 .drawer a .ext { font-size: 11px; color: var(--faint); }
 .menu-sep { height: 1px; background: var(--border); margin: 8px 6px; }
+.drawer-group {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--faint); padding: 6px 12px 4px;
+}
 
 /* ── type ────────────────────────────────────────────────────────────────── */
 h1, h2, h3, .sec-title { font-family: var(--display); letter-spacing: -.02em; text-wrap: balance; }
