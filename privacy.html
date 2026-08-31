@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Privacy — Thrilla</title>
+<meta name="description" content="Why Silent Payments matter on a public ledger, what they protect, and — plainly — what they do not.">
+<link rel="icon" type="image/png" href="thrilla-icon.png">
+<link rel="apple-touch-icon" href="thrilla-icon.png">
+<meta property="og:title" content="Privacy — Thrilla">
+<meta property="og:description" content="Why Silent Payments matter on a public ledger, what they protect, and — plainly — what they do not.">
+<meta property="og:image" content="thrilla-icon.png">
+<meta property="og:type" content="website">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="bar">
+    <a class="brand" href="index.html"><img src="thrilla-icon.png" alt=""> Thrilla</a>
+    <span class="only-btc">₿ Bitcoin only</span>
+    <div class="spacer"></div>
+    <details class="menu" id="menu">
+      <summary aria-haspopup="menu">Menu <span class="chev">▾</span></summary>
+      <nav class="menu-panel" aria-label="Site">
+        <a href="index.html">Home</a>
+        <a href="download.html">Download</a>
+        <a href="download.html#try">Try it</a>
+        <a href="index.html#screens">Screenshots</a>
+        <a href="privacy.html" aria-current="page">Privacy</a>
+        <a href="how-it-works.html">How it works</a>
+        <a href="how-it-works.html#security">Security</a>
+        <div class="menu-sep"></div>
+        <a href="https://github.com/ponthief/thrilla" target="_blank" rel="noopener noreferrer">GitHub <span class="ext">↗</span></a>
+        <a href="https://x.com/thrillabtc" target="_blank" rel="noopener noreferrer">X <span class="ext">↗</span></a>
+        <a href="https://t.me/thrilla_btc" target="_blank" rel="noopener noreferrer">Telegram <span class="ext">↗</span></a>
+      </nav>
+    </details>
+    <a class="btn btn-primary btn-sm" href="https://github.com/ponthief/thrilla/raw/master/thrilla.apk">Get the app ↓</a>
+  </div>
+</header>
+
+<div class="wrap page-head">
+  <h1>Privacy that holds up on a public ledger</h1>
+  <p class="lead">Every Bitcoin transaction is permanent and public. How you receive decides whether that ledger becomes a map of your life.</p>
+</div>
+
+<section class="wrap">
+  <div class="compare">
+    <div class="col bad">
+      <div class="label">⚠ Reusing one normal address</div>
+      <ul>
+        <li>Every payment to you is <strong>clustered</strong> under one address, forever.</li>
+        <li>Anyone who has paid you sees your <strong>balance and history</strong>.</li>
+        <li>Posting it publicly ties your <strong>identity</strong> to all of it.</li>
+      </ul>
+    </div>
+    <div class="col good">
+      <div class="label">✓ One Silent Payment address</div>
+      <ul>
+        <li>Each payment lands on a <strong>fresh output</strong>, unlinked to the rest.</li>
+        <li>Observers see unrelated outputs — your <strong>history stays private</strong>.</li>
+        <li>Publish it <strong>anywhere</strong>; only your scan key finds your coins.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="pp-grid">
+    <div class="pp">
+      <h4>No address reuse, ever</h4>
+      <p>Share one code for years; reuse of the public address never becomes reuse on the chain.</p>
+    </div>
+    <div class="pp">
+      <h4>Nothing to coordinate</h4>
+      <p>No asking senders for a fresh address, no invoice trail showing who paid what.</p>
+    </div>
+    <div class="pp">
+      <h4>Fewer signals to analyse</h4>
+      <p>Clustering relies on address reuse and single-owner inputs. This removes both.</p>
+    </div>
+  </div>
+
+  <div class="caveats">
+    <div class="ch">
+      <span class="t">What this doesn't do</span>
+      <span class="badge">Straight talk</span>
+    </div>
+    <ul>
+      <li>It protects the <strong>receiving</strong> side. Coins you spend still carry their history, so coin control still matters.</li>
+      <li>It <strong>isn't a mixer</strong> — amounts and timing stay visible, even when the links don't exist.</li>
+      <li>Network privacy is <strong>separate</strong>: who broadcasts, and from which IP, isn't covered here.</li>
+      <li>BitMail lookups are <strong>ordinary DNS queries</strong>, visible to the resolver. The payment stays private.</li>
+      <li>Your <strong>keys are your responsibility</strong> — there's no password reset for bitcoin.</li>
+    </ul>
+  </div>
+</section>
+
+<div class="wrap">
+  <footer>
+    <div>
+      <div style="color:var(--dim)">Thrilla · self-custodial, Bitcoin-only Silent Payments</div>
+      <div class="disclaim">Experimental software. The mainnet build holds real bitcoin; Signet coins have no value. Self-custody means you alone are responsible for your keys and backups. Not financial advice.</div>
+    </div>
+    <nav>
+      <a href="index.html">Home</a>
+      <a href="download.html">Download</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="how-it-works.html">How it works</a>
+      <a href="https://github.com/ponthief/thrilla" target="_blank" rel="noopener noreferrer">GitHub</a>
+    </nav>
+  </footer>
+</div>
+
+<script>
+  // <details> opens the menu by itself; this only closes it again on an outside
+  // click or Escape, which a bare <details> won't do.
+  (function () {
+    var menu = document.getElementById('menu');
+    if (!menu) return;
+    document.addEventListener('click', function (e) {
+      if (menu.open && !menu.contains(e.target)) menu.open = false;
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && menu.open) { menu.open = false; menu.querySelector('summary').focus(); }
+    });
+    menu.querySelectorAll('a').forEach(function (a) {
+      a.addEventListener('click', function () { menu.open = false; });
+    });
+  })();
+</script>
+
+</body>
+</html>

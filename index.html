@@ -4,750 +4,176 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Thrilla — a Bitcoin-only Silent Payments wallet</title>
-<meta name="description" content="Thrilla is a self-custodial, Bitcoin-only wallet built on Silent Payments: one reusable address, unlinkable payments, and email-style BitMail names. Android app and web app for mainnet and Signet.">
+<meta name="description" content="Thrilla is a self-custodial, Bitcoin-only wallet built on Silent Payments: one reusable address, unlinkable payments, and email-style BitMail names.">
 <link rel="icon" type="image/png" href="thrilla-icon.png">
 <link rel="apple-touch-icon" href="thrilla-icon.png">
 <meta property="og:title" content="Thrilla — a Bitcoin-only Silent Payments wallet">
-<meta property="og:description" content="Self-custodial and Bitcoin only. One reusable Silent Payment address, unlinkable payments, and a name people can remember. Your spend key never leaves your phone.">
+<meta property="og:description" content="Thrilla is a self-custodial, Bitcoin-only wallet built on Silent Payments: one reusable address, unlinkable payments, and email-style BitMail names.">
 <meta property="og:image" content="thrilla-icon.png">
 <meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-<style>
-  /* ── tokens ───────────────────────────────────────────────────────────────
-     Light is the default ground; the dark block only redefines tokens, so every
-     component below is written once, against the token names. */
-  :root {
-    --bg: #fbfaf7;           /* paper */
-    --bg-2: #f3f0ea;
-    --panel: #ffffff;
-    --border: #e7e2d8;
-    --border-bright: #d5cec0;
-    --ink: #16130f;
-    --dim: #55504a;
-    --faint: #857e74;
-    --orange: #b95c00;       /* text-safe on paper */
-    --orange-solid: #f7931a; /* bitcoin, for fills and marks */
-    --orange-dim: rgba(247,147,26,.12);
-    --green: #14713a;
-    --green-dim: rgba(20,113,58,.10);
-    --red: #b3261e;
-    --on-solid: #1a1206;
-    --shadow: 0 1px 2px rgba(22,19,15,.05), 0 8px 24px rgba(22,19,15,.05);
-    --radius: 12px;
-    --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-    --sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
-    --display: 'Bricolage Grotesque', 'IBM Plex Sans', system-ui, sans-serif;
-    --sidebar-w: 252px;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #16150f;         /* warm, and lifted well off black */
-      --bg-2: #1d1b15;
-      --panel: #211f18;
-      --border: #322f26;
-      --border-bright: #464236;
-      --ink: #f2eee4;
-      --dim: #b0a99b;
-      --faint: #8b8477;
-      --orange: #f0a13a;
-      --orange-solid: #f7931a;
-      --orange-dim: rgba(247,147,26,.14);
-      --green: #63c07f;
-      --green-dim: rgba(99,192,127,.14);
-      --red: #e8756b;
-      --on-solid: #17140c;
-      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.25);
-    }
-  }
-
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  html { scroll-behavior: smooth; scroll-padding-top: 24px; }
-
-  body {
-    background: var(--bg);
-    color: var(--ink);
-    font-family: var(--sans);
-    font-size: 15.5px;
-    line-height: 1.62;
-    -webkit-font-smoothing: antialiased;
-  }
-
-  a { color: inherit; }
-  :focus-visible { outline: 2px solid var(--orange); outline-offset: 3px; border-radius: 4px; }
-  @media (prefers-reduced-motion: reduce) {
-    html { scroll-behavior: auto; }
-    * { animation: none !important; transition: none !important; }
-  }
-
-  /* ── shell: sidebar + content ─────────────────────────────────────────── */
-  .shell { display: grid; grid-template-columns: var(--sidebar-w) minmax(0, 1fr); }
-
-  .sidebar {
-    position: sticky; top: 0; align-self: start;
-    height: 100vh; display: flex; flex-direction: column; gap: 26px;
-    padding: 26px 22px;
-    border-right: 1px solid var(--border);
-    background: var(--bg-2);
-  }
-  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 17px; letter-spacing: -.01em; text-decoration: none; }
-  .brand img { width: 32px; height: 32px; object-fit: contain; }
-  .only-btc {
-    font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
-    color: var(--orange); background: var(--orange-dim);
-    border: 1px solid var(--border-bright); border-radius: 6px;
-    padding: 4px 9px; align-self: flex-start;
-  }
-
-  .side-nav { display: flex; flex-direction: column; gap: 1px; flex: 1; }
-  .side-nav a {
-    display: flex; align-items: center; gap: 10px;
-    font-size: 14px; color: var(--dim); text-decoration: none;
-    padding: 8px 11px; border-radius: 8px; transition: background .15s, color .15s;
-  }
-  .side-nav a::before {
-    content: ""; width: 5px; height: 5px; border-radius: 50%;
-    background: var(--border-bright); transition: background .15s, transform .15s;
-  }
-  .side-nav a:hover { color: var(--ink); background: var(--panel); }
-  .side-nav a.on { color: var(--ink); background: var(--panel); font-weight: 600; box-shadow: var(--shadow); }
-  .side-nav a.on::before { background: var(--orange-solid); transform: scale(1.4); }
-
-  .side-foot { display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
-  .side-foot .links { display: flex; flex-wrap: wrap; gap: 8px; }
-  .side-foot .links a {
-    text-decoration: none; color: var(--dim);
-    border: 1px solid var(--border); border-radius: 7px;
-    padding: 5px 10px; background: var(--panel); transition: border-color .15s, color .15s;
-  }
-  .side-foot .links a:hover { color: var(--ink); border-color: var(--border-bright); }
-  .side-cta {
-    display: block; text-align: center; text-decoration: none;
-    background: var(--orange-solid); color: var(--on-solid);
-    font-weight: 600; font-size: 14px; padding: 11px; border-radius: 9px;
-  }
-
-  main { min-width: 0; }
-  .wrap { max-width: 860px; margin: 0 auto; padding: 0 40px; }
-  section { padding: 68px 0; border-bottom: 1px solid var(--border); }
-  section:last-of-type { border-bottom: 0; }
-
-  /* ── type ─────────────────────────────────────────────────────────────── */
-  h1, h2, h3, .sec-title { font-family: var(--display); letter-spacing: -.02em; text-wrap: balance; }
-  h1 { font-size: clamp(38px, 5.4vw, 60px); line-height: 1.04; font-weight: 700; margin-bottom: 20px; }
-  h1 em { font-style: normal; color: var(--orange); }
-  .lead { font-size: clamp(16px, 1.6vw, 18.5px); color: var(--dim); max-width: 62ch; }
-  .lead strong { color: var(--ink); font-weight: 600; }
-
-  .eyebrow {
-    display: inline-flex; align-items: center; gap: 9px; flex-wrap: wrap;
-    font-family: var(--mono); font-size: 11.5px; letter-spacing: .12em; text-transform: uppercase;
-    color: var(--faint); margin-bottom: 22px;
-  }
-  .eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
-  .eyebrow b { color: var(--orange); font-weight: 500; }
-
-  .sec-head { margin-bottom: 34px; }
-  .sec-tag { font-family: var(--mono); font-size: 11.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--orange); margin-bottom: 12px; }
-  .sec-title { font-size: clamp(25px, 3.4vw, 34px); line-height: 1.15; font-weight: 600; }
-  .sec-sub { color: var(--dim); margin-top: 12px; max-width: 62ch; }
-
-  /* ── hero ─────────────────────────────────────────────────────────────── */
-  header.hero { padding: 64px 0 68px; border-bottom: 1px solid var(--border); }
-  .hero-mascot {
-    width: clamp(84px, 10vw, 112px); height: auto; margin-bottom: 20px;
-    animation: bob 4s ease-in-out infinite;
-  }
-  @keyframes bob { 0%,100%{ transform: translateY(0) rotate(-2deg) } 50%{ transform: translateY(-9px) rotate(2deg) } }
-
-  .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
-  .btn {
-    font-family: var(--sans); font-size: 14.5px; font-weight: 600;
-    padding: 12px 20px; border-radius: 10px; text-decoration: none;
-    display: inline-flex; align-items: center; gap: 9px;
-    border: 1px solid transparent; transition: transform .15s, box-shadow .15s, border-color .15s, background .15s;
-  }
-  .btn-primary { background: var(--orange-solid); color: var(--on-solid); box-shadow: var(--shadow); }
-  .btn-primary:hover { transform: translateY(-1px); }
-  .btn-ghost { border-color: var(--border-bright); color: var(--ink); background: var(--panel); }
-  .btn-ghost:hover { border-color: var(--dim); }
-  .btn .arrow { transition: transform .15s; }
-  .btn:hover .arrow { transform: translateX(3px); }
-
-  .btc-note {
-    margin-top: 26px; padding: 16px 18px;
-    border: 1px solid var(--border); border-left: 3px solid var(--orange-solid);
-    border-radius: 10px; background: var(--panel);
-    font-size: 14px; color: var(--dim);
-  }
-  .btc-note strong { color: var(--ink); font-weight: 600; }
-
-  .note { margin-top: 16px; font-size: 13px; color: var(--faint); display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
-  .badge {
-    font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
-    color: var(--green); border: 1px solid var(--border-bright); background: var(--green-dim);
-    padding: 2px 8px; border-radius: 5px;
-  }
-
-  /* address demo */
-  .demo { margin-top: 40px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); overflow: hidden; box-shadow: var(--shadow); }
-  .demo-bar { display: flex; align-items: center; gap: 7px; padding: 11px 15px; border-bottom: 1px solid var(--border); background: var(--bg-2); }
-  .demo-bar .d { width: 10px; height: 10px; border-radius: 50%; background: var(--border-bright); }
-  .demo-bar span { margin-left: 8px; font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
-  .demo-body { padding: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-  @media (max-width: 620px){ .demo-body { grid-template-columns: 1fr; } }
-  .demo-cell .k { font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); margin-bottom: 7px; }
-  .demo-cell .v { font-family: var(--mono); font-size: 13px; word-break: break-all; }
-  .demo-cell .v.addr { color: var(--orange); }
-  .demo-cell .v.mail { color: var(--green); }
-  .demo-cell .meta { font-size: 12.5px; color: var(--faint); margin-top: 6px; }
-
-  /* ── download cards ───────────────────────────────────────────────────── */
-  .dl-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-  @media (max-width: 900px){ .dl-grid { grid-template-columns: 1fr; } }
-  .dl-card {
-    border: 1px solid var(--border); border-radius: var(--radius);
-    background: var(--panel); padding: 22px; box-shadow: var(--shadow);
-    /* Rows, not flex: the label, title, blurb, button and meta line up across
-       all three cards even when the blurbs are different lengths. */
-    display: grid; grid-template-rows: auto auto 1fr auto auto; gap: 11px;
-  }
-  .dl-card.main { border-color: var(--orange-solid); }
-  .dl-net { font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); }
-  .dl-card.main .dl-net { color: var(--orange); }
-  .dl-card.test .dl-net { color: var(--green); }
-  .dl-card h3 { font-size: 20px; font-weight: 600; }
-  .dl-card p { font-size: 13.5px; color: var(--dim); flex: 1; }
-  .dl-card .btn { justify-content: center; }
-  .dl-meta { font-family: var(--mono); font-size: 11px; color: var(--faint); }
-  .dl-meta a { color: var(--dim); }
-
-  .panel-note {
-    margin-top: 18px; padding: 18px 20px; font-size: 13.5px; color: var(--dim);
-    border: 1px dashed var(--border-bright); border-radius: var(--radius); background: var(--bg-2);
-  }
-  .panel-note strong { color: var(--ink); font-weight: 600; }
-  .panel-note p + p { margin-top: 12px; }
-
-  /* ── feature cards ────────────────────────────────────────────────────── */
-  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-  @media (max-width: 860px){ .grid { grid-template-columns: 1fr; } }
-  .card { border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); padding: 22px; box-shadow: var(--shadow); }
-  .card .icon { font-size: 20px; display: block; margin-bottom: 12px; }
-  .card h3 { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
-  .card p { font-size: 13.5px; color: var(--dim); }
-  .card .tag { display: inline-block; margin-top: 12px; font-family: var(--mono); font-size: 10.5px; color: var(--faint); border: 1px solid var(--border); border-radius: 5px; padding: 2px 8px; }
-  .also { margin-top: 18px; font-size: 13.5px; color: var(--faint); }
-
-  /* ── steps ────────────────────────────────────────────────────────────── */
-  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-  @media (max-width: 860px){ .steps { grid-template-columns: 1fr; } }
-  .stp { display: flex; gap: 13px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); padding: 20px; box-shadow: var(--shadow); }
-  .stp .n { flex-shrink: 0; width: 27px; height: 27px; border-radius: 50%; display: grid; place-items: center; font-family: var(--mono); font-size: 13px; color: var(--green); background: var(--green-dim); border: 1px solid var(--border-bright); }
-  .stp h4 { font-size: 14.5px; font-weight: 600; margin-bottom: 5px; }
-  .stp p { font-size: 13px; color: var(--dim); }
-  .stp a, .mailref a { color: var(--green); }
-
-  /* ── screenshots ──────────────────────────────────────────────────────── */
-  .shots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
-  @media (max-width: 860px){ .shots { grid-template-columns: 1fr; } }
-  .shot { display: flex; flex-direction: column; gap: 11px; max-width: 300px; margin: 0 auto; }
-  .shot img { width: 100%; height: auto; display: block; border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); }
-  .shot figcaption { font-size: 12.5px; color: var(--faint); }
-
-  /* ── privacy ──────────────────────────────────────────────────────────── */
-  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 30px; }
-  @media (max-width: 700px){ .compare { grid-template-columns: 1fr; } }
-  .compare .col { border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; background: var(--panel); }
-  .compare .col.bad { border-color: color-mix(in srgb, var(--red) 35%, var(--border)); }
-  .compare .col.good { border-color: color-mix(in srgb, var(--green) 35%, var(--border)); }
-  .compare .label { font-family: var(--mono); font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 14px; }
-  .compare .bad .label { color: var(--red); }
-  .compare .good .label { color: var(--green); }
-  .compare ul { list-style: none; display: flex; flex-direction: column; gap: 11px; }
-  .compare li { font-size: 13.5px; color: var(--dim); padding-left: 24px; position: relative; }
-  .compare li::before { position: absolute; left: 0; }
-  .compare .bad li::before { content: "✕"; color: var(--red); }
-  .compare .good li::before { content: "✓"; color: var(--green); }
-  .compare li strong { color: var(--ink); font-weight: 600; }
-
-  .pp-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-  @media (max-width: 860px){ .pp-grid { grid-template-columns: 1fr; } }
-  .pp { border-left: 2px solid var(--orange-solid); padding: 2px 0 2px 16px; }
-  .pp h4 { font-size: 14.5px; font-weight: 600; margin-bottom: 5px; }
-  .pp p { font-size: 13.5px; color: var(--dim); }
-
-  .caveats { margin-top: 30px; border: 1px dashed var(--border-bright); border-radius: var(--radius); padding: 22px 24px; background: var(--bg-2); }
-  .caveats .ch { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
-  .caveats .ch .t { font-weight: 600; }
-  .caveats .ch .badge { color: var(--faint); background: transparent; }
-  .caveats ul { list-style: none; display: grid; grid-template-columns: 1fr 1fr; gap: 12px 26px; }
-  @media (max-width: 700px){ .caveats ul { grid-template-columns: 1fr; } }
-  .caveats li { font-size: 13px; color: var(--dim); padding-left: 20px; position: relative; }
-  .caveats li::before { content: "—"; position: absolute; left: 0; color: var(--faint); }
-  .caveats li strong { color: var(--ink); font-weight: 600; }
-
-  /* ── stack / vault / pills ────────────────────────────────────────────── */
-  .stack { display: flex; flex-direction: column; border-left: 2px solid var(--border); margin-left: 7px; }
-  .step { padding: 0 0 28px 28px; position: relative; }
-  .step:last-child { padding-bottom: 0; }
-  .step::before { content: ""; position: absolute; left: -8px; top: 5px; width: 14px; height: 14px; border-radius: 50%; background: var(--bg); border: 2px solid var(--orange-solid); }
-  .step .layer { font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--orange); margin-bottom: 3px; }
-  .step h4 { font-size: 15.5px; font-weight: 600; margin-bottom: 5px; }
-  .step p { font-size: 13.5px; color: var(--dim); }
-
-  .vault { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
-  @media (max-width: 700px){ .vault { grid-template-columns: 1fr; } }
-  .vault-item { display: flex; gap: 13px; }
-  .vault-item .ic { flex-shrink: 0; width: 34px; height: 34px; border-radius: 9px; background: var(--green-dim); border: 1px solid var(--border-bright); display: grid; place-items: center; font-size: 16px; }
-  .vault-item h4 { font-size: 14.5px; font-weight: 600; margin-bottom: 4px; }
-  .vault-item p { font-size: 13.5px; color: var(--dim); }
-
-  .pills { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
-  @media (max-width: 700px){ .pills { grid-template-columns: 1fr; } }
-  .pill { border: 1px solid var(--border); border-radius: 10px; padding: 15px 17px; background: var(--panel); }
-  .pill .name { font-weight: 600; font-size: 14.5px; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .pill .name .b { font-family: var(--mono); font-size: 10px; padding: 1px 7px; border-radius: 4px; background: var(--orange-dim); color: var(--orange); border: 1px solid var(--border-bright); }
-  .pill .role { font-size: 12.5px; color: var(--dim); }
-
-  .soon { display: inline-block; margin-left: 7px; font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); border: 1px solid var(--border); padding: 2px 7px; border-radius: 5px; vertical-align: middle; }
-
-  /* ── closing + footer ─────────────────────────────────────────────────── */
-  .final { text-align: center; border: 1px solid var(--border-bright); border-radius: 16px; padding: 44px 28px; background: var(--panel); box-shadow: var(--shadow); }
-  .final h2 { font-size: clamp(24px, 3.4vw, 32px); font-weight: 600; margin-bottom: 12px; }
-  .final p { color: var(--dim); max-width: 46ch; margin: 0 auto 24px; }
-  .final .hero-actions { justify-content: center; }
-
-  footer { padding: 34px 0 56px; color: var(--faint); font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 18px; justify-content: space-between; }
-  footer a { color: var(--dim); }
-  .disclaim { max-width: 60ch; line-height: 1.6; }
-
-  /* ── responsive: the sidebar becomes a top bar ────────────────────────── */
-  @media (max-width: 820px) {
-    .shell { grid-template-columns: 1fr; }
-    .sidebar {
-      position: static; height: auto; flex-direction: row; align-items: center;
-      gap: 14px; overflow-x: auto; padding: 14px 18px;
-      border-right: 0; border-bottom: 1px solid var(--border);
-    }
-    .only-btc, .side-foot { display: none; }
-    .side-nav { flex-direction: row; gap: 4px; flex: 0 0 auto; }
-    .side-nav a { white-space: nowrap; padding: 7px 10px; }
-    .side-nav a::before { display: none; }
-    .wrap { padding: 0 20px; }
-    header.hero { padding: 40px 0 48px; }
-    section { padding: 48px 0; }
-  }
-</style>
+<link rel="stylesheet" href="styles.css">
 </head>
 <body>
 
-<div class="shell">
-  <aside class="sidebar">
-    <a class="brand" href="#top"><img src="thrilla-icon.png" alt=""> Thrilla</a>
+<header class="topbar">
+  <div class="bar">
+    <a class="brand" href="index.html"><img src="thrilla-icon.png" alt=""> Thrilla</a>
     <span class="only-btc">₿ Bitcoin only</span>
+    <div class="spacer"></div>
+    <details class="menu" id="menu">
+      <summary aria-haspopup="menu">Menu <span class="chev">▾</span></summary>
+      <nav class="menu-panel" aria-label="Site">
+        <a href="index.html" aria-current="page">Home</a>
+        <a href="download.html">Download</a>
+        <a href="download.html#try">Try it</a>
+        <a href="index.html#screens">Screenshots</a>
+        <a href="privacy.html">Privacy</a>
+        <a href="how-it-works.html">How it works</a>
+        <a href="how-it-works.html#security">Security</a>
+        <div class="menu-sep"></div>
+        <a href="https://github.com/ponthief/thrilla" target="_blank" rel="noopener noreferrer">GitHub <span class="ext">↗</span></a>
+        <a href="https://x.com/thrillabtc" target="_blank" rel="noopener noreferrer">X <span class="ext">↗</span></a>
+        <a href="https://t.me/thrilla_btc" target="_blank" rel="noopener noreferrer">Telegram <span class="ext">↗</span></a>
+      </nav>
+    </details>
+    <a class="btn btn-primary btn-sm" href="https://github.com/ponthief/thrilla/raw/master/thrilla.apk">Get the app ↓</a>
+  </div>
+</header>
 
-    <nav class="side-nav" aria-label="Sections">
-      <a href="#download">Download</a>
-      <a href="#try">Try it</a>
-      <a href="#screens">Screenshots</a>
-      <a href="#features">Features</a>
-      <a href="#privacy">Privacy</a>
-      <a href="#how">How it works</a>
-      <a href="#security">Security</a>
-    </nav>
+<header class="hero wrap">
+  <img class="hero-mascot" src="thrilla-icon.png" alt="Thrilla mascot — a celebrating Bitcoin coin">
+  <div class="eyebrow"><span class="dot"></span> <b>Bitcoin only</b> · Self-custodial · Silent Payments</div>
+  <h1>A friends-and-family <em>Bitcoin</em> wallet.</h1>
+  <p class="lead">One reusable <strong>Silent Payment</strong> address you can publish anywhere — every payment still lands on a fresh, unlinkable output on the Bitcoin blockchain. Your spend key never leaves your phone.</p>
 
-    <div class="side-foot">
-      <a class="side-cta" href="https://github.com/ponthief/thrilla/raw/master/thrilla.apk">Get the app ↓</a>
-      <div class="links">
-        <a href="https://x.com/thrillabtc" target="_blank" rel="noopener noreferrer">𝕏</a>
-        <a href="https://t.me/thrilla_btc" target="_blank" rel="noopener noreferrer">Telegram</a>
-        <a href="https://github.com/ponthief/thrilla" target="_blank" rel="noopener noreferrer">GitHub</a>
+  <div class="actions">
+    <a class="btn btn-primary" href="download.html">Download <span class="arrow">→</span></a>
+    <a class="btn btn-ghost" href="https://signet.thrilla.me">Try it in your browser <span class="arrow">→</span></a>
+  </div>
+
+  <div class="btc-note">
+    <strong>Bitcoin, and nothing else.</strong> No altcoins, no tokens, no bridges, no in-app exchange. Your coins are ordinary UTXOs on the Bitcoin blockchain, spendable from your seed with or without this app.
+  </div>
+
+  <div class="note"><span class="badge">Heads up</span> Experimental software under active development — try the Signet build first, with coins that aren't worth anything.</div>
+
+  <div class="demo">
+    <div class="demo-bar"><span class="d"></span><span class="d"></span><span class="d"></span><span>thrilla — receive</span></div>
+    <div class="demo-body">
+      <div class="demo-cell">
+        <div class="k">Silent Payment address</div>
+        <div class="v addr">sp1qq2f8…d9k3 · reusable forever</div>
+        <div class="meta">One code. Every payment lands on a fresh output only you can detect.</div>
+      </div>
+      <div class="demo-cell">
+        <div class="k">BitMail address</div>
+        <div class="v mail">alice@mydomain.net</div>
+        <div class="meta">The same code, as a name people can remember.</div>
       </div>
     </div>
-  </aside>
+  </div>
+</header>
 
-  <main>
-    <header class="hero wrap" id="top">
-      <img class="hero-mascot" src="thrilla-icon.png" alt="Thrilla mascot — a celebrating Bitcoin coin">
-      <div class="eyebrow"><span class="dot"></span> <b>Bitcoin only</b> · Self-custodial · Silent Payments</div>
-      <h1>A friends-and-family <em>Bitcoin</em> wallet.</h1>
-      <p class="lead">One reusable <strong>Silent Payment</strong> address you can publish anywhere — every payment still lands on a fresh, unlinkable output on the Bitcoin blockchain. Your spend key never leaves your phone.</p>
+<section class="wrap" id="features">
+  <div class="sec-head">
+    <div class="sec-tag">Features</div>
+    <div class="sec-title">Reusable addresses without the privacy tax</div>
+    <p class="sec-sub">Reuse one ordinary Bitcoin address and leak your history; generate new ones forever and drown in bookkeeping. Silent Payments end that trade-off.</p>
+  </div>
+  <div class="grid">
+    <div class="card">
+      <span class="icon">🔇</span>
+      <h3>Silent Payments</h3>
+      <p>Publish one address. Each sender derives a different on-chain output, so nothing links your payments — yet only you can spend them.</p>
+      <span class="tag">Reusable &amp; unlinkable</span>
+    </div>
+    <div class="card">
+      <span class="icon">✉️</span>
+      <h3>BitMail</h3>
+      <p>Hand someone <strong>alice@mydomain.net</strong> instead of a 116-character string. Resolves over DNS.</p>
+      <span class="tag">DNS-backed</span>
+    </div>
+    <div class="card">
+      <span class="icon">🤝</span>
+      <h3>Collaborative PayJoin</h3>
+      <p>Pay another member with a transaction you both put inputs into, breaking the "one owner per transaction" assumption.</p>
+      <span class="tag">Within your circle</span>
+    </div>
+  </div>
+  <p class="also">Plus: coin control with dust flagging · biometric or PIN lock, and a duress PIN that wipes this device's keys · Lightning and on-chain ↔ Lightning swaps coming.</p>
 
-      <div class="hero-actions">
-        <a class="btn btn-primary" href="https://github.com/ponthief/thrilla/raw/master/thrilla.apk">Download for Android <span class="arrow">→</span></a>
-        <a class="btn btn-ghost" href="https://signet.thrilla.me">Try it in your browser <span class="arrow">→</span></a>
-      </div>
+  <div class="panel-note" style="margin-top:26px">
+    <p><strong>Who it's for.</strong> Thrilla is built for a <strong>known circle</strong> sharing one LNbits instance: members pay each other by PayJoin, and everyone shows the outside world a Silent Payment address that's safe to publish. <strong>Your keys are your responsibility</strong> — no one can move your bitcoin, or recover it if you lose your backup.</p>
+  </div>
+</section>
 
-      <div class="btc-note">
-        <strong>Bitcoin, and nothing else.</strong> No altcoins, no tokens, no bridges, no in-app exchange. Your coins are ordinary UTXOs on the Bitcoin blockchain, spendable from your seed with or without this app.
-      </div>
+<section class="wrap" id="screens">
+  <div class="sec-head">
+    <div class="sec-tag">Screenshots</div>
+    <div class="sec-title">What you actually get</div>
+  </div>
+  <div class="shots">
+    <figure class="shot">
+      <img loading="lazy" src="screenshots/receive-bitmail.jpg" alt="The Receive screen: a QR code for a reusable Silent Payments address, with a form to claim a BitMail name">
+      <figcaption>Your reusable address as a QR — and a BitMail name to put in front of it.</figcaption>
+    </figure>
+    <figure class="shot">
+      <img loading="lazy" src="screenshots/coin-control.jpg" alt="The Coins screen listing unspent coins with amounts, a label action and a freeze button on each">
+      <figcaption>Every coin listed, labelled and freezable, with dust counted separately.</figcaption>
+    </figure>
+    <figure class="shot">
+      <img loading="lazy" src="screenshots/scan.jpg" alt="The Scan screen showing the chain tip, the height scanned to, and a button to scan the remaining blocks">
+      <figcaption>Scanning the chain for the payments only your key can find.</figcaption>
+    </figure>
+  </div>
+  <p class="also">Screens from the Signet and mainnet builds — identical bar the network they talk to.</p>
+</section>
 
-      <div class="note"><span class="badge">Heads up</span> Experimental software under active development — try the Signet build first, with coins that aren't worth anything.</div>
+<section class="wrap">
+  <div class="final">
+    <h2>Get Thrilla</h2>
+    <p>A reusable Bitcoin address that doesn't cost you your privacy.</p>
+    <div class="actions">
+      <a class="btn btn-primary" href="download.html">Download <span class="arrow">→</span></a>
+      <a class="btn btn-ghost" href="https://signet.thrilla.me">Web app <span class="arrow">→</span></a>
+    </div>
+  </div>
+</section>
 
-      <div class="demo">
-        <div class="demo-bar"><span class="d"></span><span class="d"></span><span class="d"></span><span>thrilla — receive</span></div>
-        <div class="demo-body">
-          <div class="demo-cell">
-            <div class="k">Silent Payment address</div>
-            <div class="v addr">sp1qq2f8…d9k3 · reusable forever</div>
-            <div class="meta">One code. Every payment lands on a fresh output only you can detect.</div>
-          </div>
-          <div class="demo-cell">
-            <div class="k">BitMail address</div>
-            <div class="v mail">alice@mydomain.net</div>
-            <div class="meta">The same code, as a name people can remember.</div>
-          </div>
-        </div>
-      </div>
-    </header>
-
-    <section class="wrap" id="download">
-      <div class="sec-head">
-        <div class="sec-tag">Download</div>
-        <div class="sec-title">Three ways in</div>
-        <p class="sec-sub">Two Android builds, sideloaded — the test one sits happily next to the real one — or the same wallet in a browser.</p>
-      </div>
-
-      <div class="dl-grid">
-        <div class="dl-card main">
-          <div class="dl-net">Mainnet · real bitcoin</div>
-          <h3>Thrilla</h3>
-          <p>Real funds. You hold the only key that can spend them.</p>
-          <a class="btn btn-primary" href="https://github.com/ponthief/thrilla/raw/master/thrilla.apk">Download APK <span class="arrow">↓</span></a>
-          <div class="dl-meta">Latest build · Android 6+ · ~74 MB</div>
-        </div>
-        <div class="dl-card test">
-          <div class="dl-net">Signet · test network</div>
-          <h3>Thrilla (Signet)</h3>
-          <p>The same wallet on a test network. Coins are worthless — try everything here first.</p>
-          <a class="btn btn-ghost" href="https://github.com/ponthief/thrilla/raw/master/thrilla-signet.apk">Download APK <span class="arrow">↓</span></a>
-          <div class="dl-meta">Android 6+ · ~74 MB</div>
-        </div>
-        <div class="dl-card web">
-          <div class="dl-net">Browser · Signet</div>
-          <h3>Web app</h3>
-          <p>No install at all. The same wallet in a tab — keys stay encrypted in that browser, not on the server.</p>
-          <a class="btn btn-ghost" href="https://signet.thrilla.me">Open signet.thrilla.me <span class="arrow">→</span></a>
-          <div class="dl-meta">Signet only · nothing to sideload</div>
-        </div>
-      </div>
-
-      <div class="panel-note">
-        <p><strong>Installing the APK:</strong> Android blocks apps from outside the Play Store — when you open the file, allow installs from your browser, then continue.</p>
-        <p><strong>Using more than one:</strong> your account is the same everywhere, but your keys are not — they're generated on the device you're using and stay there, in the phone's keystore or encrypted in that browser. The server never holds anything that can spend, so a second device (or the browser, after the app) starts empty until you <strong>import your recovery phrase</strong> there.</p>
-      </div>
-    </section>
-
-    <section class="wrap" id="try">
-      <div class="sec-head">
-        <div class="sec-tag">Try it</div>
-        <div class="sec-title">Three steps to your first payment</div>
-        <p class="sec-sub">On Signet the coins are worthless, so there's nothing to lose while you learn what a Silent Payment feels like.</p>
-      </div>
-      <div class="steps">
-        <div class="stp">
-          <div class="n">1</div>
-          <div>
-            <h4>Create an account</h4>
-            <p>Each device is confirmed by an email link from <span class="mailref" data-user="thrilla" data-domain="bitaurus.net"></span> — check spam. A password alone can't reach your funds.</p>
-          </div>
-        </div>
-        <div class="stp">
-          <div class="n">2</div>
-          <div>
-            <h4>Make a wallet, keep the seed</h4>
-            <p>Keys are derived on your phone. Write the seed down — it's the only way back.</p>
-          </div>
-        </div>
-        <div class="stp">
-          <div class="n">3</div>
-          <div>
-            <h4>Fund it and send</h4>
-            <p>On Signet, take free coins from the <a href="https://silentpayments.dev/faucet/signet" target="_blank" rel="noopener noreferrer">faucet</a>. On mainnet, send yourself a small amount first.</p>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section class="wrap" id="screens">
-      <div class="sec-head">
-        <div class="sec-tag">Screenshots</div>
-        <div class="sec-title">What you actually get</div>
-      </div>
-      <div class="shots">
-        <figure class="shot">
-          <img loading="lazy" src="screenshots/receive-bitmail.jpg" alt="The Receive screen: a QR code for a reusable Silent Payments address, with a form to claim a BitMail name">
-          <figcaption>Your reusable address as a QR — and a BitMail name to put in front of it.</figcaption>
-        </figure>
-        <figure class="shot">
-          <img loading="lazy" src="screenshots/coin-control.jpg" alt="The Coins screen listing unspent coins with amounts, a label action and a freeze button on each">
-          <figcaption>Every coin listed, labelled and freezable, with dust counted separately.</figcaption>
-        </figure>
-        <figure class="shot">
-          <img loading="lazy" src="screenshots/scan.jpg" alt="The Scan screen showing the chain tip, the height scanned to, and a button to scan the remaining blocks">
-          <figcaption>Scanning the chain for the payments only your key can find.</figcaption>
-        </figure>
-      </div>
-      <p class="also">Screens from the Signet and mainnet builds — identical bar the network they talk to.</p>
-    </section>
-
-    <section class="wrap" id="features">
-      <div class="sec-head">
-        <div class="sec-tag">Features</div>
-        <div class="sec-title">Reusable addresses without the privacy tax</div>
-        <p class="sec-sub">Reuse one ordinary Bitcoin address and leak your history; generate new ones forever and drown in bookkeeping. Silent Payments end that trade-off.</p>
-      </div>
-      <div class="grid">
-        <div class="card">
-          <span class="icon">🔇</span>
-          <h3>Silent Payments</h3>
-          <p>Publish one address. Each sender derives a different on-chain output, so nothing links your payments — yet only you can spend them.</p>
-          <span class="tag">Reusable &amp; unlinkable</span>
-        </div>
-        <div class="card">
-          <span class="icon">✉️</span>
-          <h3>BitMail</h3>
-          <p>Hand someone <strong>alice@mydomain.net</strong> instead of a 116-character string. Resolves over DNS.</p>
-          <span class="tag">DNS-backed</span>
-        </div>
-        <div class="card">
-          <span class="icon">🤝</span>
-          <h3>Collaborative PayJoin</h3>
-          <p>Pay another member with a transaction you both put inputs into, breaking the "one owner per transaction" assumption.</p>
-          <span class="tag">Within your circle</span>
-        </div>
-      </div>
-      <p class="also">Plus: coin control with dust flagging · biometric or PIN lock, and a duress PIN that wipes this device's keys · Lightning and on-chain ↔ Lightning swaps coming.</p>
-
-      <div class="panel-note" style="margin-top:26px">
-        <p><strong>Who it's for.</strong> Thrilla is built for a <strong>known circle</strong> sharing one LNbits instance: members pay each other by PayJoin, and everyone shows the outside world a Silent Payment address that's safe to publish. <strong>Your keys are your responsibility</strong> — no one can move your bitcoin, or recover it if you lose your backup.</p>
-      </div>
-    </section>
-
-    <section class="wrap" id="privacy">
-      <div class="sec-head">
-        <div class="sec-tag">Privacy</div>
-        <div class="sec-title">Privacy that holds up on a public ledger</div>
-        <p class="sec-sub">Every Bitcoin transaction is permanent and public. How you receive decides whether that ledger becomes a map of your life.</p>
-      </div>
-
-      <div class="compare">
-        <div class="col bad">
-          <div class="label">⚠ Reusing one normal address</div>
-          <ul>
-            <li>Every payment to you is <strong>clustered</strong> under one address, forever.</li>
-            <li>Anyone who has paid you sees your <strong>balance and history</strong>.</li>
-            <li>Posting it publicly ties your <strong>identity</strong> to all of it.</li>
-          </ul>
-        </div>
-        <div class="col good">
-          <div class="label">✓ One Silent Payment address</div>
-          <ul>
-            <li>Each payment lands on a <strong>fresh output</strong>, unlinked to the rest.</li>
-            <li>Observers see unrelated outputs — your <strong>history stays private</strong>.</li>
-            <li>Publish it <strong>anywhere</strong>; only your scan key finds your coins.</li>
-          </ul>
-        </div>
-      </div>
-
-      <div class="pp-grid">
-        <div class="pp">
-          <h4>No address reuse, ever</h4>
-          <p>Share one code for years; reuse of the public address never becomes reuse on the chain.</p>
-        </div>
-        <div class="pp">
-          <h4>Nothing to coordinate</h4>
-          <p>No asking senders for a fresh address, no invoice trail showing who paid what.</p>
-        </div>
-        <div class="pp">
-          <h4>Fewer signals to analyse</h4>
-          <p>Clustering relies on address reuse and single-owner inputs. This removes both.</p>
-        </div>
-      </div>
-
-      <div class="caveats">
-        <div class="ch">
-          <span class="t">What this doesn't do</span>
-          <span class="badge">Straight talk</span>
-        </div>
-        <ul>
-          <li>It protects the <strong>receiving</strong> side. Coins you spend still carry their history, so coin control still matters.</li>
-          <li>It <strong>isn't a mixer</strong> — amounts and timing stay visible, even when the links don't exist.</li>
-          <li>Network privacy is <strong>separate</strong>: who broadcasts, and from which IP, isn't covered here.</li>
-          <li>BitMail lookups are <strong>ordinary DNS queries</strong>, visible to the resolver. The payment stays private.</li>
-          <li>Your <strong>keys are your responsibility</strong> — there's no password reset for bitcoin.</li>
-        </ul>
-      </div>
-    </section>
-
-    <section class="wrap" id="how">
-      <div class="sec-head">
-        <div class="sec-tag">How it works</div>
-        <div class="sec-title">Layers doing one job</div>
-        <p class="sec-sub">Thrilla is the interface. Open components do the work underneath.</p>
-      </div>
-      <div class="stack">
-        <div class="step">
-          <div class="layer">Layer 01 · Interface</div>
-          <h4>Thrilla — the wallet you see</h4>
-          <p>Derives keys and signs on your device. The server only broadcasts what you already signed.</p>
-        </div>
-        <div class="step">
-          <div class="layer">Layer 02 · Backend</div>
-          <h4>LNbits — accounts &amp; orchestration</h4>
-          <p>Thrilla ships as an LNbits extension, inheriting multi-user accounts, auth, and device confirmation.</p>
-        </div>
-        <div class="step">
-          <div class="layer">Layer 03 · Indexing</div>
-          <h4>BlindBit &amp; Fulcrum — indexing the chain</h4>
-          <p>BlindBit precomputes tweak and UTXO data so scanning is quick; Fulcrum serves lookups. Neither sees your spend key.</p>
-        </div>
-        <div class="step">
-          <div class="layer">Layer 04 · Swaps <span class="soon">Soon</span></div>
-          <h4>Boltz — on-chain ↔ Lightning</h4>
-          <p>Non-custodial submarine swaps — a failed swap refunds on-chain with a key only your wallet holds.</p>
-        </div>
-      </div>
-    </section>
-
-    <section class="wrap" id="security">
-      <div class="sec-head">
-        <div class="sec-tag">Security</div>
-        <div class="sec-title">The server never holds your keys</div>
-        <p class="sec-sub">A full server compromise still can't move your bitcoin.</p>
-      </div>
-      <div class="vault">
-        <div class="vault-item">
-          <div class="ic">🔑</div>
-          <div>
-            <h4>Seeds never reach the server</h4>
-            <p>Generated and held on your device. There's no seed column in the database to leak — and no one to recover it for you.</p>
-          </div>
-        </div>
-        <div class="vault-item">
-          <div class="ic">📱</div>
-          <div>
-            <h4>Account + device confirmation</h4>
-            <p>A new device must be confirmed by email before it reaches a wallet, so a stolen password isn't enough.</p>
-          </div>
-        </div>
-        <div class="vault-item">
-          <div class="ic">✍️</div>
-          <div>
-            <h4>Local signing</h4>
-            <p>Transactions, PayJoins included, are signed on your device. The backend can't author one for you.</p>
-          </div>
-        </div>
-        <div class="vault-item">
-          <div class="ic">👁</div>
-          <div>
-            <h4>Scanning is opt-in</h4>
-            <p>Background scanning uploads your <em>scan</em> key only: it can detect coins, never spend them, and you can turn it off.</p>
-          </div>
-        </div>
-      </div>
-
-      <div class="sec-head" style="margin:44px 0 20px">
-        <div class="sec-tag">Built on</div>
-        <div class="sec-title">Open foundations</div>
-        <p class="sec-sub">Every piece is open source and self-hostable — run your own and nothing sits between you and the chain.</p>
-      </div>
-      <div class="pills">
-        <div class="pill">
-          <div class="name">LNbits <span class="b">accounts + API</span></div>
-          <div class="role">Multi-user, self-hosted Bitcoin backend. Thrilla is an extension on top.</div>
-        </div>
-        <div class="pill">
-          <div class="name">BlindBit <span class="b">SP oracle</span></div>
-          <div class="role">Silent Payments indexer — precomputed tweak and UTXO data for fast scanning.</div>
-        </div>
-        <div class="pill">
-          <div class="name">Fulcrum <span class="b">electrum server</span></div>
-          <div class="role">Address and transaction lookups without a third-party explorer.</div>
-        </div>
-        <div class="pill">
-          <div class="name">Boltz <span class="b">swaps · soon</span></div>
-          <div class="role">Non-custodial swaps between on-chain funds and Lightning.</div>
-        </div>
-      </div>
-    </section>
-
-    <section class="wrap">
-      <div class="final">
-        <h2>Get Thrilla</h2>
-        <p>A reusable Bitcoin address that doesn't cost you your privacy.</p>
-        <div class="hero-actions">
-          <a class="btn btn-primary" href="https://github.com/ponthief/thrilla/raw/master/thrilla.apk">Mainnet APK <span class="arrow">↓</span></a>
-          <a class="btn btn-ghost" href="https://github.com/ponthief/thrilla/raw/master/thrilla-signet.apk">Signet APK <span class="arrow">↓</span></a>
-          <a class="btn btn-ghost" href="https://signet.thrilla.me">Web app <span class="arrow">→</span></a>
-        </div>
-      </div>
-
-      <footer>
-        <div>
-          <div style="color:var(--dim);margin-bottom:7px">Thrilla · self-custodial, Bitcoin-only Silent Payments</div>
-          <div class="disclaim">Experimental software. The mainnet build holds real bitcoin; Signet coins have no value. Self-custody means you alone are responsible for your keys and backups. Not financial advice.</div>
-        </div>
-        <div style="display:flex;gap:16px;align-items:flex-start">
-          <a href="https://x.com/thrillabtc" target="_blank" rel="noopener noreferrer">𝕏</a>
-          <a href="https://t.me/thrilla_btc" target="_blank" rel="noopener noreferrer">Telegram</a>
-          <a href="https://github.com/ponthief/thrilla" target="_blank" rel="noopener noreferrer">GitHub</a>
-        </div>
-      </footer>
-    </section>
-  </main>
+<div class="wrap">
+  <footer>
+    <div>
+      <div style="color:var(--dim)">Thrilla · self-custodial, Bitcoin-only Silent Payments</div>
+      <div class="disclaim">Experimental software. The mainnet build holds real bitcoin; Signet coins have no value. Self-custody means you alone are responsible for your keys and backups. Not financial advice.</div>
+    </div>
+    <nav>
+      <a href="index.html">Home</a>
+      <a href="download.html">Download</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="how-it-works.html">How it works</a>
+      <a href="https://github.com/ponthief/thrilla" target="_blank" rel="noopener noreferrer">GitHub</a>
+    </nav>
+  </footer>
 </div>
 
 <script>
-  // Highlight the sidebar entry for whichever section is currently in view.
+  // <details> opens the menu by itself; this only closes it again on an outside
+  // click or Escape, which a bare <details> won't do.
   (function () {
-    var links = Array.prototype.slice.call(document.querySelectorAll('.side-nav a'));
-    var map = {};
-    links.forEach(function (a) {
-      var el = document.getElementById(a.getAttribute('href').slice(1));
-      if (el) map[el.id] = a;
+    var menu = document.getElementById('menu');
+    if (!menu) return;
+    document.addEventListener('click', function (e) {
+      if (menu.open && !menu.contains(e.target)) menu.open = false;
     });
-    var ids = Object.keys(map);
-    if (!ids.length || !('IntersectionObserver' in window)) return;
-
-    var visible = {};
-    var io = new IntersectionObserver(function (entries) {
-      entries.forEach(function (e) { visible[e.target.id] = e.isIntersecting ? e.intersectionRatio : 0; });
-      var best = null, bestRatio = 0;
-      ids.forEach(function (id) {
-        if ((visible[id] || 0) > bestRatio) { bestRatio = visible[id]; best = id; }
-      });
-      links.forEach(function (a) { a.classList.remove('on'); });
-      if (best) map[best].classList.add('on');
-    }, { rootMargin: '-15% 0px -60% 0px', threshold: [0, .25, .5, 1] });
-
-    ids.forEach(function (id) { io.observe(document.getElementById(id)); });
-  })();
-
-  // Crawler-resistant email: assembled in JS from split data-* attributes so the
-  // address never appears verbatim in the HTML source for scrapers to scrape.
-  (function () {
-    function buildEmails() {
-      document.querySelectorAll('.mailref').forEach(function (el) {
-        var u = el.getAttribute('data-user');
-        var d = el.getAttribute('data-domain');
-        if (!u || !d) return;
-        var addr = u + String.fromCharCode(64) + d;   // 64 = '@'
-        var a = document.createElement('a');
-        a.href = 'mailto:' + addr;
-        a.textContent = addr;
-        el.textContent = '';
-        el.appendChild(a);
-      });
-    }
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', buildEmails);
-    } else {
-      buildEmails();
-    }
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && menu.open) { menu.open = false; menu.querySelector('summary').focus(); }
+    });
+    menu.querySelectorAll('a').forEach(function (a) {
+      a.addEventListener('click', function () { menu.open = false; });
+    });
   })();
 </script>
 
