@@ -227,6 +227,22 @@ header.hero { padding: 56px 0 60px; border-bottom: 1px solid var(--border); }
 .card p { font-size: 13.5px; color: var(--dim); }
 .card .tag { display: inline-block; margin-top: 12px; font-family: var(--mono); font-size: 10.5px; color: var(--faint); border: 1px solid var(--border); border-radius: 5px; padding: 2px 8px; }
 .also { margin-top: 18px; font-size: 13.5px; color: var(--faint); }
+.also a { color: var(--orange); font-weight: 600; text-decoration: none; }
+.also a:hover { text-decoration: underline; }
+
+/* ── contact cards ───────────────────────────────────────────────────────── */
+.contacts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+@media (max-width: 860px){ .contacts { grid-template-columns: 1fr; } }
+.contact-card {
+  display: flex; flex-direction: column; gap: 4px; text-decoration: none;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--panel); padding: 20px; box-shadow: var(--shadow);
+  transition: border-color .15s, transform .15s;
+}
+.contact-card:hover { border-color: var(--border-bright); transform: translateY(-1px); }
+.contact-card .ct-k { font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--orange); }
+.contact-card .ct-v { font-size: 15.5px; font-weight: 600; color: var(--ink); }
+.contact-card .ct-m { font-size: 12.5px; color: var(--faint); }
 
 /* ── steps ───────────────────────────────────────────────────────────────── */
 .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
