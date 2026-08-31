@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Download Thrilla — Android and web</title>
+<meta name="description" content="Download the Thrilla Bitcoin wallet: mainnet and Signet Android builds, or the Signet web app. Plus the three steps to your first Silent Payment.">
+<link rel="icon" type="image/png" href="thrilla-icon.png">
+<link rel="apple-touch-icon" href="thrilla-icon.png">
+<meta property="og:title" content="Download Thrilla — Android and web">
+<meta property="og:description" content="Download the Thrilla Bitcoin wallet: mainnet and Signet Android builds, or the Signet web app. Plus the three steps to your first Silent Payment.">
+<meta property="og:image" content="thrilla-icon.png">
+<meta property="og:type" content="website">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="bar">
+    <details class="menu" id="menu">
+      <summary aria-label="Menu" title="Menu"><span class="burger" aria-hidden="true"></span></summary>
+      <div class="drawer-backdrop"></div>
+      <nav class="drawer" aria-label="Site">
+        <div class="drawer-head">
+          <span>Thrilla</span>
+          <button type="button" class="drawer-close" aria-label="Close menu">✕</button>
+        </div>
+        <a href="index.html">Home</a>
+        <a href="https://signet.thrilla.me">Try it <span class="ext">↗</span></a>
+        <a href="experience.html">Experience</a>
+        <a href="privacy.html">Privacy</a>
+        <a href="how-it-works.html">How it works</a>
+        <a href="how-it-works.html#security">Security</a>
+        <div class="menu-sep"></div>
+        <a href="index.html#contact">Contact</a>
+      </nav>
+    </details>
+    <a class="brand" href="index.html"><img src="thrilla-icon.png" alt=""> Thrilla</a>
+    <span class="only-btc">₿ Bitcoin only</span>
+    <div class="spacer"></div>
+    <a class="btn btn-primary btn-sm" href="download.html">Get the app <span class="arrow">→</span></a>
+  </div>
+</header>
+
+<div class="wrap page-head">
+  <h1>Download</h1>
+  <p class="lead">Two Android builds, sideloaded — the test one sits happily next to the real one — or the same wallet in a browser.</p>
+</div>
+
+<section class="wrap" id="builds">
+  <div class="dl-grid">
+    <div class="dl-card main">
+      <div class="dl-net">Mainnet · real bitcoin</div>
+      <h3>Thrilla</h3>
+      <p>Real funds. You hold the only key that can spend them.</p>
+      <a class="btn btn-primary" href="https://github.com/ponthief/thrilla/raw/master/thrilla.apk">Download APK <span class="arrow">↓</span></a>
+      <div class="dl-meta">Latest build · Android 6+ · ~74 MB</div>
+    </div>
+    <div class="dl-card test">
+      <div class="dl-net">Signet · test network</div>
+      <h3>Thrilla (Signet)</h3>
+      <p>The same wallet on a test network. Coins are worthless — try everything here first.</p>
+      <a class="btn btn-ghost" href="https://github.com/ponthief/thrilla/raw/master/thrilla-signet.apk">Download APK <span class="arrow">↓</span></a>
+      <div class="dl-meta">Android 6+ · ~74 MB</div>
+    </div>
+    <div class="dl-card web">
+      <div class="dl-net">Browser · Signet</div>
+      <h3>Web app</h3>
+      <p>No install at all. The same wallet in a tab — keys stay encrypted in that browser, not on the server.</p>
+      <a class="btn btn-ghost" href="https://signet.thrilla.me">Open signet.thrilla.me <span class="arrow">→</span></a>
+      <div class="dl-meta">Signet only · nothing to sideload</div>
+    </div>
+  </div>
+
+  <div class="panel-note">
+    <p><strong>Installing the APK:</strong> Android blocks apps from outside the Play Store — when you open the file, allow installs from your browser, then continue.</p>
+    <p><strong>Using more than one:</strong> your account is the same everywhere, but your keys are not — they're generated on the device you're using and stay there, in the phone's keystore or encrypted in that browser. The server never holds anything that can spend, so a second device (or the browser, after the app) starts empty until you <strong>import your recovery phrase</strong> there.</p>
+  </div>
+</section>
+
+<section class="wrap" id="try">
+  <div class="sec-head">
+    <div class="sec-tag">Try it</div>
+    <div class="sec-title">Three steps to your first payment</div>
+    <p class="sec-sub">On Signet the coins are worthless, so there's nothing to lose while you learn what a Silent Payment feels like.</p>
+  </div>
+  <div class="steps">
+    <div class="stp">
+      <div class="n">1</div>
+      <div>
+        <h4>Create an account</h4>
+        <p>Each device is confirmed by an email link from <span class="mailref" data-user="thrilla" data-domain="bitaurus.net"></span> — check spam. A password alone can't reach your funds.</p>
+      </div>
+    </div>
+    <div class="stp">
+      <div class="n">2</div>
+      <div>
+        <h4>Make a wallet, keep the seed</h4>
+        <p>Keys are derived on your phone. Write the seed down — it's the only way back.</p>
+      </div>
+    </div>
+    <div class="stp">
+      <div class="n">3</div>
+      <div>
+        <h4>Fund it and send</h4>
+        <p>On Signet, take free coins from the <a href="https://silentpayments.dev/faucet/signet" target="_blank" rel="noopener noreferrer">faucet</a>. On mainnet, send yourself a small amount first.</p>
+      </div>
+    </div>
+  </div>
+  <div class="note"><span class="badge">Heads up</span> The Signet build is the safe place to start — its coins have no value.</div>
+</section>
+
+<div class="wrap">
+  <footer>
+    <div>
+      <div style="color:var(--dim)">Thrilla · self-custodial, Bitcoin-only Silent Payments</div>
+      <div class="disclaim">The mainnet build holds real bitcoin; Signet coins have no value. Self-custody means you alone are responsible for your keys and backups. Not financial advice.</div>
+    </div>
+    <nav>
+      <a href="index.html">Home</a>
+      <a href="download.html">Download</a>
+      <a href="experience.html">Experience</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="how-it-works.html">How it works</a>
+      <a href="index.html#contact">Contact</a>
+    </nav>
+  </footer>
+</div>
+
+<script>
+  // <details> opens the menu by itself; this only closes it again on an outside
+  // click or Escape, which a bare <details> won't do.
+  (function () {
+    var menu = document.getElementById('menu');
+    if (!menu) return;
+    function close() { menu.open = false; }
+    document.addEventListener('click', function (e) {
+      if (menu.open && !menu.contains(e.target)) close();
+    });
+    var backdrop = menu.querySelector('.drawer-backdrop');
+    if (backdrop) backdrop.addEventListener('click', close);
+    var closeBtn = menu.querySelector('.drawer-close');
+    if (closeBtn) closeBtn.addEventListener('click', close);
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && menu.open) { menu.open = false; menu.querySelector('summary').focus(); }
+    });
+    menu.querySelectorAll('a').forEach(function (a) {
+      a.addEventListener('click', function () { menu.open = false; });
+    });
+  })();
+
+  // Crawler-resistant email: assembled in JS from split data-* attributes so the
+  // address never appears verbatim in the HTML source for scrapers to scrape.
+  (function () {
+    function buildEmails() {
+      document.querySelectorAll('.mailref').forEach(function (el) {
+        var u = el.getAttribute('data-user'), d = el.getAttribute('data-domain');
+        if (!u || !d) return;
+        var addr = u + String.fromCharCode(64) + d;   // 64 = '@'
+        var a = document.createElement('a');
+        a.href = 'mailto:' + addr; a.textContent = addr;
+        el.textContent = ''; el.appendChild(a);
+      });
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', buildEmails);
+    else buildEmails();
+  })();
+</script>
+
+</body>
+</html>
