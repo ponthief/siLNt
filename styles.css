@@ -253,6 +253,22 @@ header.hero { padding: 56px 0 60px; border-bottom: 1px solid var(--border); }
 .stp p { font-size: 13px; color: var(--dim); }
 .stp a, .mailref a { color: var(--green); }
 
+/* ── in-use clips ────────────────────────────────────────────────────────── */
+/* Two portrait phone recordings side by side, capped so a 572x1280 clip does
+   not tower over the page. width/height on the <video> gives the browser the
+   aspect ratio up front, so the poster does not cause a reflow when it loads. */
+.clips { display: grid; grid-template-columns: repeat(2, 1fr); gap: 26px; }
+@media (max-width: 700px) { .clips { grid-template-columns: 1fr; } }
+.clip { display: flex; flex-direction: column; gap: 12px; max-width: 320px; margin: 0 auto; }
+.clip video {
+  width: 100%; height: auto; display: block;
+  background: #000;                 /* letterbox matches the recording, not the page */
+  border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+.clip figcaption { font-size: 12.5px; color: var(--dim); line-height: 1.6; }
+.clip figcaption strong { color: var(--ink); font-weight: 600; }
+
 /* ── screenshots ─────────────────────────────────────────────────────────── */
 .shots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
 @media (max-width: 860px){ .shots { grid-template-columns: 1fr; } }
