@@ -4,11 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Verify your Thrilla download</title>
-<meta name="description" content="Check that the Thrilla APK you downloaded is the one we built: GPG signature over the published checksums, plus the Android signing certificate Android itself enforces.">
+<meta name="description" content="Every Thrilla release is signed. Three commands prove the APK you downloaded is the one we built.">
 <link rel="icon" type="image/png" href="thrilla-icon.png">
 <link rel="apple-touch-icon" href="thrilla-icon.png">
 <meta property="og:title" content="Verify your Thrilla download">
-<meta property="og:description" content="Check that the Thrilla APK you downloaded is the one we built: GPG signature over the published checksums, plus the Android signing certificate Android itself enforces.">
+<meta property="og:description" content="Every Thrilla release is signed. Three commands prove the APK you downloaded is the one we built.">
 <meta property="og:image" content="thrilla-icon.png">
 <meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -48,121 +48,53 @@
 
 <div class="wrap page-head">
   <h1>Verify your download</h1>
-  <p class="lead">An APK from a website is just a file — nothing about downloading it proves who built it. Two checks fix that, and they're independent: one you run yourself before installing, one Android runs for you forever after.</p>
+  <p class="lead">Every release is signed. Three commands prove the APK you have is the one we built.</p>
 </div>
 
-<section class="wrap" id="key">
-  <div class="sec-head">
-    <div class="sec-tag">The signing key</div>
-    <div class="sec-title">Start with the fingerprint</div>
-    <p class="sec-sub">Everything below only means something if this is the right key. Compare it character by character.</p>
-  </div>
+<section class="wrap">
 
-  <!-- ┌ THE ONLY LINE TO EDIT WHEN THE SIGNING KEY IS PUBLISHED ─────────────┐
-       │ Replace PUBLISH_FINGERPRINT_HERE below with the fingerprint printed  │
-       │ by thrilla's scripts/sign-release.sh, in the spaced form gpg gives:  │
-       │   ABCD 1234 EF56 7890 ABCD  1234 EF56 7890 ABCD 1234                 │
-       │ Leave the same string in the <script> at the bottom alone — that is  │
-       │ the sentinel this value is compared against, not a second copy.      │
-       └──────────────────────────────────────────────────────────────────────┘ -->
-  <div class="fp" id="fp">D4D0 D320 2FC0 6849 A257  B38D E946 1833 4C67 4B40</div>
+  <h3 style="font-size:16px;font-weight:600">Signing key</h3>
+  <!-- The fingerprint appears exactly once on this site. When the key is
+       rotated, this line is the only one to change. -->
+  <div class="fp" id="fp">F061 E3E9 56FC F57F 99D2  FE48 81DC EBD9 74E9 CABE</div>
+  <p style="font-size:13px;margin-top:8px;font-family:var(--mono);color:var(--dim)">Thrilla &lt;thrilla@bitaurus.net&gt;</p>
 
   <div class="warnbox">
-    <p><strong>Check this against a source that isn't this page.</strong> Anyone able to serve you a fake APK from thrilla.me can serve a fake key and a fake fingerprint right beside it — the whole check would then pass, and prove nothing. The same fingerprint is published on
+    <p><strong>Confirm this fingerprint somewhere other than this page</strong> — on
       <a href="https://github.com/ponthief/thrilla" target="_blank" rel="noopener noreferrer">GitHub</a>,
-      <a href="https://x.com/thrillabtc" target="_blank" rel="noopener noreferrer">X</a> and
+      <a href="https://x.com/thrillabtc" target="_blank" rel="noopener noreferrer">X</a> or
       <a href="https://t.me/thrilla_btc" target="_blank" rel="noopener noreferrer">Telegram</a>.
-      If they don't all agree, stop and <a href="index.html#contact">tell us</a>.</p>
-    <p>This is the honest limit of any download-page verification: it detects a tampered file, not a compromised publisher. A second source is what closes the gap.</p>
+      Anyone who could serve you a fake APK from thrilla.me could serve a fake key beside it, and the check would pass anyway.</p>
   </div>
 
-  <div class="panel-note">
-    <p><strong>What you'll need.</strong> GnuPG and a terminal. On Debian or Ubuntu <code>apt install gnupg</code>, on macOS <code>brew install gnupg</code>, on Windows <a href="https://gpg4win.org/" target="_blank" rel="noopener noreferrer">Gpg4win</a> (its commands are the same in PowerShell). Verifying on a computer is the point — a phone can download the APK, but it can't easily check it.</p>
-  </div>
-</section>
+  <h3 style="font-size:16px;font-weight:600;margin-top:34px">1 · Get the key and checksums</h3>
+  <p class="sec-sub" style="margin-top:6px">Run this in the folder you downloaded the APK into. (Clicking these in a browser shows the text rather than saving a file — <code>curl</code> avoids that.)</p>
+  <div class="cmd">curl -LO https://github.com/ponthief/thrilla/raw/master/thrilla-signing-key.asc
+curl -LO https://github.com/ponthief/thrilla/raw/master/SHA256SUMS
+curl -LO https://github.com/ponthief/thrilla/raw/master/SHA256SUMS.asc
 
-<section class="wrap" id="steps">
-  <div class="sec-head">
-    <div class="sec-tag">GPG</div>
-    <div class="sec-title">Three commands</div>
-    <p class="sec-sub">We sign one <code>SHA256SUMS</code> file that covers every build, then you check your APK against it — the same layout Bitcoin Core and Tor use.</p>
-  </div>
+gpg --import thrilla-signing-key.asc</div>
 
-  <div class="vsteps">
-
-    <div class="vstep">
-      <h3><span class="n">1</span> Import the key</h3>
-      <p>Download <a href="thrilla-signing-key.asc">thrilla-signing-key.asc</a>, then import it and print its fingerprint to compare with the one above.</p>
-      <div class="cmd">gpg --import thrilla-signing-key.asc
-gpg --fingerprint thrilla</div>
-      <p>Do the comparison by eye, across all forty characters. A key that differs in the middle is the whole attack.</p>
-    </div>
-
-    <div class="vstep">
-      <h3><span class="n">2</span> Check the signature on the checksums</h3>
-      <p>Put <a href="https://github.com/ponthief/thrilla/raw/master/SHA256SUMS">SHA256SUMS</a> and <a href="https://github.com/ponthief/thrilla/raw/master/SHA256SUMS.asc">SHA256SUMS.asc</a> in the folder you downloaded the APK into.</p>
-      <div class="cmd">gpg --verify SHA256SUMS.asc SHA256SUMS</div>
-      <p>You're looking for one line — <b>Good signature</b> — and the fingerprint at the bottom matching step 1:</p>
-      <div class="out">gpg: Signature made Tue 01 Sep 2026 10:05:22 UTC
-gpg:                using EDDSA key 4772DA8C5DF761429F0BCD454D21817AA0EBF64E
-gpg: <b>Good signature from "Thrilla &lt;…&gt;"</b> [unknown]
-gpg: <i>WARNING: The key's User ID is not certified with a trusted signature!</i>
-gpg: <i>         There is no indication that the signature belongs to the owner.</i>
-Primary key fingerprint: 4772 DA8C 5DF7 6142 9F0B  CD45 4D21 817A A0EB F64E</div>
-      <p><strong>That WARNING is normal and expected.</strong> It is not saying the signature is bad — it says you haven't told GPG you personally trust this key, which you haven't and don't need to. "Good signature" plus a fingerprint that matches is the result you want. If you'd rather not see it again, sign the key locally with <code>gpg --lsign-key</code>.</p>
-    </div>
-
-    <div class="vstep">
-      <h3><span class="n">3</span> Check the APK against the checksums</h3>
-      <p>Now that the sums are proven authentic, confirm your file matches one.</p>
-      <div class="cmd"><span class="c"># Linux</span>
+  <h3 style="font-size:16px;font-weight:600;margin-top:34px">2 · Verify</h3>
+  <div class="cmd">gpg --verify SHA256SUMS.asc SHA256SUMS
 sha256sum --ignore-missing -c SHA256SUMS
 
-<span class="c"># macOS, or anywhere without --ignore-missing</span>
-grep ' thrilla.apk$' SHA256SUMS | shasum -a 256 -c -
+<span class="c"># macOS instead of the second line:</span>
+grep ' thrilla.apk$' SHA256SUMS | shasum -a 256 -c -</div>
 
-<span class="c"># Windows PowerShell — compare this against the line in SHA256SUMS</span>
-Get-FileHash thrilla.apk -Algorithm SHA256</div>
-      <div class="out">thrilla.apk: <b>OK</b></div>
-      <p><code>--ignore-missing</code> matters: <code>SHA256SUMS</code> lists both the mainnet and Signet builds, and without it the check fails on whichever one you didn't download.</p>
-    </div>
+  <div class="out">gpg: <b>Good signature from "Thrilla &lt;thrilla@bitaurus.net&gt;"</b> [unknown]
+gpg: <i>WARNING: This key is not certified with a trusted signature!</i>
+Primary key fingerprint: F061 E3E9 56FC F57F 99D2  FE48 81DC EBD9 74E9 CABE
+thrilla.apk: <b>OK</b></div>
 
-  </div>
+  <p style="margin-top:16px;font-size:14px">You want <strong>Good signature</strong>, a fingerprint matching the one above, and <strong>OK</strong>. The <em>WARNING</em> is expected and does not mean the signature is bad — it only says you haven't told GPG you personally trust this key, which you don't need to do.</p>
 
   <div class="warnbox">
-    <p><strong>If any step fails, don't install it.</strong> <code>FAILED</code> from step 3, or anything other than "Good signature" in step 2, means the file you have is not the file we signed. Delete it, download again on a different network, and check once more.</p>
-    <p>If it fails a second time, <a href="index.html#contact">get in touch</a> before installing anything — that's worth knowing about quickly.</p>
-  </div>
-</section>
-
-<section class="wrap" id="android">
-  <div class="sec-head">
-    <div class="sec-tag">Android</div>
-    <div class="sec-title">The check that keeps running</div>
-    <p class="sec-sub">The APK carries its own signature, and Android enforces it on every update — including for people who never verify anything by hand.</p>
+    <p><strong>If either command fails, don't install the APK.</strong> Delete it, download again on a different network, and check once more. If it fails twice, <a href="index.html#contact">tell us</a> before installing anything.</p>
   </div>
 
-  <p class="lead" style="font-size:15px">Once Thrilla is installed, Android will refuse any update signed by a different key. A fake build can't replace a real one on your phone; it can only ever fool a fresh install. That makes the very first install the moment worth checking — which is exactly what the GPG steps above are for.</p>
+  <p class="also" style="margin-top:26px">Separately, Android checks the APK's own signature on every update, so once Thrilla is installed a build signed by a different key can't replace it. That makes the first install the one worth verifying.</p>
 
-  <div class="panel-note">
-    <p><strong>Reading the certificate yourself</strong> (optional, needs the Android SDK build-tools):</p>
-  </div>
-  <div class="cmd">apksigner verify --print-certs thrilla.apk | grep -i 'SHA-256 digest'</div>
-  <div class="panel-note">
-    <p>The fingerprint it prints is published with each release on <a href="https://github.com/ponthief/thrilla/releases" target="_blank" rel="noopener noreferrer">the releases page</a>. It is a separate value from the GPG fingerprint above and the two are not interchangeable — one identifies the app to your phone, the other identifies the download to you.</p>
-  </div>
-
-  <div class="note"><span class="badge">Heads up</span> Reinstalling with a different signing key means uninstalling first — and uninstalling takes this device's keys with it. Have your recovery phrase before you do that.</div>
-</section>
-
-<section class="wrap">
-  <div class="final">
-    <h2>Verified? Install it.</h2>
-    <p>Back to the builds, with the checksums and signature next to them.</p>
-    <div class="actions">
-      <a class="btn btn-primary" href="download.html">Download <span class="arrow">→</span></a>
-    </div>
-  </div>
 </section>
 
 <div class="wrap">
@@ -203,25 +135,6 @@ Get-FileHash thrilla.apk -Algorithm SHA256</div>
     menu.querySelectorAll('a').forEach(function (a) {
       a.addEventListener('click', function () { menu.open = false; });
     });
-  })();
-
-  // Fail loudly, not silently. Until the real fingerprint replaces the
-  // placeholder, this page must NOT show a plausible-looking value — a wrong
-  // fingerprint on a verification page is worse than no page at all, because
-  // it teaches people to accept whatever they're shown. So the placeholder
-  // renders as an explicit "not published yet" instead.
-  //
-  // The string below is a SENTINEL, not a copy of the fingerprint: it is the
-  // value being compared against. Publishing the key means editing exactly one
-  // line, the #fp div above — this one stays as it is. Note the fingerprint
-  // lives in the markup, not here, so it still renders without JavaScript.
-  (function () {
-    var el = document.getElementById('fp');
-    if (!el || el.textContent.trim() !== 'PUBLISH_FINGERPRINT_HERE') return;
-    el.classList.add('fp-missing');
-    el.textContent = 'Not published yet — this release is not GPG-signed. '
-      + 'Until it is, treat the download as unverified and prefer the Signet build, '
-      + 'whose coins are worthless.';
   })();
 </script>
 
