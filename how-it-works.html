@@ -3,12 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>How Thrilla works — architecture and security</title>
-<meta name="description" content="The layers under the Thrilla Bitcoin wallet, the security model that keeps keys off the server, and the open components it is built on.">
+<title>How Thrilla works — the layers underneath</title>
+<meta name="description" content="The layers under the Thrilla Bitcoin wallet and the open components it is built on.">
 <link rel="icon" type="image/png" href="thrilla-icon.png">
 <link rel="apple-touch-icon" href="thrilla-icon.png">
-<meta property="og:title" content="How Thrilla works — architecture and security">
-<meta property="og:description" content="The layers under the Thrilla Bitcoin wallet, the security model that keeps keys off the server, and the open components it is built on.">
+<meta property="og:title" content="How Thrilla works — the layers underneath">
+<meta property="og:description" content="The layers under the Thrilla Bitcoin wallet and the open components it is built on.">
 <meta property="og:image" content="thrilla-icon.png">
 <meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -32,12 +32,11 @@
           <button type="button" class="drawer-close" aria-label="Close menu">✕</button>
         </div>
         <a href="index.html">Home</a>
+        <a href="download.html">Download</a>
         <a href="https://signet.thrilla.me">Try it <span class="ext">↗</span></a>
         <a href="experience.html">Experience</a>
-        <a href="privacy.html">Privacy</a>
+        <a href="privacy.html">Privacy &amp; security</a>
         <a href="how-it-works.html" aria-current="page">How it works</a>
-        <a href="how-it-works.html#security">Security</a>
-        <a href="verify.html">Verify a download</a>
         <div class="menu-sep"></div>
         <a href="index.html#contact">Contact</a>
       </nav>
@@ -79,47 +78,6 @@
   </div>
 </section>
 
-<section class="wrap" id="security">
-  <div class="sec-head">
-    <div class="sec-tag">Security</div>
-    <div class="sec-title">The server never holds your keys</div>
-    <p class="sec-sub">A full server compromise still can't move your bitcoin.</p>
-  </div>
-  <div class="vault">
-    <div class="vault-item">
-      <div class="ic">🔑</div>
-      <div>
-        <h4>Seeds never reach the server</h4>
-        <p>Generated and held on your device. There's no seed column in the database to leak — and no one to recover it for you.</p>
-      </div>
-    </div>
-    <div class="vault-item">
-      <div class="ic">📱</div>
-      <div>
-        <h4>Account + device confirmation</h4>
-        <p>A new device must be confirmed by email before it reaches a wallet, so a stolen password isn't enough.</p>
-      </div>
-    </div>
-    <div class="vault-item">
-      <div class="ic">✍️</div>
-      <div>
-        <h4>Local signing</h4>
-        <p>Transactions, PayJoins included, are signed on your device. The backend can't author one for you.</p>
-      </div>
-    </div>
-    <div class="vault-item">
-      <div class="ic">👁</div>
-      <div>
-        <h4>Scanning is opt-in</h4>
-        <p>Background scanning uploads your <em>scan</em> key only: it can detect coins, never spend them, and you can turn it off.</p>
-      </div>
-    </div>
-  </div>
-
-  <div class="panel-note">
-    <p><strong>None of that helps if the app itself is fake.</strong> The Android builds are sideloaded, so check the one you downloaded before installing it — <a href="verify.html">verify a download →</a></p>
-  </div>
-</section>
 
 <section class="wrap" id="built-on">
   <div class="sec-head">
@@ -148,6 +106,10 @@
 </section>
 
 <div class="wrap">
+  <p class="also" style="padding-bottom:26px">The security model — where keys live and what a server compromise can and can't reach — is on <a href="privacy.html#security">Privacy &amp; security</a>.</p>
+</div>
+
+<div class="wrap">
   <footer>
     <div>
       <div style="color:var(--dim)">Thrilla · self-custodial, Bitcoin-only Silent Payments</div>
@@ -156,9 +118,8 @@
     <nav>
       <a href="index.html">Home</a>
       <a href="download.html">Download</a>
-      <a href="verify.html">Verify</a>
       <a href="experience.html">Experience</a>
-      <a href="privacy.html">Privacy</a>
+      <a href="privacy.html">Privacy &amp; security</a>
       <a href="how-it-works.html">How it works</a>
       <a href="index.html#contact">Contact</a>
     </nav>
