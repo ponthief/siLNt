@@ -68,19 +68,22 @@
   </div>
 
   <h3 style="font-size:16px;font-weight:600;margin-top:34px">1 · Get the key and checksums</h3>
-  <p class="sec-sub" style="margin-top:6px">Run this in the folder you downloaded the APK into. (Clicking these in a browser shows the text rather than saving a file — <code>curl</code> avoids that.)</p>
-  <div class="cmd">curl -LO https://github.com/ponthief/thrilla/raw/master/thrilla-signing-key.asc
-curl -LO https://github.com/ponthief/thrilla/raw/master/SHA256SUMS
-curl -LO https://github.com/ponthief/thrilla/raw/master/SHA256SUMS.asc
+  <p class="sec-sub" style="margin-top:6px">Run this in the folder you downloaded the APK into. (Opening these links in a browser shows the text rather than saving a file — <code>curl</code> avoids that.)</p>
+  <div class="cmd">curl -LO https://github.com/ponthief/thrilla/raw/master/<span class="f">thrilla-signing-key.asc</span>
+curl -LO https://github.com/ponthief/thrilla/raw/master/<span class="f">SHA256SUMS</span>
+curl -LO https://github.com/ponthief/thrilla/raw/master/<span class="f">SHA256SUMS.asc</span>
 
 gpg --import thrilla-signing-key.asc</div>
 
   <h3 style="font-size:16px;font-weight:600;margin-top:34px">2 · Verify</h3>
+  <!-- The macOS variant is commented rather than set apart in prose: it kept
+       wrapping mid-command, and as a comment the whole block stays safe to
+       copy wholesale — a shell ignores both lines. -->
   <div class="cmd">gpg --verify SHA256SUMS.asc SHA256SUMS
 sha256sum --ignore-missing -c SHA256SUMS
 
-<span class="c"># macOS instead of the second line:</span>
-grep ' thrilla.apk$' SHA256SUMS | shasum -a 256 -c -</div>
+<span class="c"># macOS has no sha256sum — instead of the line above:</span>
+<span class="c"># grep ' thrilla.apk$' SHA256SUMS | shasum -a 256 -c -</span></div>
 
   <div class="out">gpg: <b>Good signature from "Thrilla &lt;thrilla@bitaurus.net&gt;"</b> [unknown]
 gpg: <i>WARNING: This key is not certified with a trusted signature!</i>
@@ -134,6 +137,55 @@ thrilla.apk: <b>OK</b></div>
     });
     menu.querySelectorAll('a').forEach(function (a) {
       a.addEventListener('click', function () { menu.open = false; });
+    });
+  })();
+
+  // Copy button on each command block. Added from script rather than markup so
+  // that with JavaScript off the blocks are still plain, selectable text with
+  // no dead button sitting on them.
+  (function () {
+    document.querySelectorAll('.cmd').forEach(function (block) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'copy';
+      btn.textContent = 'Copy';
+      btn.addEventListener('click', function () {
+        // innerText, not textContent: it respects the rendered line breaks, so
+        // a multi-line block pastes as multiple commands rather than one long
+        // unusable line. The button is outside the block, so nothing to strip.
+        var text = block.innerText.trim();
+        var done = function () {
+          btn.textContent = 'Copied';
+          btn.setAttribute('data-done', '');
+          setTimeout(function () {
+            btn.textContent = 'Copy';
+            btn.removeAttribute('data-done');
+          }, 1600);
+        };
+        // navigator.clipboard needs a secure context; fall back to selecting
+        // the text so the button still does something useful over plain http.
+        if (navigator.clipboard && window.isSecureContext) {
+          navigator.clipboard.writeText(text).then(done, function () { select(); });
+        } else {
+          select();
+        }
+        function select() {
+          var r = document.createRange();
+          r.selectNodeContents(block);
+          var sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(r);
+          btn.textContent = 'Press ⌘/Ctrl+C';
+          setTimeout(function () { btn.textContent = 'Copy'; }, 2200);
+        }
+      });
+      // Wrap the block so the button can be positioned against the wrapper
+      // rather than against the scrolling content.
+      var wrap = document.createElement('div');
+      wrap.className = 'cmd-wrap';
+      block.parentNode.insertBefore(wrap, block);
+      wrap.appendChild(block);
+      wrap.appendChild(btn);
     });
   })();
 </script>

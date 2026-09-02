@@ -318,20 +318,60 @@ header.hero { padding: 56px 0 60px; border-bottom: 1px solid var(--border); }
 .soon { display: inline-block; margin-left: 7px; font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); border: 1px solid var(--border); padding: 2px 7px; border-radius: 5px; vertical-align: middle; }
 
 /* ── verify page: commands, terminal output, fingerprint ─────────────────── */
-/* Commands must survive being copied into a terminal, so they never wrap or
-   get prettified — they scroll sideways instead. */
+/* Commands read as a terminal, not as body text: dark ground, light ink, and a
+   copy button, so it is obvious what is meant to be run rather than read. They
+   never wrap or get prettified — the block scrolls sideways instead, because a
+   soft-wrapped command pasted into a shell is a broken command. */
 .cmd, .out {
-  font-family: var(--mono); font-size: 12.5px; line-height: 1.75;
-  border: 1px solid var(--border); border-radius: 10px;
-  padding: 14px 16px; margin-top: 12px;
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.8;
+  border-radius: 10px; margin-top: 12px;
   overflow-x: auto; white-space: pre;
 }
-.cmd { background: var(--panel); color: var(--ink); box-shadow: var(--shadow); }
-.out { background: var(--bg-2); color: var(--dim); font-size: 11.5px; }
+.cmd {
+  background: #1c1916; color: #f2eee6;
+  border: 1px solid #2c2723;
+  padding: 16px 78px 16px 18px;   /* right pad clears the copy button */
+  box-shadow: var(--shadow);
+  -moz-tab-size: 2; tab-size: 2;
+}
+.cmd .c { color: #9c948a; }              /* comment */
+.cmd .f { color: #f7b955; }              /* filename / argument worth spotting */
+
+/* The button lives in a wrapper OUTSIDE the scrolling block, not inside it —
+   inside, it scrolls away with the code the moment a long line is panned. */
+.cmd-wrap { position: relative; }
+.cmd-wrap .cmd { margin-top: 12px; }
+.copy {
+  position: absolute; top: 22px; right: 10px;
+  font-family: var(--sans); font-size: 11.5px; font-weight: 600;
+  color: #d8d2c8; background: #2c2723; border: 1px solid #3d3630;
+  border-radius: 7px; padding: 5px 10px; cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.copy:hover { background: #3d3630; color: #fff; }
+.copy[data-done] { color: #7fd39b; border-color: #3f5c48; }
+
+/* On a phone the block is narrower than the commands, so an overlaid button
+   covers the first line however much padding the content carries. Put it under
+   the block instead, where it hides nothing. */
+@media (max-width: 640px) {
+  .cmd { padding-right: 18px; }
+  .copy { position: static; display: block; margin: 8px 0 0 auto; }
+}
+
+.out {
+  background: var(--bg-2); color: var(--dim); font-size: 11.5px;
+  border: 1px solid var(--border); padding: 14px 16px;
+}
+
+/* Inline code in running prose — a filename or flag, not a block to run. */
+code {
+  font-family: var(--mono); font-size: .88em;
+  background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: 5px; padding: 1px 5px;
+}
 .out b { color: var(--green); font-weight: 600; }
 .out i { color: var(--faint); font-style: normal; }
-.cmd .c { color: var(--faint); }        /* comment */
-.cmd .p { color: var(--orange); }       /* prompt marker */
 
 /* The fingerprint is the one value a reader must compare character by
    character, so it gets room to breathe and never re-flows mid-group. */
