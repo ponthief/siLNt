@@ -58,7 +58,14 @@
     <p class="sec-sub">Everything below only means something if this is the right key. Compare it character by character.</p>
   </div>
 
-  <div class="fp" id="fp" data-fp="PUBLISH_FINGERPRINT_HERE">PUBLISH_FINGERPRINT_HERE</div>
+  <!-- ┌ THE ONLY LINE TO EDIT WHEN THE SIGNING KEY IS PUBLISHED ─────────────┐
+       │ Replace PUBLISH_FINGERPRINT_HERE below with the fingerprint printed  │
+       │ by thrilla's scripts/sign-release.sh, in the spaced form gpg gives:  │
+       │   ABCD 1234 EF56 7890 ABCD  1234 EF56 7890 ABCD 1234                 │
+       │ Leave the same string in the <script> at the bottom alone — that is  │
+       │ the sentinel this value is compared against, not a second copy.      │
+       └──────────────────────────────────────────────────────────────────────┘ -->
+  <div class="fp" id="fp">PUBLISH_FINGERPRINT_HERE</div>
 
   <div class="warnbox">
     <p><strong>Check this against a source that isn't this page.</strong> Anyone able to serve you a fake APK from thrilla.me can serve a fake key and a fake fingerprint right beside it — the whole check would then pass, and prove nothing. The same fingerprint is published on
@@ -203,9 +210,14 @@ Get-FileHash thrilla.apk -Algorithm SHA256</div>
   // fingerprint on a verification page is worse than no page at all, because
   // it teaches people to accept whatever they're shown. So the placeholder
   // renders as an explicit "not published yet" instead.
+  //
+  // The string below is a SENTINEL, not a copy of the fingerprint: it is the
+  // value being compared against. Publishing the key means editing exactly one
+  // line, the #fp div above — this one stays as it is. Note the fingerprint
+  // lives in the markup, not here, so it still renders without JavaScript.
   (function () {
     var el = document.getElementById('fp');
-    if (!el || el.getAttribute('data-fp') !== 'PUBLISH_FINGERPRINT_HERE') return;
+    if (!el || el.textContent.trim() !== 'PUBLISH_FINGERPRINT_HERE') return;
     el.classList.add('fp-missing');
     el.textContent = 'Not published yet — this release is not GPG-signed. '
       + 'Until it is, treat the download as unverified and prefer the Signet build, '
