@@ -17,7 +17,7 @@
 <!-- ?v= is a cache buster: styles.css is served with max-age=14400 and cached at
      the CDN edge, so BUMP THIS NUMBER whenever styles.css changes or the new
      styles will not reach visitors for up to four hours. -->
-<link rel="stylesheet" href="styles.css?v=3">
+<link rel="stylesheet" href="styles.css?v=4">
 </head>
 <body>
 
@@ -50,7 +50,7 @@
 
 <div class="wrap page-head">
   <h1>What you actually get</h1>
-  <p class="lead">Two clips of the wallet being used end to end, and three screens from it — coin control, receiving, and scanning the chain for the payments only your key can find.</p>
+  <p class="lead">Two clips of the wallet being used end to end, and four screens from it — the BitMail tampering alert, receiving, coin control, and scanning the chain for the payments only your key can find.</p>
 </div>
 
 <section class="wrap" id="clips">
@@ -91,6 +91,10 @@
     <div class="sec-title">A closer look</div>
   </div>
   <div class="shots">
+    <figure class="shot">
+      <img loading="lazy" src="screenshots/bitmail-tampering.jpg" alt="A red warning panel reading BitMail tampering detected: the name currently resolves to a different address than your wallet">
+      <figcaption>If a BitMail name stops resolving to your wallet, the app says so before you rely on it — and tells your administrator.</figcaption>
+    </figure>
     <figure class="shot">
       <img loading="lazy" src="screenshots/receive-bitmail.jpg" alt="The Receive screen: a QR code for a reusable Silent Payments address, with a form to claim a BitMail name">
       <figcaption>Your reusable address as a QR — and a BitMail name to put in front of it.</figcaption>
