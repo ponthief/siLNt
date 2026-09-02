@@ -17,7 +17,7 @@
 <!-- ?v= is a cache buster: styles.css is served with max-age=14400 and cached at
      the CDN edge, so BUMP THIS NUMBER whenever styles.css changes or the new
      styles will not reach visitors for up to four hours. -->
-<link rel="stylesheet" href="styles.css?v=2">
+<link rel="stylesheet" href="styles.css?v=3">
 </head>
 <body>
 
@@ -50,10 +50,46 @@
 
 <div class="wrap page-head">
   <h1>What you actually get</h1>
-  <p class="lead">Three screens from the wallet in use — receiving, coin control, and scanning the chain for the payments only your key can find.</p>
+  <p class="lead">Two clips of the wallet being used end to end, and three screens from it — coin control, receiving, and scanning the chain for the payments only your key can find.</p>
 </div>
 
-<section class="wrap">
+<section class="wrap" id="clips">
+  <div class="sec-head">
+    <div class="sec-tag">In use</div>
+    <div class="sec-title">Sending and receiving, start to finish</div>
+    <p class="sec-sub">Screen recordings from the Android build on Signet. No sound.</p>
+  </div>
+  <div class="clips">
+    <figure class="clip">
+      <video controls playsinline preload="none" muted
+             poster="screenshots/send-poster.jpg"
+             width="572" height="1280"
+             aria-label="Screen recording: sending a payment from the Thrilla wallet">
+        <source src="screenshots/send.mp4" type="video/mp4">
+        Your browser can't play this clip.
+        <a href="screenshots/send.mp4">Download it instead</a>.
+      </video>
+      <figcaption><strong>Sending.</strong> Pick a contact by BitMail name, set the amount and fee rate, choose exactly which coins to spend, then review.</figcaption>
+    </figure>
+    <figure class="clip">
+      <video controls playsinline preload="none" muted
+             poster="screenshots/receive-poster.jpg"
+             width="572" height="1280"
+             aria-label="Screen recording: receiving a payment in the Thrilla wallet">
+        <source src="screenshots/receive.mp4" type="video/mp4">
+        Your browser can't play this clip.
+        <a href="screenshots/receive.mp4">Download it instead</a>.
+      </video>
+      <figcaption><strong>Receiving.</strong> Scan the chain from the last height you checked, the payment lands, and the transaction opens with its label and explorer link.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="wrap" id="screens">
+  <div class="sec-head">
+    <div class="sec-tag">Screens</div>
+    <div class="sec-title">A closer look</div>
+  </div>
   <div class="shots">
     <figure class="shot">
       <img loading="lazy" src="screenshots/receive-bitmail.jpg" alt="The Receive screen: a QR code for a reusable Silent Payments address, with a form to claim a BitMail name">
