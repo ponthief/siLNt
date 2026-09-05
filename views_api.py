@@ -63,6 +63,13 @@ from .helpers.payjoin_wallet import sync_wallet, next_unused_receive_index
 from .helpers.payjoin_merge import build_merged_payjoin
 from .helpers.psbt_combine import combine_and_finalize
 from .helpers.electrum_client import ElectrumClient
+from .helpers.sweep import (
+    build_sweep_transaction,
+    fetch_address_utxos,
+    hrp_for as sweep_hrp_for,
+    is_p2wpkh_for_network,
+    sweep_address_for_key,
+)
 from .crud import (
     get_silnt_wallets,
     create_silnt_wallet,
@@ -198,6 +205,8 @@ from .models import (
     WalletAccount,
     BuildTxRequest,
     BroadcastTxRequest,
+    BuildSweepRequest,
+    BroadcastSweepRequest,
     Config,
     ScanWalletRequest,
     SaveAddressRequest,
@@ -2900,6 +2909,144 @@ async def _broadcast_via_mempool(tx_hex: str, network: str) -> str:
             raise HTTPException(status_code=HTTPStatus.BAD_GATEWAY,
                                 detail=f"Broadcast failed: {resp.text}")
         return resp.text.strip()
+
+
+# ── sweep: plain P2WPKH address → this wallet's Silent Payment address ────────
+#
+# The doormat for services that can only pay a bech32 address. See
+# helpers/sweep.py for what this deliberately is not.
+
+
+async def _sweep_wallet_or_403(wallet_id: str, key_info: WalletTypeInfo):
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet not found.")
+    if wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+    return wallet
+
+
+def _require_p2wpkh(address: str, network: str) -> None:
+    """
+    Only a native segwit v0 address on this wallet's network. The preview below
+    queries Fulcrum for whatever address it is handed, so without this it would
+    be a general-purpose address lookup service for anyone with a login.
+    """
+    if not is_p2wpkh_for_network(address, network):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=(
+                f"Not a native segwit ({sweep_hrp_for(network)}1q…) address for "
+                f"this network."
+            ),
+        )
+
+
+@silnt_api_router.get("/api/v1/sweep/{wallet_id}")
+async def api_sweep_preview(
+    wallet_id: str,
+    address: str = Query(..., description="The wallet's BIP-84 sweep address"),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """
+    What is currently sitting on the sweep address. The client derives the
+    address from its own seed, so the server is told one address and learns
+    nothing about any other.
+    """
+    wallet = await _sweep_wallet_or_403(wallet_id, key_info)
+    _require_p2wpkh(address, wallet.network)
+    host, port, tls, _ = await _fulcrum_cfg(wallet.network)
+    try:
+        # Blocking socket client — keep it off the event loop.
+        res = await asyncio.to_thread(fetch_address_utxos, address, host, port, tls)
+    except Exception as e:
+        logger.warning(f"sweep preview failed for {address}: {e}")
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_GATEWAY,
+            detail=f"Could not reach the chain index: {e}",
+        )
+    return res
+
+
+@silnt_api_router.post(
+    "/api/v1/sweep/build", dependencies=[Depends(require_trusted_device_admin)]
+)
+async def api_sweep_build(
+    data: BuildSweepRequest,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """
+    Build and sign the sweep. The private key arrives with the request, is used
+    to sign, and is never stored — the same transient-key handling as /tx/build.
+    The destination is not a parameter: it is always this wallet's own Silent
+    Payment address, so a sweep cannot be aimed anywhere else.
+    """
+    wallet = await _sweep_wallet_or_403(data.wallet_id, key_info)
+    if not data.sweep_key:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST, detail="sweep_key is required."
+        )
+    if not wallet.sp_address:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="This wallet has no Silent Payment address to sweep into.",
+        )
+
+    try:
+        address = sweep_address_for_key(data.sweep_key, wallet.network)
+    except Exception:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST, detail="Invalid sweep key."
+        )
+
+    host, port, tls, _ = await _fulcrum_cfg(wallet.network)
+    try:
+        found = await asyncio.to_thread(fetch_address_utxos, address, host, port, tls)
+    except Exception as e:
+        logger.warning(f"sweep utxo fetch failed for {address}: {e}")
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_GATEWAY,
+            detail=f"Could not reach the chain index: {e}",
+        )
+
+    try:
+        built = build_sweep_transaction(
+            sweep_key_hex=data.sweep_key,
+            sp_address=wallet.sp_address,
+            utxos=found["utxos"],
+            fee_rate=data.fee_rate,
+            network=wallet.network,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error(f"sweep build failed: {e}")
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST, detail=f"Could not build the sweep: {e}"
+        )
+
+    built["unconfirmed_sats"] = found["unconfirmed_sats"]
+    return built
+
+
+@silnt_api_router.post(
+    "/api/v1/sweep/broadcast", dependencies=[Depends(require_trusted_device_admin)]
+)
+async def api_sweep_broadcast(
+    data: BroadcastSweepRequest,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """
+    Broadcast a built sweep. Separate from /tx/broadcast because a sweep spends
+    coins the wallet never owned in silnt.utxos — there are no input UTXOs to
+    mark spent, and the output only becomes visible after the scan that follows
+    its first confirmation.
+    """
+    wallet = await _sweep_wallet_or_403(data.wallet_id, key_info)
+    txid = await _broadcast_via_mempool(data.tx_hex, wallet.network)
+    logger.info(f"Broadcast sweep {txid} into wallet {data.wallet_id}")
+    return {"txid": txid}
+
 
 # ── descriptors ───────────────────────────────────────────────────────────────
 @silnt_api_router.post("/api/v1/payjoin/descriptors")

@@ -331,24 +331,34 @@ def compressed_pubkey_to_point(compressed: bytes) -> tuple:
     return (x, y)
 
 
-def derive_sp_scriptpubkey(
+def sp_scriptpubkey_from_inputs(
     sp_address: str,
-    spend_secret: bytes,
-    utxos: list[dict],
+    inputs: list[tuple[int, bytes, bool]],
 ) -> bytes:
+    """
+    BIP-352 recipient output from EXPLICIT input private keys.
+
+    `inputs` is one (private_key_int, outpoint_bytes, is_taproot) per input,
+    where outpoint_bytes is reversed_txid || vout_LE.
+
+    The `is_taproot` flag is not cosmetic. BIP-352 sums the input private keys,
+    and a P2TR key-path input must contribute the key whose public point has
+    EVEN Y (BIP-340), so an odd-Y key is negated first. A P2WPKH input has no
+    such rule — its key is used exactly as it is. Negating a P2WPKH key (or
+    failing to negate a taproot one) yields a different a_sum, hence a different
+    shared secret, hence an output the recipient's scanner will never find. The
+    coins are not recoverable from that. Get this flag right.
+    """
     b_scan_bytes, b_spend_bytes = parse_sp_address(sp_address)
     n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 
     # Step 1: sum input private keys, negating taproot keys with odd Y
     a_sum = 0
     A_points = []
-    for u in utxos:
-        priv = (
-            int.from_bytes(bytes.fromhex(u["priv_key_tweak"]), "big")
-            + int.from_bytes(spend_secret, "big")
-        ) % n
+    for priv, _outpoint, is_taproot in inputs:
+        priv = priv % n
         pub_point = pubkey_point_gen_from_int(priv)
-        if pub_point[1] % 2 == 1:  # odd Y — negate (taproot requirement)
+        if is_taproot and pub_point[1] % 2 == 1:  # odd Y — negate (taproot requirement)
             priv = n - priv
             pub_point = pubkey_point_gen_from_int(priv)
         a_sum = (a_sum + priv) % n
@@ -361,11 +371,7 @@ def derive_sp_scriptpubkey(
     A_sum_bytes = bytes([0x02 + (A_sum_point[1] % 2)]) + ser256(A_sum_point[0])
 
     # Step 3: smallest outpoint = min(reversed_txid || vout_LE)
-    outpoints = [
-        bytes.fromhex(u["txid"])[::-1] + int(u.get("vout", 0)).to_bytes(4, "little")
-        for u in utxos
-    ]
-    outpointL = min(outpoints)
+    outpointL = min(outpoint for _priv, outpoint, _tr in inputs)
 
     # Step 4: input_hash = TaggedHash("BIP0352/Inputs", outpointL || A_sum)
     input_hash_bytes = tagged_hash("BIP0352/Inputs", outpointL + A_sum_bytes)
@@ -389,6 +395,27 @@ def derive_sp_scriptpubkey(
     P = point_add(B_spend, tG)
 
     return bytes([0x51, 0x20]) + ser256(P[0])
+
+
+def derive_sp_scriptpubkey(
+    sp_address: str,
+    spend_secret: bytes,
+    utxos: list[dict],
+) -> bytes:
+    """
+    BIP-352 recipient output for a spend of this wallet's OWN Silent Payment
+    UTXOs. Every such UTXO is P2TR key-path, so every input key is taproot.
+    """
+    spend_int = int.from_bytes(spend_secret, "big")
+    inputs = [
+        (
+            int.from_bytes(bytes.fromhex(u["priv_key_tweak"]), "big") + spend_int,
+            bytes.fromhex(u["txid"])[::-1] + int(u.get("vout", 0)).to_bytes(4, "little"),
+            True,
+        )
+        for u in utxos
+    ]
+    return sp_scriptpubkey_from_inputs(sp_address, inputs)
 
 
 def verify_sp_output(
