@@ -1042,6 +1042,46 @@ async def api_test_fcm(
     return report
 
 
+class MempoolNotConfigured(Exception):
+    """No mempool/esplora URL for this wallet's network."""
+
+
+async def check_send_confirmation(wallet, txid: str):
+    """
+    Has this wallet's outgoing send confirmed? One txid status lookup — NOT a
+    scan, and no key material involved.
+
+    On confirmation, finalize: flip this tx's inputs from 'unconfirmed_spent' to
+    'spent' and persist the recomputed balance. That transition is also what
+    clears the wallet's "pending" badge, so this is the single place both the
+    client poll and the background sweep go through.
+
+    Returns (confirmed, block_height, balance).
+    """
+    cfg = await get_backend_config(wallet.network)
+    mempool = (cfg.mempool_url or "").rstrip("/")
+    if not mempool:
+        raise MempoolNotConfigured(wallet.network)
+
+    confirmed = False
+    block_height = None
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await c.get(f"{mempool}/api/tx/{txid}/status")
+        if r.status_code == 200:
+            st = r.json()
+            confirmed = bool(st.get("confirmed"))
+            block_height = st.get("block_height")
+
+    if confirmed:
+        await mark_utxos_confirmed_spent_by_tx(wallet.id, txid)
+        new_balance = await get_wallet_unspent_balance(wallet.id)
+        await update_balance(wallet.id, new_balance)
+    else:
+        new_balance = await get_wallet_unspent_balance(wallet.id)
+
+    return confirmed, block_height, new_balance
+
+
 async def _notify_payment_found(wallet, new_found: int, amount_sats) -> None:
     """Best-effort push when a scan finds new funds.
 
@@ -1070,6 +1110,75 @@ async def _notify_payment_found(wallet, new_found: int, amount_sats) -> None:
         )
     except Exception as e:
         logger.warning(f"payment-found push failed for {getattr(wallet, 'id', '?')}: {e}")
+
+
+async def _notify_send_confirmed(user_id: str) -> None:
+    """Best-effort push when a user's outgoing send gets its first confirmation.
+
+    Generic on purpose, for the same reason as _notify_payment_found: an FCM
+    notification message passes title, body and data through Google in
+    plaintext so Android can display it while the app is closed. The amount,
+    the wallet and the txid are all financial metadata, so none of them go in.
+    The app composes the detailed version locally.
+
+    No-op if push isn't configured or the user has no registered device."""
+    try:
+        from .crud import list_fcm_tokens_for_user
+        from .helpers.fcm import send_fcm
+
+        tokens = await list_fcm_tokens_for_user(user_id)
+        if not tokens:
+            return
+        await send_fcm(
+            tokens,
+            "Payment confirmed",
+            "Your payment has its first confirmation. Open Thrilla to view.",
+            {"type": "send_confirmed"},
+        )
+    except Exception as e:
+        logger.warning(f"send-confirmed push failed for user {user_id}: {e}")
+
+
+async def run_send_confirmation_checks() -> int:
+    """
+    Confirm outstanding sends across all wallets and push on the first
+    confirmation. Returns how many newly confirmed.
+
+    Runs for EVERY wallet with a pending send, not just background-scan opt-ins:
+    this needs no scan key, only a public txid lookup, so there is nothing extra
+    to consent to. It is also what makes the notification work with the app
+    closed — the in-app watcher only runs while the app is open.
+
+    Dedup is structural rather than a flag: confirming flips the inputs to
+    'spent', so the send drops out of the pending list and cannot be announced
+    twice.
+    """
+    confirmed_count = 0
+    try:
+        from .crud import list_pending_send_txs
+
+        pending = await list_pending_send_txs()
+    except Exception as e:
+        logger.warning(f"[silnt] could not list pending sends: {e}")
+        return 0
+
+    for row in pending:
+        try:
+            wallet = await get_silnt_wallet(row["wallet_id"])
+            if not wallet:
+                continue
+            confirmed, _height, _balance = await check_send_confirmation(wallet, row["txid"])
+            if confirmed:
+                confirmed_count += 1
+                await _notify_send_confirmed(row["user_id"])
+        except MempoolNotConfigured:
+            continue          # network not set up; nothing to do for this wallet
+        except Exception as e:
+            # One bad tx must not stop the sweep for everyone else.
+            logger.warning(
+                f"[silnt] send confirmation check failed for {row.get('txid')}: {e}"
+            )
+    return confirmed_count
 
 
 # How often to poll each active network's chain tip for a new block. A sweep is
@@ -2631,34 +2740,19 @@ async def api_tx_confirmation(
     Lightweight: one mempool/esplora lookup for this txid — NOT a scan.
     Returns {confirmed: bool, block_height: int|None, balance: int}.
     """
-    # Ownership: only let a wallet query a tx it actually sent.
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Wallet not found.")
-    # (Add your usual user/wallet ownership check here, matching other endpoints.)
+    # Ownership: only let a caller query a tx sent by a wallet they own. This
+    # was previously left as a TODO, which let any authenticated user probe
+    # another wallet's txid and force a balance recompute on it.
+    if wallet.user != key_info.wallet.user:
+        raise HTTPException(HTTPStatus.FORBIDDEN, "Access denied.")
 
-    cfg = await get_backend_config(wallet.network)
-    mempool = (cfg.mempool_url or "").rstrip("/")
-    if not mempool:
+    try:
+        confirmed, block_height, new_balance = await check_send_confirmation(wallet, txid)
+    except MempoolNotConfigured:
         raise HTTPException(HTTPStatus.SERVICE_UNAVAILABLE, "Mempool URL not configured.")
-
-    confirmed = False
-    block_height = None
-    async with httpx.AsyncClient(timeout=20) as c:
-        r = await c.get(f"{mempool}/api/tx/{txid}/status")
-        if r.status_code == 200:
-            st = r.json()
-            confirmed = bool(st.get("confirmed"))
-            block_height = st.get("block_height")
-
-    if confirmed:
-        # Finalize: unconfirmed_spent -> spent for this tx's inputs in this wallet.
-        await mark_utxos_confirmed_spent_by_tx(wallet_id, txid)
-        # Recompute balance from unspent UTXOs and persist it.
-        new_balance = await get_wallet_unspent_balance(wallet_id)
-        await update_balance(wallet_id, new_balance)
-    else:
-        new_balance = await get_wallet_unspent_balance(wallet_id)
 
     return {"confirmed": confirmed, "block_height": block_height, "balance": new_balance}
 

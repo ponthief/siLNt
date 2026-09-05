@@ -13,6 +13,7 @@ from .views_api import (
     run_health_probes,
     run_background_scans,
     background_tip_advanced,
+    run_send_confirmation_checks,
     BACKGROUND_SCAN_POLL_SECONDS,
     BACKGROUND_SCAN_INTERVAL_SECONDS,
 )
@@ -83,6 +84,12 @@ async def _background_scan_loop():
             now = time.monotonic()
             due_fallback = (now - last_sweep) >= BACKGROUND_SCAN_INTERVAL_SECONDS
             if advanced or due_fallback:
+                # Confirmations first, and for every wallet with a pending send
+                # — not only background-scan opt-ins. Checking a send needs no
+                # scan key, just a public txid lookup, and this is the path that
+                # reaches a user whose app is closed. Kept ahead of the scan so
+                # a slow sweep can't delay it.
+                await run_send_confirmation_checks()
                 await run_background_scans()
                 last_sweep = time.monotonic()
         except Exception as exc:
