@@ -53,7 +53,8 @@ async def list_wallet_transactions(
         txid, timestamp, amount_sats,    # negative = net outflow, positive = inflow
         input_sum, output_sum,
         input_count, output_count,
-        labels: [str] }
+        labels: [str],
+        confirmed: bool }                # False = send still in the mempool
     """
     receives = {r["txid"]: r for r in await get_wallet_receives(wallet_id)}
     sends    = {s["txid"]: s for s in await get_wallet_sends(wallet_id)}
@@ -99,6 +100,10 @@ async def list_wallet_transactions(
             "input_count":  input_count,
             "output_count": output_count,
             "labels":       labels,
+            # False only for a send whose inputs are still unconfirmed_spent.
+            # Receives are only recorded once seen in a block, so they are
+            # confirmed by construction.
+            "confirmed":    confirmed,
         })
 
     rows.sort(key=lambda r: r["timestamp"], reverse=True)
