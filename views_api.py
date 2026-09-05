@@ -65,9 +65,9 @@ from .helpers.psbt_combine import combine_and_finalize
 from .helpers.electrum_client import ElectrumClient
 from .helpers.sweep import (
     build_sweep_transaction,
-    fetch_address_utxos,
     hrp_for as sweep_hrp_for,
     is_p2wpkh_for_network,
+    scan_addresses,
     sweep_address_for_key,
 )
 from .crud import (
@@ -2911,10 +2911,15 @@ async def _broadcast_via_mempool(tx_hex: str, network: str) -> str:
         return resp.text.strip()
 
 
-# ── sweep: plain P2WPKH address → this wallet's Silent Payment address ────────
+# ── sweep: plain P2WPKH addresses → this wallet's Silent Payment address ─────
 #
 # The doormat for services that can only pay a bech32 address. See
 # helpers/sweep.py for what this deliberately is not.
+
+# The client walks its own BIP-84 chain, so it decides how many addresses to ask
+# about. Cap it: each address costs two Fulcrum round trips, and a gap-limit walk
+# needs nowhere near this many.
+MAX_SWEEP_ADDRESSES = 50
 
 
 async def _sweep_wallet_or_403(wallet_id: str, key_info: WalletTypeInfo):
@@ -2945,27 +2950,41 @@ def _require_p2wpkh(address: str, network: str) -> None:
 @silnt_api_router.get("/api/v1/sweep/{wallet_id}")
 async def api_sweep_preview(
     wallet_id: str,
-    address: str = Query(..., description="The wallet's BIP-84 sweep address"),
+    address: list[str] = Query(
+        ..., description="BIP-84 sweep addresses to check, repeated"
+    ),
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
     """
-    What is currently sitting on the sweep address. The client derives the
-    address from its own seed, so the server is told one address and learns
-    nothing about any other.
+    Which of these addresses have been used, and what is unspent on them.
+
+    The client derives its own addresses and asks about a window of them, so the
+    server is told the addresses actually in play and cannot derive the next one
+    — which is the whole reason it is never given the xpub.
     """
     wallet = await _sweep_wallet_or_403(wallet_id, key_info)
-    _require_p2wpkh(address, wallet.network)
+    if not address:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST, detail="No addresses supplied."
+        )
+    if len(address) > MAX_SWEEP_ADDRESSES:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"At most {MAX_SWEEP_ADDRESSES} addresses per request.",
+        )
+    for a in address:
+        _require_p2wpkh(a, wallet.network)
+
     host, port, tls, _ = await _fulcrum_cfg(wallet.network)
     try:
         # Blocking socket client — keep it off the event loop.
-        res = await asyncio.to_thread(fetch_address_utxos, address, host, port, tls)
+        return await asyncio.to_thread(scan_addresses, address, host, port, tls)
     except Exception as e:
-        logger.warning(f"sweep preview failed for {address}: {e}")
+        logger.warning(f"sweep preview failed ({len(address)} addresses): {e}")
         raise HTTPException(
             status_code=HTTPStatus.BAD_GATEWAY,
             detail=f"Could not reach the chain index: {e}",
         )
-    return res
 
 
 @silnt_api_router.post(
@@ -2976,15 +2995,23 @@ async def api_sweep_build(
     key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
 ):
     """
-    Build and sign the sweep. The private key arrives with the request, is used
-    to sign, and is never stored — the same transient-key handling as /tx/build.
+    Build and sign the sweep. The private keys arrive with the request, are used
+    to sign, and are never stored — the same transient-key handling as /tx/build.
     The destination is not a parameter: it is always this wallet's own Silent
     Payment address, so a sweep cannot be aimed anywhere else.
+
+    The client sends keys only for addresses its preview showed holding coins,
+    which is normally one.
     """
     wallet = await _sweep_wallet_or_403(data.wallet_id, key_info)
-    if not data.sweep_key:
+    if not data.sweep_keys:
         raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST, detail="sweep_key is required."
+            status_code=HTTPStatus.BAD_REQUEST, detail="sweep_keys is required."
+        )
+    if len(data.sweep_keys) > MAX_SWEEP_ADDRESSES:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"At most {MAX_SWEEP_ADDRESSES} keys per sweep.",
         )
     if not wallet.sp_address:
         raise HTTPException(
@@ -2993,7 +3020,7 @@ async def api_sweep_build(
         )
 
     try:
-        address = sweep_address_for_key(data.sweep_key, wallet.network)
+        addresses = [sweep_address_for_key(k, wallet.network) for k in data.sweep_keys]
     except Exception:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST, detail="Invalid sweep key."
@@ -3001,9 +3028,9 @@ async def api_sweep_build(
 
     host, port, tls, _ = await _fulcrum_cfg(wallet.network)
     try:
-        found = await asyncio.to_thread(fetch_address_utxos, address, host, port, tls)
+        found = await asyncio.to_thread(scan_addresses, addresses, host, port, tls)
     except Exception as e:
-        logger.warning(f"sweep utxo fetch failed for {address}: {e}")
+        logger.warning(f"sweep utxo fetch failed ({len(addresses)} addresses): {e}")
         raise HTTPException(
             status_code=HTTPStatus.BAD_GATEWAY,
             detail=f"Could not reach the chain index: {e}",
@@ -3011,7 +3038,7 @@ async def api_sweep_build(
 
     try:
         built = build_sweep_transaction(
-            sweep_key_hex=data.sweep_key,
+            sweep_keys=data.sweep_keys,
             sp_address=wallet.sp_address,
             utxos=found["utxos"],
             fee_rate=data.fee_rate,

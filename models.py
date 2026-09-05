@@ -112,11 +112,13 @@ class BuildSweepRequest(BaseModel):
     """
     Sweep a plain BIP-84 address into the wallet's own Silent Payment address.
     There is no recipient field: the destination is always the wallet, so a
-    sweep cannot be pointed elsewhere. `sweep_key` is the WIF-less hex private
-    key for m/84'/coin'/0'/0/0, sent transiently for signing and never stored.
+    sweep cannot be pointed elsewhere. `sweep_keys` holds the raw hex private
+    keys for the m/84'/coin'/0'/0/i addresses that hold coins — normally one,
+    since the client only sends keys for addresses its preview showed funded.
+    Sent transiently for signing and never stored.
     """
     wallet_id: str
-    sweep_key: str
+    sweep_keys: list[str]
     fee_rate: float = 1
 
 

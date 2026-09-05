@@ -218,6 +218,20 @@ class ElectrumClient:
             raise RuntimeError(f"listunspent error: {r['error']}")
         return r.get("result", [])
 
+    def get_history(self, scripthash: str) -> list:
+        """
+        Every transaction this scripthash has ever appeared in.
+
+        Distinct from list_unspent, which only sees what is there NOW: an address
+        that received and was then emptied has no unspent outputs but does have
+        history. Anything walking a derivation chain must ask this, or it will
+        read a spent address as never-used and hand it out again.
+        """
+        r = self._call("blockchain.scripthash.get_history", [scripthash])
+        if "error" in r and r["error"]:
+            raise RuntimeError(f"get_history error: {r['error']}")
+        return r.get("result", [])
+
     def broadcast(self, tx_hex: str) -> str:
         """blockchain.transaction.broadcast -> returns txid (or raises with the
         node's reject reason, e.g. 'witness program hash mismatch')."""

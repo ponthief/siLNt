@@ -7,22 +7,21 @@ withdrawal, a payroll provider, a mining pool — none of them will send to an
 sp1… address, and none of them will for years. Without this the user has to
 withdraw to some other wallet and forward manually.
 
-What it is NOT: a second wallet. There is one address (m/84'/coin'/0'/0/0 — the
-same one the swap refund uses), it is not tracked in silnt.utxos, it never
-appears in coin control, and nothing here can spend a Silent Payment UTXO. It is
-a doormat: coins land on it, and the sweep moves all of them, in one
-single-input-type transaction, into the wallet proper.
+What it is NOT: a second wallet. These addresses are not tracked in silnt.utxos,
+never appear in coin control, and nothing here can spend a Silent Payment UTXO.
+It is a doormat: coins land on it, and the sweep moves all of them into the
+wallet proper in one single-input-type transaction.
 
-Address reuse is a real cost and it is deliberate. Tracking a chain of receive
-addresses would mean handing the server an xpub, which lets it derive and watch
-every address the user will ever have — exactly the surveillance property Silent
-Payments exists to remove. One reused address tells the server one address. The
-UI says so plainly.
+The addresses come from the standard BIP-84 external chain, m/84'/coin'/0'/0/i —
+the same chain a swap refund lands on. The client derives them, walks the chain
+to find the first unused one, and hands over only the addresses it wants
+checked. The server is never given the xpub: it learns the addresses actually
+used and cannot derive the next one, let alone every address the seed will ever
+produce.
 
-Key handling matches the rest of the wallet: the private key arrives with the
-request, is used to sign, and is never written down. It is derived on the device
-from the seed phrase at sweep time, because the BIP-84 branch is deliberately
-NOT stored in the device keystore.
+Key handling matches the rest of the wallet: private keys arrive with the
+request, are used to sign, and are never written down server-side. Only the keys
+for addresses that actually hold coins are ever sent — normally exactly one.
 """
 
 from __future__ import annotations
@@ -109,25 +108,13 @@ def estimate_fee(num_inputs: int, fee_rate: float) -> tuple[int, int]:
     return vsize, max(1, math.ceil(vsize * fee_rate))
 
 
-def fetch_address_utxos(
-    address: str, host: str, port: int, use_tls: bool = False
-) -> dict:
-    """
-    Every UTXO currently sitting on `address`, straight from Fulcrum.
-
-    Blocking — call it from a worker thread, not the event loop. Returns
-    confirmed and unconfirmed separately: a sweep only ever spends confirmed
-    coins, since an exchange withdrawal sitting in the mempool can still be
-    replaced, and rebuilding on top of it would just orphan the sweep.
-    """
+def _scan_one(client: ElectrumClient, address: str) -> dict:
+    """One address: has it ever been used, and what is unspent on it now."""
     sh = electrum_scripthash(address)
-    client = ElectrumClient(host, port, use_tls=use_tls)
-    try:
-        client.connect()
-        client.server_version()
-        unspent = client.list_unspent(sh)
-    finally:
-        client.close()
+    # get_history, not list_unspent, decides "used" — an address that received
+    # and was swept has no unspent outputs but must never be handed out again.
+    used = bool(client.get_history(sh))
+    unspent = client.list_unspent(sh) if used else []
 
     confirmed: list[dict] = []
     confirmed_sats = 0
@@ -141,6 +128,7 @@ def fetch_address_utxos(
         confirmed_sats += value
         confirmed.append(
             {
+                "address": address,
                 "txid": u.get("tx_hash"),
                 "vout": int(u.get("tx_pos")),
                 "amount": value,
@@ -148,35 +136,84 @@ def fetch_address_utxos(
             }
         )
 
-    # Deterministic order, so a preview and the build that follows it agree on
-    # which coins they are talking about.
-    confirmed.sort(key=lambda u: (u["txid"], u["vout"]))
     return {
         "address": address,
+        "used": used,
         "utxos": confirmed,
         "confirmed_sats": confirmed_sats,
         "unconfirmed_sats": unconfirmed_sats,
     }
 
 
+def scan_addresses(
+    addresses: list[str], host: str, port: int, use_tls: bool = False
+) -> dict:
+    """
+    Walk a batch of addresses on one Fulcrum connection.
+
+    Blocking — call it from a worker thread, not the event loop. Confirmed and
+    unconfirmed are kept apart: a sweep only ever spends confirmed coins, since
+    an exchange withdrawal sitting in the mempool can still be replaced, and a
+    sweep built on top of it would be orphaned with it.
+    """
+    client = ElectrumClient(host, port, use_tls=use_tls)
+    try:
+        client.connect()
+        client.server_version()
+        per_address = [_scan_one(client, a) for a in addresses]
+    finally:
+        client.close()
+
+    utxos = [u for a in per_address for u in a["utxos"]]
+    # Deterministic order, so a preview and the build that follows it agree on
+    # which coins they are talking about.
+    utxos.sort(key=lambda u: (u["txid"], u["vout"]))
+    return {
+        "addresses": per_address,
+        "utxos": utxos,
+        "confirmed_sats": sum(a["confirmed_sats"] for a in per_address),
+        "unconfirmed_sats": sum(a["unconfirmed_sats"] for a in per_address),
+    }
+
+
 def build_sweep_transaction(
-    sweep_key_hex: str,
+    sweep_keys: list[str],
     sp_address: str,
     utxos: list[dict],
     fee_rate: float,
     network: str,
 ) -> dict:
     """
-    Spend every UTXO in `utxos` to `sp_address` in one transaction. No change
-    output: the sweep empties the address by definition, and the fee comes out
-    of the total.
+    Spend every UTXO in `utxos` to `sp_address` in one transaction.
+
+    `sweep_keys` are the private keys for the addresses those UTXOs sit on, in
+    any order — each input is matched to its key by address. Rotating the
+    receive address means a sweep can span several of them, so this is a list,
+    though in practice it is usually one.
+
+    No change output: a sweep empties the addresses by definition, and the fee
+    comes out of the total.
     """
     if not utxos:
-        raise ValueError("Nothing to sweep — the address holds no confirmed coins.")
+        raise ValueError("Nothing to sweep — no confirmed coins on these addresses.")
+    if not sweep_keys:
+        raise ValueError("No keys supplied to sign the sweep.")
 
-    priv = ec.PrivateKey(bytes.fromhex(sweep_key_hex))
-    pub = priv.get_public_key()
-    spk = script.p2wpkh(pub)
+    # address → (key, pubkey), so each input is signed with the key that
+    # actually controls it.
+    by_address: dict[str, tuple] = {}
+    for key_hex in sweep_keys:
+        priv = ec.PrivateKey(bytes.fromhex(key_hex))
+        pub = priv.get_public_key()
+        by_address[script.p2wpkh(pub).address(_net(network))] = (priv, pub)
+
+    missing = {u.get("address") for u in utxos} - set(by_address)
+    if missing:
+        # Refuse rather than sign what we can: a partial sweep would leave coins
+        # behind while the user is told the address was emptied.
+        raise ValueError(
+            f"No key supplied for {len(missing)} address(es) holding coins."
+        )
 
     total_input = sum(int(u["amount"]) for u in utxos)
     vsize, fee = estimate_fee(len(utxos), fee_rate)
@@ -192,13 +229,11 @@ def build_sweep_transaction(
     # deterministic transaction is easier to reason about after the fact.
     ordered = sorted(utxos, key=lambda u: (u["txid"], int(u.get("vout", 0))))
 
-    # Every input here is P2WPKH controlled by the one sweep key, so every input
-    # contributes that same key UNNEGATED — see sp_scriptpubkey_from_inputs on
-    # why the taproot flag matters.
-    priv_int = int.from_bytes(priv.secret, "big")
+    # Every input is P2WPKH, so every key contributes UNNEGATED — see
+    # sp_scriptpubkey_from_inputs on why the taproot flag matters.
     sp_inputs = [
         (
-            priv_int,
+            int.from_bytes(by_address[u["address"]][0].secret, "big"),
             bytes.fromhex(u["txid"])[::-1] + int(u.get("vout", 0)).to_bytes(4, "little"),
             False,
         )
@@ -214,19 +249,19 @@ def build_sweep_transaction(
         vout=[TransactionOutput(amount, out_script)],
     )
 
-    # BIP-143: the scriptCode for a P2WPKH input is its P2PKH equivalent, not the
-    # witness program.
-    script_code = script.p2pkh_from_p2wpkh(spk)
     for i, u in enumerate(ordered):
+        priv, pub = by_address[u["address"]]
+        # BIP-143: the scriptCode for a P2WPKH input is its P2PKH equivalent,
+        # not the witness program.
+        script_code = script.p2pkh_from_p2wpkh(script.p2wpkh(pub))
         sighash = tx.sighash_segwit(i, script_code, int(u["amount"]), SIGHASH.ALL)
-        tx.vin[i].witness = script.witness_p2wpkh(
-            priv.sign(sighash), pub, SIGHASH.ALL
-        )
+        tx.vin[i].witness = script.witness_p2wpkh(priv.sign(sighash), pub, SIGHASH.ALL)
 
     tx_hex = tx.serialize().hex()
+    swept = sorted({u["address"] for u in ordered})
     logger.info(
-        f"Built sweep of {len(ordered)} input(s), {total_input} sats "
-        f"→ {amount} sats to SP, fee {fee} sats ({vsize} vB)"
+        f"Built sweep of {len(ordered)} input(s) across {len(swept)} address(es), "
+        f"{total_input} sats → {amount} sats to SP, fee {fee} sats ({vsize} vB)"
     )
     return {
         "tx_hex": tx_hex,
@@ -236,5 +271,5 @@ def build_sweep_transaction(
         "vsize": vsize,
         "fee_rate_used": fee_rate,
         "input_count": len(ordered),
-        "sweep_address": spk.address(_net(network)),
+        "swept_addresses": swept,
     }
