@@ -1042,7 +1042,12 @@ async def get_wallet_receives(wallet_id: str) -> list[dict]:
 async def get_wallet_sends(wallet_id: str) -> list[dict]:
     """
     Group all UTXOs we've spent by spent_in_txid. Each row = one tx we sent.
-    Returns: [{txid, spent_at, input_sum, input_count}, ...]
+    Returns: [{txid, spent_at, input_sum, input_count, pending_inputs}, ...]
+
+    pending_inputs counts inputs still in 'unconfirmed_spent'. Broadcast marks
+    them that way immediately and a scan flips them to 'spent' once the tx is
+    mined, so a non-zero count means the send has not confirmed yet — which is
+    what tells the wallet UI to show it as pending.
     """
     rows = await db.fetchall(
         """
@@ -1050,7 +1055,9 @@ async def get_wallet_sends(wallet_id: str) -> list[dict]:
             spent_in_txid              AS txid,
             MIN(spent_at)              AS spent_at,
             SUM(amount)                AS input_sum,
-            COUNT(*)                   AS input_count
+            COUNT(*)                   AS input_count,
+            SUM(CASE WHEN utxo_state = 'unconfirmed_spent' THEN 1 ELSE 0 END)
+                                       AS pending_inputs
         FROM silnt.utxos
         WHERE wallet_id = :wid AND spent_in_txid IS NOT NULL
         GROUP BY spent_in_txid
@@ -1063,6 +1070,7 @@ async def get_wallet_sends(wallet_id: str) -> list[dict]:
             "spent_at":    int(r["spent_at"] or 0),
             "input_sum":   int(r["input_sum"] or 0),
             "input_count": int(r["input_count"] or 0),
+            "pending_inputs": int(r["pending_inputs"] or 0),
         }
         for r in rows
     ]
