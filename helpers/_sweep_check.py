@@ -131,25 +131,35 @@ EXPECTED = "5120b0e1e857769fc909eb0515a8965ae827d7f99c9c97cb2b35a1bf6e71722f8006
 ok("output unchanged", frozen == EXPECTED, f"got {frozen}")
 
 # ── 3. sweep round trip ──────────────────────────────────────────────────────
-print("\n3. sweep round trip — the receiver scanner finds the output")
-sweep_key = root.derive("m/84'/1'/0'/0/0").key
+# Two DIFFERENT addresses on the chain, because rotating the receive address
+# means a sweep routinely spans more than one — and a single-key sum would still
+# pass a same-key test while being wrong here.
+print("\n3. sweep round trip across two chain indices")
+keys = [root.derive(f"m/84'/1'/0'/0/{i}").key for i in (0, 1)]
+addrs = [script.p2wpkh(k.get_public_key()).address(NETWORKS["test"]) for k in keys]
+ok("the two indices give different addresses", addrs[0] != addrs[1])
+
 utxos = [
-    {"txid": "cc" * 32, "vout": 0, "amount": 40_000, "height": 100},
-    {"txid": "dd" * 32, "vout": 3, "amount": 60_000, "height": 101},
+    {"address": addrs[0], "txid": "cc" * 32, "vout": 0, "amount": 40_000, "height": 100},
+    {"address": addrs[1], "txid": "dd" * 32, "vout": 3, "amount": 60_000, "height": 101},
 ]
-built = _s.build_sweep_transaction(sweep_key.secret.hex(), SP_ADDR, utxos, 5.0, "signet")
+built = _s.build_sweep_transaction(
+    [k.secret.hex() for k in keys], SP_ADDR, utxos, 5.0, "signet"
+)
 tx = Transaction.read_from(BytesIO(bytes.fromhex(built["tx_hex"])))
 
 ok("fee accounting balances", built["amount"] + built["fee"] == built["total_input"])
 ok("exactly one output", len(tx.vout) == 1)
 ok("output is P2TR", tx.vout[0].script_pubkey.data[:2] == bytes([0x51, 0x20]))
+ok("both addresses reported swept", len(built["swept_addresses"]) == 2)
 
 # Rebuild the per-transaction tweak the way the BlindBit indexer would, then
 # hand it to the receiver scanner — a code path entirely separate from the
 # sender's.
+ordered = sorted(utxos, key=lambda u: (u["txid"], int(u["vout"])))
+by_address = {a: k for a, k in zip(addrs, keys)}
 outpoints = [bytes(reversed(v.txid)) + v.vout.to_bytes(4, "little") for v in tx.vin]
-priv_int = int.from_bytes(sweep_key.secret, "big")
-a_sum = (priv_int * len(tx.vin)) % N
+a_sum = sum(int.from_bytes(by_address[u["address"]].secret, "big") for u in ordered) % N
 A_sum = coincurve.PublicKey.from_secret(a_sum.to_bytes(32, "big")).format(True)
 input_hash = tagged("BIP0352/Inputs", min(outpoints) + A_sum)
 
@@ -158,28 +168,39 @@ found = _sc.receiver_scan_transaction(
 )
 ok("scanner finds the swept output", len(found) == 1)
 
+# A key for an address that holds coins must never be silently skipped: a
+# partial sweep leaves money behind while reporting the addresses emptied.
+try:
+    _s.build_sweep_transaction([keys[0].secret.hex()], SP_ADDR, utxos, 5.0, "signet")
+    ok("a missing key is refused, not skipped", False)
+except ValueError:
+    ok("a missing key is refused, not skipped", True)
+
 # ── 4. signatures ────────────────────────────────────────────────────────────
 print("\n4. BIP-143 signatures")
-script_code = script.p2pkh_from_p2wpkh(script.p2wpkh(sweep_key.get_public_key()))
-ordered = sorted(utxos, key=lambda u: (u["txid"], int(u["vout"])))
 valid = True
 for i, u in enumerate(ordered):
+    key = by_address[u["address"]]
     items = tx.vin[i].witness.items
     if len(items) != 2 or items[0][-1] != SIGHASH.ALL:
         valid = False
         break
+    script_code = script.p2pkh_from_p2wpkh(script.p2wpkh(key.get_public_key()))
     h = tx.sighash_segwit(i, script_code, u["amount"], SIGHASH.ALL)
-    if not sweep_key.get_public_key().verify(ec.Signature.parse(items[0][:-1]), h):
+    if not key.get_public_key().verify(ec.Signature.parse(items[0][:-1]), h):
         valid = False
-    if items[1] != sweep_key.get_public_key().sec():
+    # Each input must carry ITS OWN key, not whichever was first in the list.
+    if items[1] != key.get_public_key().sec():
         valid = False
-ok("every witness is [sig|SIGHASH_ALL, pubkey] and verifies", valid)
+ok("each witness is [sig|SIGHASH_ALL, pubkey] for its own input's key", valid)
 
 # ── 5. the taproot flag ──────────────────────────────────────────────────────
 print("\n5. is_taproot is load-bearing")
-wrong = _w.sp_scriptpubkey_from_inputs(
-    SP_ADDR, [(N - priv_int, op, False) for op in outpoints]
-)
+wrong_inputs = [
+    (N - int.from_bytes(by_address[u["address"]].secret, "big"), op, False)
+    for u, op in zip(ordered, outpoints)
+]
+wrong = _w.sp_scriptpubkey_from_inputs(SP_ADDR, wrong_inputs)
 wrong_found = _sc.receiver_scan_transaction(
     SCAN, SPEND_PUB, [], [wrong[2:]], A_sum, input_hash
 )
