@@ -1867,7 +1867,18 @@ async def api_update_utxo_label(
     # Update only rows in that wallet — never globally by txid
     updated = await update_utxo_label_by_txid(txid, data.label, wallet_id=data.wallet_id)
     if updated == 0:
-        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="UTXO not found in this wallet.")
+        # A label lives on a coin this wallet owns, found by funding txid. The
+        # only output a send gives back is its change, which does not exist
+        # until the send confirms and a scan records it — so this is what an
+        # attempt to label an unconfirmed send hits. Say that, rather than
+        # "UTXO not found", which reads as data loss.
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail=(
+                "This wallet has no coin from that transaction yet. A send can "
+                "be labelled once it confirms and its change is scanned."
+            ),
+        )
 
     return {"txid": txid, "label": data.label, "updated": updated}
 
