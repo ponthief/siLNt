@@ -1076,6 +1076,43 @@ async def get_wallet_sends(wallet_id: str) -> list[dict]:
     ]
 
 
+async def list_pending_send_txs() -> list[dict]:
+    """
+    Every send that is broadcast but not yet confirmed, across all wallets.
+
+    One row per (wallet, spending tx) with the owning user and network, which is
+    all the background sweep needs: the confirmation check is a single txid
+    lookup against mempool/esplora.
+
+    Note this is NOT gated on the background-scan opt-in. That opt-in exists
+    because scanning requires uploading a scan key; confirming a send the user
+    themselves broadcast requires no key material at all, only a public txid, so
+    there is nothing extra to consent to.
+    """
+    rows = await db.fetchall(
+        """
+        SELECT DISTINCT
+            u.wallet_id      AS wallet_id,
+            u.spent_in_txid  AS txid,
+            w."user"         AS user_id,
+            w.network        AS network
+        FROM silnt.utxos u
+        JOIN silnt.wallets w ON w.id = u.wallet_id
+        WHERE u.utxo_state = 'unconfirmed_spent'
+          AND u.spent_in_txid IS NOT NULL
+        """,
+    )
+    return [
+        {
+            "wallet_id": r["wallet_id"],
+            "txid":      r["txid"],
+            "user_id":   r["user_id"],
+            "network":   r["network"] or "mainnet",
+        }
+        for r in rows
+    ]
+
+
 async def get_utxos_for_txid(wallet_id: str, txid: str) -> list[dict]:
     """All UTXOs we own at a given funding txid (for the detail view)."""
     rows = await db.fetchall(
