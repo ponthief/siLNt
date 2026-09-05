@@ -414,6 +414,26 @@ code {
 .warnbox strong { color: var(--ink); font-weight: 600; }
 .warnbox p + p { margin-top: 10px; }
 
+/* ── donation address ────────────────────────────────────────────────────── */
+.donate {
+  margin-top: 18px; padding: 20px 22px;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 20px; flex-wrap: wrap;
+  border: 1px solid var(--border-bright); border-radius: var(--radius);
+  background: var(--panel); box-shadow: var(--shadow);
+}
+.dn-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+/* The address is the thing to read and copy, so it gets the mono treatment and
+   is allowed to break rather than push the panel wide on a phone. */
+.dn-addr {
+  font-family: var(--mono); font-size: clamp(15px, 2.4vw, 18px); font-weight: 500;
+  color: var(--ink); word-break: break-all;
+}
+.donate .ct-k { font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--orange); }
+.donate .ct-m { font-size: 12.5px; color: var(--faint); max-width: 56ch; }
+.dn-copy { flex-shrink: 0; }
+@media (max-width: 560px) { .dn-copy { width: 100%; justify-content: center; } }
+
 /* ── closing + footer ────────────────────────────────────────────────────── */
 .final { text-align: center; border: 1px solid var(--border-bright); border-radius: 16px; padding: 42px 26px; background: var(--panel); box-shadow: var(--shadow); }
 .final h2 { font-size: clamp(24px, 3.2vw, 31px); font-weight: 600; margin-bottom: 11px; }

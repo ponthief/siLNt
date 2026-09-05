@@ -17,7 +17,7 @@
 <!-- ?v= is a cache buster: styles.css is served with max-age=14400 and cached at
      the CDN edge, so BUMP THIS NUMBER whenever styles.css changes or the new
      styles will not reach visitors for up to four hours. -->
-<link rel="stylesheet" href="styles.css?v=4">
+<link rel="stylesheet" href="styles.css?v=5">
 </head>
 <body>
 
@@ -133,6 +133,14 @@
       <span class="ct-m">Ask a question, get a reply</span>
     </a>
   </div>
+
+  <div class="donate">
+    <div class="dn-text">
+      <span class="ct-k">Donate</span>
+      <div class="dn-addr" id="donate-addr">dominus@thrilla.me</div>
+      <span class="ct-m">A BitMail name, not an email — paste it into Thrilla, or any wallet that resolves BIP&#8209;353, and it becomes a fresh Silent Payment address.</span>
+    </div>
+  </div>
 </section>
 
 <section class="wrap">
@@ -182,6 +190,40 @@
     });
     menu.querySelectorAll('a').forEach(function (a) {
       a.addEventListener('click', function () { menu.open = false; });
+    });
+  })();
+  // Copy-to-clipboard for the donation address. Registered from script so that
+  // with JavaScript off the button simply is not there, rather than sitting
+  // inert next to text the reader can select anyway.
+  (function () {
+    document.querySelectorAll('.donate').forEach(function (panel) {
+      var target = panel.querySelector('.dn-addr');
+      if (!target) return;
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-ghost btn-sm dn-copy';
+      btn.textContent = 'Copy';
+      panel.appendChild(btn);
+      btn.addEventListener('click', function () {
+        var text = target.textContent.trim();
+        var done = function () {
+          btn.textContent = 'Copied';
+          setTimeout(function () { btn.textContent = 'Copy'; }, 1600);
+        };
+        if (navigator.clipboard && window.isSecureContext) {
+          navigator.clipboard.writeText(text).then(done, select);
+        } else {
+          select();
+        }
+        function select() {
+          var r = document.createRange();
+          r.selectNodeContents(target);
+          var sel = window.getSelection();
+          sel.removeAllRanges(); sel.addRange(r);
+          btn.textContent = 'Press \u2318/Ctrl+C';
+          setTimeout(function () { btn.textContent = 'Copy'; }, 2200);
+        }
+      });
     });
   })();
 </script>
