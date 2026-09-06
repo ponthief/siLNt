@@ -63,12 +63,12 @@ from .helpers.payjoin_wallet import sync_wallet, next_unused_receive_index
 from .helpers.payjoin_merge import build_merged_payjoin
 from .helpers.psbt_combine import combine_and_finalize
 from .helpers.electrum_client import ElectrumClient
-from .helpers.sweep import (
-    build_sweep_transaction,
-    hrp_for as sweep_hrp_for,
+from .helpers.plain import (
+    build_plain_transaction,
+    hrp_for as plain_hrp_for,
     is_p2wpkh_for_network,
     scan_addresses,
-    sweep_address_for_key,
+    plain_address_for_key,
 )
 from .crud import (
     get_silnt_wallets,
@@ -205,8 +205,8 @@ from .models import (
     WalletAccount,
     BuildTxRequest,
     BroadcastTxRequest,
-    BuildSweepRequest,
-    BroadcastSweepRequest,
+    BroadcastPlainRequest,
+    SpendPlainRequest,
     Config,
     ScanWalletRequest,
     SaveAddressRequest,
@@ -2911,18 +2911,20 @@ async def _broadcast_via_mempool(tx_hex: str, network: str) -> str:
         return resp.text.strip()
 
 
-# ── sweep: plain P2WPKH addresses → this wallet's Silent Payment address ─────
+# ── plain addresses: a bech32 pocket beside the Silent Payments wallet ───────
 #
-# The doormat for services that can only pay a bech32 address. See
-# helpers/sweep.py for what this deliberately is not.
+# For being paid by, and paying, anything that cannot handle a Silent Payments
+# address. The coins live on their own BIP-84 chain and are spent straight out of
+# it — they never enter the SP wallet, which is what keeps them unlinked from the
+# rest of the balance. See helpers/plain.py.
 
 # The client walks its own BIP-84 chain, so it decides how many addresses to ask
 # about. Cap it: each address costs two Fulcrum round trips, and a gap-limit walk
 # needs nowhere near this many.
-MAX_SWEEP_ADDRESSES = 50
+MAX_PLAIN_ADDRESSES = 50
 
 
-async def _sweep_wallet_or_403(wallet_id: str, key_info: WalletTypeInfo):
+async def _plain_wallet_or_403(wallet_id: str, key_info: WalletTypeInfo):
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet:
         raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet not found.")
@@ -2941,17 +2943,17 @@ def _require_p2wpkh(address: str, network: str) -> None:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
             detail=(
-                f"Not a native segwit ({sweep_hrp_for(network)}1q…) address for "
+                f"Not a native segwit ({plain_hrp_for(network)}1q…) address for "
                 f"this network."
             ),
         )
 
 
-@silnt_api_router.get("/api/v1/sweep/{wallet_id}")
-async def api_sweep_preview(
+@silnt_api_router.get("/api/v1/plain/{wallet_id}")
+async def api_plain_preview(
     wallet_id: str,
     address: list[str] = Query(
-        ..., description="BIP-84 sweep addresses to check, repeated"
+        ..., description="BIP-84 plain addresses to check, repeated"
     ),
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
@@ -2962,15 +2964,15 @@ async def api_sweep_preview(
     server is told the addresses actually in play and cannot derive the next one
     — which is the whole reason it is never given the xpub.
     """
-    wallet = await _sweep_wallet_or_403(wallet_id, key_info)
+    wallet = await _plain_wallet_or_403(wallet_id, key_info)
     if not address:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST, detail="No addresses supplied."
         )
-    if len(address) > MAX_SWEEP_ADDRESSES:
+    if len(address) > MAX_PLAIN_ADDRESSES:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
-            detail=f"At most {MAX_SWEEP_ADDRESSES} addresses per request.",
+            detail=f"At most {MAX_PLAIN_ADDRESSES} addresses per request.",
         )
     for a in address:
         _require_p2wpkh(a, wallet.network)
@@ -2980,7 +2982,7 @@ async def api_sweep_preview(
         # Blocking socket client — keep it off the event loop.
         return await asyncio.to_thread(scan_addresses, address, host, port, tls)
     except Exception as e:
-        logger.warning(f"sweep preview failed ({len(address)} addresses): {e}")
+        logger.warning(f"plain preview failed ({len(address)} addresses): {e}")
         raise HTTPException(
             status_code=HTTPStatus.BAD_GATEWAY,
             detail=f"Could not reach the chain index: {e}",
@@ -2988,90 +2990,88 @@ async def api_sweep_preview(
 
 
 @silnt_api_router.post(
-    "/api/v1/sweep/build", dependencies=[Depends(require_trusted_device_admin)]
+    "/api/v1/plain/spend", dependencies=[Depends(require_trusted_device_admin)]
 )
-async def api_sweep_build(
-    data: BuildSweepRequest,
+async def api_plain_spend(
+    data: SpendPlainRequest,
     key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
 ):
     """
-    Build and sign the sweep. The private keys arrive with the request, are used
-    to sign, and are never stored — the same transient-key handling as /tx/build.
-    The destination is not a parameter: it is always this wallet's own Silent
-    Payment address, so a sweep cannot be aimed anywhere else.
+    Pay someone straight out of the plain BIP-84 chain.
 
-    The client sends keys only for addresses its preview showed holding coins,
-    which is normally one.
+    The coins go straight from the plain chain to wherever they are going,
+    without passing through the Silent Payments wallet. Paying the user's own SP
+    address is allowed and is simply how coins move into that wallet — it is a
+    destination like any other, not a separate mode.
     """
-    wallet = await _sweep_wallet_or_403(data.wallet_id, key_info)
-    if not data.sweep_keys:
+    wallet = await _plain_wallet_or_403(data.wallet_id, key_info)
+    if not data.keys:
         raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST, detail="sweep_keys is required."
+            status_code=HTTPStatus.BAD_REQUEST, detail="keys is required."
         )
-    if len(data.sweep_keys) > MAX_SWEEP_ADDRESSES:
+    if len(data.keys) > MAX_PLAIN_ADDRESSES:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
-            detail=f"At most {MAX_SWEEP_ADDRESSES} keys per sweep.",
+            detail=f"At most {MAX_PLAIN_ADDRESSES} keys per spend.",
         )
-    if not wallet.sp_address:
+    if not (data.destination or "").strip():
         raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST,
-            detail="This wallet has no Silent Payment address to sweep into.",
+            status_code=HTTPStatus.BAD_REQUEST, detail="A destination is required."
         )
 
     try:
-        addresses = [sweep_address_for_key(k, wallet.network) for k in data.sweep_keys]
+        addresses = [plain_address_for_key(k, wallet.network) for k in data.keys]
     except Exception:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST, detail="Invalid sweep key."
-        )
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Invalid key.")
 
     host, port, tls, _ = await _fulcrum_cfg(wallet.network)
     try:
         found = await asyncio.to_thread(scan_addresses, addresses, host, port, tls)
     except Exception as e:
-        logger.warning(f"sweep utxo fetch failed ({len(addresses)} addresses): {e}")
+        logger.warning(f"pool spend utxo fetch failed ({len(addresses)} addresses): {e}")
         raise HTTPException(
             status_code=HTTPStatus.BAD_GATEWAY,
             detail=f"Could not reach the chain index: {e}",
         )
 
     try:
-        built = build_sweep_transaction(
-            sweep_keys=data.sweep_keys,
-            sp_address=wallet.sp_address,
+        built = build_plain_transaction(
+            keys=data.keys,
+            destination=data.destination.strip(),
             utxos=found["utxos"],
             fee_rate=data.fee_rate,
             network=wallet.network,
+            amount=data.amount,
+            change_address=data.change_address,
         )
     except ValueError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
     except Exception as e:
-        logger.error(f"sweep build failed: {e}")
+        logger.error(f"pool spend build failed: {e}")
         raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST, detail=f"Could not build the sweep: {e}"
+            status_code=HTTPStatus.BAD_REQUEST, detail=f"Could not build: {e}"
         )
 
     built["unconfirmed_sats"] = found["unconfirmed_sats"]
+    built["destination"] = data.destination.strip()
     return built
 
 
 @silnt_api_router.post(
-    "/api/v1/sweep/broadcast", dependencies=[Depends(require_trusted_device_admin)]
+    "/api/v1/plain/broadcast", dependencies=[Depends(require_trusted_device_admin)]
 )
-async def api_sweep_broadcast(
-    data: BroadcastSweepRequest,
+async def api_plain_broadcast(
+    data: BroadcastPlainRequest,
     key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
 ):
     """
-    Broadcast a built sweep. Separate from /tx/broadcast because a sweep spends
-    coins the wallet never owned in silnt.utxos — there are no input UTXOs to
-    mark spent, and the output only becomes visible after the scan that follows
-    its first confirmation.
+    Broadcast a built plain-chain transaction. Separate from /tx/broadcast
+    because these coins were never in silnt.utxos — there are no input UTXOs to
+    mark spent, and nothing for the wallet's transaction list to record.
     """
-    wallet = await _sweep_wallet_or_403(data.wallet_id, key_info)
+    wallet = await _plain_wallet_or_403(data.wallet_id, key_info)
     txid = await _broadcast_via_mempool(data.tx_hex, wallet.network)
-    logger.info(f"Broadcast sweep {txid} into wallet {data.wallet_id}")
+    logger.info(f"Broadcast plain-chain tx {txid} for wallet {data.wallet_id}")
     return {"txid": txid}
 
 

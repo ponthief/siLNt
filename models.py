@@ -108,21 +108,28 @@ class BuildTxRequest(BaseModel):
     scan_secret:  str
 
 
-class BuildSweepRequest(BaseModel):
+class SpendPlainRequest(BaseModel):
     """
-    Sweep a plain BIP-84 address into the wallet's own Silent Payment address.
-    There is no recipient field: the destination is always the wallet, so a
-    sweep cannot be pointed elsewhere. `sweep_keys` holds the raw hex private
-    keys for the m/84'/coin'/0'/0/i addresses that hold coins — normally one,
-    since the client only sends keys for addresses its preview showed funded.
-    Sent transiently for signing and never stored.
+    Pay out of the plain BIP-84 chain. The coins go straight from there to the
+    destination without entering the Silent Payments wallet — one transaction
+    rather than two, and nothing ties them to the rest of the balance.
+
+    `keys` are the raw hex private keys for the m/84'/coin'/0'/0/i addresses
+    being spent, sent transiently for signing and never stored. `amount` is in
+    sats; omit it to send everything on those addresses. `change_address` is
+    required when sending a specific amount and must be on the same chain — the
+    server refuses anything else, so a malformed request cannot route the
+    remainder elsewhere.
     """
     wallet_id: str
-    sweep_keys: list[str]
+    keys: list[str]
+    destination: str
+    amount: Optional[int] = None
+    change_address: Optional[str] = None
     fee_rate: float = 1
 
 
-class BroadcastSweepRequest(BaseModel):
+class BroadcastPlainRequest(BaseModel):
     wallet_id: str
     tx_hex: str
 
