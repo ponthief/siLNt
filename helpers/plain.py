@@ -150,11 +150,16 @@ def _scan_one(client: ElectrumClient, address: str) -> dict:
     confirmed: list[dict] = []
     confirmed_sats = 0
     unconfirmed_sats = 0
+    # Counted as well as summed. Several payments to one address are one address
+    # balance, which is correct but tells the user nothing about how many arrived
+    # — and while they are unconfirmed the total is all they have to go on.
+    unconfirmed_count = 0
     for u in unspent:
         height = int(u.get("height", 0) or 0)
         value = int(u.get("value", 0) or 0)
         if height <= 0:
             unconfirmed_sats += value
+            unconfirmed_count += 1
             continue
         confirmed_sats += value
         confirmed.append(
@@ -173,6 +178,7 @@ def _scan_one(client: ElectrumClient, address: str) -> dict:
         "utxos": confirmed,
         "confirmed_sats": confirmed_sats,
         "unconfirmed_sats": unconfirmed_sats,
+        "unconfirmed_count": unconfirmed_count,
     }
 
 
@@ -204,6 +210,7 @@ def scan_addresses(
         "utxos": utxos,
         "confirmed_sats": sum(a["confirmed_sats"] for a in per_address),
         "unconfirmed_sats": sum(a["unconfirmed_sats"] for a in per_address),
+        "unconfirmed_count": sum(a["unconfirmed_count"] for a in per_address),
     }
 
 
