@@ -8,6 +8,8 @@ from ..crud import (
     get_utxos_for_txid,
     get_utxos_spent_in_tx,
     get_owned_pubkeys,
+    list_plain_incoming,
+    clear_plain_incoming,
 )
 
 
@@ -59,6 +61,20 @@ async def list_wallet_transactions(
     receives = {r["txid"]: r for r in await get_wallet_receives(wallet_id)}
     sends    = {s["txid"]: s for s in await get_wallet_sends(wallet_id)}
 
+    # Plain-chain payments the wallet has made to its OWN Silent Payments
+    # address, recorded at broadcast. Until the confirming block is scanned they
+    # exist nowhere else: no wallet-owned input was spent, so there is no send,
+    # and the output has not been found yet, so there is no receive. Reporting
+    # them here is what lets a payment made on one device show up on another.
+    #
+    # The scanned receive supersedes them the moment it lands, so anything now
+    # present as a real row is deleted rather than merged.
+    in_flight = await list_plain_incoming(wallet_id)
+    superseded = [p["txid"] for p in in_flight if p["txid"] in receives]
+    if superseded:
+        await clear_plain_incoming(superseded)
+    pending_in = {p["txid"]: p for p in in_flight if p["txid"] not in receives}
+
     txids = set(receives) | set(sends)
     rows = []
     for txid in txids:
@@ -104,6 +120,22 @@ async def list_wallet_transactions(
             # Receives are only recorded once seen in a block, so they are
             # confirmed by construction.
             "confirmed":    confirmed,
+        })
+
+    for txid, p in pending_in.items():
+        rows.append({
+            "kind":         "receive",
+            "txid":         txid,
+            "timestamp":    p["timestamp"],
+            "amount_sats":  p["amount"],
+            "input_sum":    0,
+            "output_sum":   p["amount"],
+            "input_count":  0,
+            "output_count": 1,
+            "labels":       [],
+            # The one receive that CAN be unconfirmed: every other one is
+            # recorded by a scan, which only ever sees mined blocks.
+            "confirmed":    False,
         })
 
     rows.sort(key=lambda r: r["timestamp"], reverse=True)

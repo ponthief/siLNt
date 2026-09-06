@@ -77,6 +77,10 @@ async def delete_silnt_wallet(wallet_id: str) -> None:
         "DELETE FROM silnt.background_scan WHERE wallet_id = :id",
         {"id": wallet_id},
     )
+    await db.execute(
+        "DELETE FROM silnt.plain_incoming WHERE wallet_id = :id",
+        {"id": wallet_id},
+    )
 
 
 # ── Background scanning (opt-in "Remote Scanner") ─────────────────────────────
@@ -90,6 +94,54 @@ async def enable_background_scan(wallet_id: str, scan_secret_hex: str) -> None:
            ON CONFLICT (wallet_id) DO UPDATE SET scan_secret = EXCLUDED.scan_secret""",
         {"wid": wallet_id, "sk": enc},
     )
+
+
+# ── Plain-chain payments into this wallet (see migrations.m027) ──────────────
+# Only ever self-payments: coins moving from the plain BIP-84 chain into the
+# wallet's own Silent Payments address. Recorded at broadcast purely so the
+# user's other devices can see one in flight — the server learns nothing here
+# that the scan is not about to tell it anyway.
+
+# A transaction that never confirms should not sit in the list for ever.
+PLAIN_INCOMING_TTL_SECONDS = 24 * 60 * 60
+
+
+async def record_plain_incoming(wallet_id: str, txid: str, amount: int) -> None:
+    await db.execute(
+        """INSERT INTO silnt.plain_incoming (txid, wallet_id, amount, created_at)
+           VALUES (:txid, :wid, :amt, :ts)
+           ON CONFLICT (txid) DO NOTHING""",
+        {"txid": txid, "wid": wallet_id, "amt": int(amount), "ts": int(time.time())},
+    )
+
+
+async def list_plain_incoming(wallet_id: str) -> list[dict]:
+    """In-flight self-payments for this wallet, newest first, TTL applied."""
+    rows = await db.fetchall(
+        "SELECT txid, amount, created_at FROM silnt.plain_incoming "
+        "WHERE wallet_id = :wid ORDER BY created_at DESC",
+        {"wid": wallet_id},
+    )
+    cutoff = int(time.time()) - PLAIN_INCOMING_TTL_SECONDS
+    return [
+        {
+            "txid": r["txid"],
+            "amount": int(r["amount"] or 0),
+            "timestamp": int(r["created_at"] or 0),
+        }
+        for r in (rows or [])
+        if int(r["created_at"] or 0) >= cutoff
+    ]
+
+
+async def clear_plain_incoming(txids: list[str]) -> None:
+    """Drop rows the scan has now superseded — the receive is authoritative."""
+    if not txids:
+        return
+    for txid in txids:
+        await db.execute(
+            "DELETE FROM silnt.plain_incoming WHERE txid = :txid", {"txid": txid}
+        )
 
 
 async def disable_background_scan(wallet_id: str) -> None:
@@ -1560,6 +1612,7 @@ async def delete_all_silnt_data_for_user(user_id: str) -> dict:
     for wid in wallet_ids:
         await db.execute("DELETE FROM silnt.utxos WHERE wallet_id = :wid", {"wid": wid})
         await db.execute("DELETE FROM silnt.wallet_addresses WHERE wallet_id = :wid", {"wid": wid})
+        await db.execute("DELETE FROM silnt.plain_incoming WHERE wallet_id = :wid", {"wid": wid})
         await db.execute("DELETE FROM silnt.wallets WHERE id = :wid", {"wid": wid})
 
     # Per-user data (keyed by user_id, not wallet_id) — these must be cleaned even

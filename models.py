@@ -132,6 +132,12 @@ class SpendPlainRequest(BaseModel):
 class BroadcastPlainRequest(BaseModel):
     wallet_id: str
     tx_hex: str
+    # Set ONLY when this transaction pays the wallet's own Silent Payments
+    # address, so the server can report it to the user's other devices while it
+    # is in flight. Those coins are entering the wallet and will be published as
+    # a receive once scanned, so recording them early reveals nothing new;
+    # payments out of the plain chain are deliberately never recorded.
+    incoming_amount: Optional[int] = None
 
 
 class RecoverKeysRequest(BaseModel):
