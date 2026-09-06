@@ -556,3 +556,41 @@ async def m026_fcm_tokens(db):
     await db.execute(
         "CREATE INDEX idx_fcm_tokens_user ON silnt.fcm_tokens (user_id);"
     )
+
+
+async def m027_plain_incoming(db):
+    """
+    Plain-chain payments a wallet has made to ITS OWN Silent Payments address,
+    recorded at broadcast so every one of the user's devices can show them while
+    they are in flight.
+
+    Without this the transaction is invisible to the server: it spends P2WPKH
+    coins that were never in silnt.utxos, so there is no send to report, and the
+    output is a Silent Payments output that does not exist as a receive until a
+    scan finds it. The device that broadcast it can remember locally; no other
+    device has anything to fetch.
+
+    Deliberately ONLY self-payments. Those coins are entering the wallet, so the
+    server is going to publish them as a receive within the hour regardless —
+    recording the txid early tells it nothing it is not about to learn. Payments
+    OUT of the plain chain are not recorded, which is where keeping the server
+    ignorant actually matters.
+
+    Rows are transient: dropped once the scanned receive supersedes them, and
+    swept after a day so a transaction that never confirmed does not linger.
+    """
+    await db.execute(
+        f"""
+        CREATE TABLE silnt.plain_incoming (
+            txid       TEXT PRIMARY KEY,
+            wallet_id  TEXT NOT NULL,
+            amount     {db.big_int} NOT NULL,
+            -- Epoch seconds, written explicitly like wallet_addresses, so the
+            -- TTL below is a plain integer comparison on every backend.
+            created_at INTEGER NOT NULL
+        );
+        """
+    )
+    await db.execute(
+        "CREATE INDEX idx_plain_incoming_wallet ON silnt.plain_incoming (wallet_id);"
+    )

@@ -72,6 +72,7 @@ from .helpers.plain import (
 )
 from .crud import (
     get_silnt_wallets,
+    record_plain_incoming,
     create_silnt_wallet,
     delete_silnt_wallet,
     delete_utxos_for_wallet,
@@ -3072,6 +3073,17 @@ async def api_plain_broadcast(
     wallet = await _plain_wallet_or_403(data.wallet_id, key_info)
     txid = await _broadcast_via_mempool(data.tx_hex, wallet.network)
     logger.info(f"Broadcast plain-chain tx {txid} for wallet {data.wallet_id}")
+
+    # A payment into this wallet is worth recording; one out of it is not. See
+    # BroadcastPlainRequest and migrations.m027 for why the line is drawn there.
+    if data.incoming_amount and data.incoming_amount > 0:
+        try:
+            await record_plain_incoming(wallet.id, txid, data.incoming_amount)
+        except Exception as e:
+            # Display metadata only — never fail a broadcast that already went
+            # out over a bookkeeping row.
+            logger.warning(f"could not record incoming plain tx {txid}: {e}")
+
     return {"txid": txid}
 
 
