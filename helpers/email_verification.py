@@ -6,12 +6,26 @@ Flow:
   2. Generate a signed token containing {username, email, password_hash, ts}
      and email it as a clickable link — NO account is created yet
   3. User clicks the link → decode/validate token (incl. 1-hour TTL)
-  4. Create LNbits Account with a fresh uuid4 id + bcrypt password hash
+  4. Create LNbits Account with a fresh uuid4 id + the bcrypt hash from the token
   5. Enable LNBITS_USER_DEFAULT_EXTENSIONS on the new account, marking paid
      extensions as already-paid so they bypass the payment requirement
 
 This guarantees the account is only created after email ownership is proven,
 and that siLNt is fully active on first login (paid or not).
+
+The token carries the bcrypt HASH, never the raw password. It used to carry the
+raw password — contradicting step 2 above, which has described it as a hash
+since the module was written — and that put a recoverable password in the user's
+inbox for an hour. Encrypted with the LNbits internal secret, so not readable by
+a passive observer, but reversible by anyone holding that secret: a config leak,
+a database backup, or an operator. Verification links also outlive their TTL in
+mail-server logs and browser history, and people reuse passwords, so what leaks
+is worth more than this one account.
+
+A bcrypt hash is safe to put there instead because LNbits hashes with a random
+salt and nothing else — see Account.hash_password: gensalt() + hashpw, with no
+binding to the account id. That is what lets the hash be computed at step 1 and
+stored on an Account created at step 4.
 """
 
 import base64
@@ -56,15 +70,31 @@ class VerifyRegistrationRequest(BaseModel):
 
 # ── Token helpers ─────────────────────────────────────────────────────────────
 
+def _hash_password(password: str) -> str:
+    """bcrypt hash of `password`, via LNbits' own Account.hash_password.
+
+    Routed through LNbits rather than calling bcrypt here so the salt and cost
+    factor stay whatever LNbits chose, without siLNt taking a direct bcrypt
+    dependency to keep in step. The throwaway Account exists only to reach that
+    method: the hash it produces is independent of the id, so the id given here
+    is irrelevant and never stored.
+    """
+    return Account(id=uuid4().hex).hash_password(password)
+
+
 def _generate_verification_token(
-    username: str, email: str, password: str
+    username: str, email: str, password_hash: str
 ) -> str:
-    """Sign a token carrying the pending registration data."""
+    """Sign a token carrying the pending registration data.
+
+    `password_hash` is a bcrypt hash, never the raw password — see the module
+    docstring for why that distinction is the point of this token's design.
+    """
     payload = {
         "kind":          "register",
         "username":      username,
         "email":         email,
-        "password":      password,
+        "password_hash": password_hash,
         "ts":            int(time.time()),
     }
     payload_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
@@ -123,6 +153,15 @@ async def start_registration(
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid email.")
     if len(data.password) < 8:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Password too short (min 8).")
+    # bcrypt refuses anything longer, and the hash is now computed HERE rather
+    # than at verification. Without this check a long password would send a
+    # verification email and then fail when the link was clicked — an account
+    # that could never be created, and no way for the user to see why.
+    if len(data.password.encode("utf-8")) > 72:
+        raise HTTPException(
+            HTTPStatus.BAD_REQUEST,
+            "Password too long (max 72 bytes).",
+        )
 
     existing = await get_account_by_username_or_email(username) \
             or await get_account_by_username_or_email(email)
@@ -133,8 +172,14 @@ async def start_registration(
         )    
 
     try:
-        token = _generate_verification_token(username, email, data.password)
+        # Hashed before the token is built, so the raw password exists only for
+        # the life of this request and never reaches the email.
+        token = _generate_verification_token(
+            username, email, _hash_password(data.password)
+        )
     except Exception as exc:
+        # Deliberately does not log `exc` with any password context — the
+        # message is enough to diagnose a signing or hashing failure.
         logger.error(f"Token generation failed: {exc}")
         raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not start registration.")
 
@@ -202,9 +247,25 @@ async def complete_registration(token: str) -> dict:
             "Verification link is invalid or has expired. Please register again.",
         )
 
-    username     = payload["username"]
-    email        = payload["email"]
-    raw_password = payload["password"]      # ← raw password from the token
+    username = payload["username"]
+    email    = payload["email"]
+
+    password_hash = payload.get("password_hash")
+    if not password_hash:
+        # A token issued before this change, still inside its 1-hour TTL when
+        # the new code deployed. Hash the raw password it carries so a
+        # registration in flight completes instead of dead-ending on a link the
+        # user has already been told to click. Removable once an hour has
+        # passed since deploy — nothing can present one of these after that,
+        # because _decode_verification_token rejects it on age first.
+        legacy_raw = payload.get("password")
+        if not legacy_raw:
+            raise HTTPException(
+                HTTPStatus.BAD_REQUEST,
+                "Verification link is invalid or has expired. Please register again.",
+            )
+        logger.info(f"Verifying pre-hash-token registration for {username}")
+        password_hash = _hash_password(legacy_raw)
 
     existing = await get_account_by_username_or_email(username) \
             or await get_account_by_username_or_email(email)
@@ -220,7 +281,11 @@ async def complete_registration(token: str) -> dict:
             username = username,
             email    = email,
         )
-        account.hash_password(raw_password)     # ← LNbits-correct, id-bound hashing
+        # Assigned, not re-hashed: the hash was computed when registration
+        # started. LNbits' hash_password is gensalt() + hashpw with no id
+        # binding, so a hash made earlier verifies here exactly as one made now
+        # would — checkpw reads the salt out of the hash itself.
+        account.password_hash = password_hash
         await create_account(account)      # ← the working creation path
         account_id = account.id
         logger.info(f"Email-verified account created: {username} ({email}) id={account_id}")
