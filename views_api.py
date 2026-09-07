@@ -34,8 +34,8 @@ from .helpers.bip353_cloudflare import (
     CloudflareError    
 )
 from .helpers.email_verification import (
-    RegistrationRequest, VerifyRegistrationRequest,
-    start_registration, complete_registration,
+    RegistrationRequest, VerifyRegistrationRequest, ConfirmRegistrationRequest,
+    start_registration, complete_registration, confirm_registration,
 )
 from mnemonic import Mnemonic
 from .helpers.dust_check import evaluate_dust_for_wallet
@@ -1766,6 +1766,18 @@ async def api_register_start(data: RegistrationRequest, request: Request) -> dic
 @silnt_api_router.post("/api/v1/auth/register-verify")
 async def api_register_verify(data: VerifyRegistrationRequest) -> dict:
     return await complete_registration(data.token)
+
+@silnt_api_router.post("/api/v1/auth/register-confirm")
+async def api_register_confirm(data: ConfirmRegistrationRequest) -> dict:
+    """Complete registration from the emailed 6-digit code.
+
+    The app-facing counterpart of register-verify: it needs no browser and no
+    reachable web app, only this API. Public for the same reason
+    register-verify is — the caller has no account yet, so there is nothing to
+    authenticate with. Guessing is bounded by the attempt cap and TTL on the
+    pending row (see crud.take_pending_registration).
+    """
+    return await confirm_registration(data)
 
 @silnt_api_router.post("/api/v1/auth/forgot-password")
 async def api_forgot_password(data: ForgotPasswordRequest, request: Request) -> dict:
