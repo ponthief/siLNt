@@ -144,6 +144,152 @@ async def clear_plain_incoming(txids: list[str]) -> None:
         )
 
 
+# ── Pending registrations (6-digit email code) ────────────────────────────────
+# See migrations.m028 for why this state exists at all: a code short enough to
+# type cannot carry the registration the way the emailed token does.
+
+# Matches the token's lifetime, so the link and the code in one email expire
+# together and neither outlives the other confusingly.
+PENDING_REGISTRATION_TTL_SECONDS = 60 * 60
+
+# Six digits is ~20 bits, so the cap is what makes guessing hopeless rather than
+# merely slow. Five wrong answers drops the row and the user registers again.
+PENDING_REGISTRATION_MAX_ATTEMPTS = 5
+
+
+def hash_registration_code(email: str, code: str) -> str:
+    """HMAC of the code, bound to the email it was issued for.
+
+    Bound so a code cannot be replayed against a different pending
+    registration, and hashed so a database leak on its own does not hand over
+    live codes. Uses the same construction as helpers/device_auth.py.
+    """
+    from lnbits.settings import settings as lnbits_settings
+
+    key = (lnbits_settings.auth_secret_key or "").encode()
+    msg = f"register:{email.strip().lower()}:{code}".encode()
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+
+async def put_pending_registration(
+    email: str, username: str, password_hash: str, code: str
+) -> None:
+    """Store (or replace) the pending registration for this email."""
+    email = email.strip().lower()
+    await db.execute(
+        "DELETE FROM silnt.pending_registrations WHERE email = :email",
+        {"email": email},
+    )
+    await db.execute(
+        """INSERT INTO silnt.pending_registrations
+             (email, username, password_hash, code_hmac, attempts, created_at)
+           VALUES (:email, :username, :ph, :hmac, 0, :ts)""",
+        {
+            "email": email,
+            "username": username,
+            "ph": password_hash,
+            "hmac": hash_registration_code(email, code),
+            "ts": int(time.time()),
+        },
+    )
+
+
+async def take_pending_registration(
+    email: str, code: str
+) -> Tuple[Optional[dict], str]:
+    """Consume the pending registration for `email` if `code` matches.
+
+    Returns (row, "") on success, or (None, reason) where reason is one of
+    "unknown", "expired" or "mismatch". The caller must NOT show these apart:
+    telling a stranger whether an address is mid-registration is exactly the
+    enumeration this avoids. They are separated here only so the server can log
+    them and so an expired row can be swept.
+
+    Consuming is the point — a successful code is spent, so a replay cannot
+    create a second account or resurrect one that was deleted.
+    """
+    email = email.strip().lower()
+    row = await db.fetchone(
+        """SELECT email, username, password_hash, code_hmac, attempts, created_at
+             FROM silnt.pending_registrations WHERE email = :email""",
+        {"email": email},
+    )
+    if not row:
+        return None, "unknown"
+
+    if int(time.time()) - int(row["created_at"] or 0) > PENDING_REGISTRATION_TTL_SECONDS:
+        await db.execute(
+            "DELETE FROM silnt.pending_registrations WHERE email = :email",
+            {"email": email},
+        )
+        return None, "expired"
+
+    if not hmac.compare_digest(
+        row["code_hmac"] or "", hash_registration_code(email, code)
+    ):
+        attempts = int(row["attempts"] or 0) + 1
+        if attempts >= PENDING_REGISTRATION_MAX_ATTEMPTS:
+            # Spent, not merely counted: the row goes, so the cap cannot be
+            # sidestepped by waiting.
+            await db.execute(
+                "DELETE FROM silnt.pending_registrations WHERE email = :email",
+                {"email": email},
+            )
+        else:
+            await db.execute(
+                "UPDATE silnt.pending_registrations SET attempts = :a "
+                "WHERE email = :email",
+                {"a": attempts, "email": email},
+            )
+        return None, "mismatch"
+
+    await db.execute(
+        "DELETE FROM silnt.pending_registrations WHERE email = :email",
+        {"email": email},
+    )
+    return (
+        {
+            "email": row["email"],
+            "username": row["username"],
+            "password_hash": row["password_hash"],
+        },
+        "",
+    )
+
+
+async def drop_pending_registration(email: str) -> None:
+    """Forget a pending registration completed by the emailed LINK instead.
+
+    Both halves of the email lead to the same account, so whichever is used
+    first must clear the other or the row sits until its TTL holding a username
+    that now exists.
+    """
+    await db.execute(
+        "DELETE FROM silnt.pending_registrations WHERE email = :email",
+        {"email": email.strip().lower()},
+    )
+
+
+async def pending_registration_username_taken(username: str) -> bool:
+    """Is a pending (unexpired) registration already holding this username?
+
+    Account creation is the real check, but two people mid-registration on one
+    username means the second only finds out after typing a code, which reads
+    as the code being wrong.
+    """
+    row = await db.fetchone(
+        "SELECT created_at FROM silnt.pending_registrations WHERE username = :u",
+        {"u": username},
+    )
+    if not row:
+        return False
+    fresh = (
+        int(time.time()) - int(row["created_at"] or 0)
+        <= PENDING_REGISTRATION_TTL_SECONDS
+    )
+    return fresh
+
+
 async def disable_background_scan(wallet_id: str) -> None:
     await db.execute(
         "DELETE FROM silnt.background_scan WHERE wallet_id = :wid", {"wid": wallet_id}

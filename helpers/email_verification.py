@@ -30,6 +30,7 @@ stored on an Account created at step 4.
 
 import base64
 import json
+import secrets
 import time
 from http import HTTPStatus
 from typing import Optional
@@ -66,6 +67,26 @@ class RegistrationRequest(BaseModel):
 
 class VerifyRegistrationRequest(BaseModel):
     token: str
+
+
+class ConfirmRegistrationRequest(BaseModel):
+    email: str
+    code: str
+
+
+# Digits, not letters: it is typed on a phone keypad, and a 6-digit field is a
+# pattern users already know from the device-confirmation flow.
+REGISTRATION_CODE_DIGITS = 6
+
+
+def _generate_registration_code() -> str:
+    """A 6-digit code, uniformly random and zero-padded.
+
+    secrets, not random: this is the only thing standing between an email
+    address and an account, for the app path where no link is involved.
+    """
+    upper = 10**REGISTRATION_CODE_DIGITS
+    return str(secrets.randbelow(upper)).zfill(REGISTRATION_CODE_DIGITS)
 
 
 # ── Token helpers ─────────────────────────────────────────────────────────────
@@ -169,19 +190,43 @@ async def start_registration(
         raise HTTPException(
             HTTPStatus.BAD_REQUEST,
             "Username or email already in use.",
-        )    
+        )
+
+    from ..crud import pending_registration_username_taken, put_pending_registration
+
+    # A pending registration is not an account yet, so the check above misses
+    # it. Without this the second person to claim a username only finds out
+    # after typing their code, which reads as the code being wrong.
+    if await pending_registration_username_taken(username):
+        raise HTTPException(
+            HTTPStatus.BAD_REQUEST,
+            "Username or email already in use.",
+        )
 
     try:
         # Hashed before the token is built, so the raw password exists only for
         # the life of this request and never reaches the email.
-        token = _generate_verification_token(
-            username, email, _hash_password(data.password)
-        )
+        password_hash = _hash_password(data.password)
+        token = _generate_verification_token(username, email, password_hash)
     except Exception as exc:
         # Deliberately does not log `exc` with any password context — the
         # message is enough to diagnose a signing or hashing failure.
         logger.error(f"Token generation failed: {exc}")
         raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not start registration.")
+
+    # The code path, alongside the link. A deployment can have its web app
+    # closed to the outside, which leaves the link with nowhere to open — the
+    # code needs nothing but the API the app is already talking to. Both halves
+    # of the email lead to the same account and whichever is used first spends
+    # the other.
+    code = _generate_registration_code()
+    try:
+        await put_pending_registration(email, username, password_hash, code)
+    except Exception as exc:
+        logger.error(f"Could not store pending registration: {exc}")
+        raise HTTPException(
+            HTTPStatus.INTERNAL_SERVER_ERROR, "Could not start registration."
+        )
 
     # Resolve the Thrilla web-app origin. Prefers SILNT_FRONTEND_URL so the link
     # is correct for mobile registrations too (mobile sends no Origin header, so
@@ -191,13 +236,21 @@ async def start_registration(
     origin = frontend_base_url(request)
     verify_url = f"{origin}/verify?token={token}"
 
+    # The code comes first. Someone who registered in the mobile app is holding
+    # a screen asking for it, and on a deployment whose web app is closed the
+    # link below will not open at all — so the thing that always works has to
+    # be the thing they see first.
     subject = "Thrilla — Verify your email"
     body = (
         f"Hi {username},\n\n"
-        f"Thanks for registering for Thrilla. Click the link below to "
-        f"activate your account:\n\n"
+        f"Your Thrilla verification code is:\n\n"
+        f"    {code}\n\n"
+        f"Enter it in the app to activate your account.\n\n"
+        f"Or, if you registered in a web browser, open this link instead:\n\n"
         f"{verify_url}\n\n"
-        f"This link expires in {VERIFICATION_TOKEN_TTL_SECONDS // 60} minutes.\n\n"
+        f"The code and the link both expire in "
+        f"{VERIFICATION_TOKEN_TTL_SECONDS // 60} minutes, and using either one "
+        f"activates your account.\n\n"
         f"If you didn't request this, you can safely ignore this email.\n\n"
         f"— Thrilla"
     )
@@ -267,6 +320,61 @@ async def complete_registration(token: str) -> dict:
         logger.info(f"Verifying pre-hash-token registration for {username}")
         password_hash = _hash_password(legacy_raw)
 
+    # The link won the race, so the code in the same email is spent. Left
+    # behind, the row would sit until its TTL holding a username that now
+    # exists, and rejecting that code would look like the code was wrong.
+    from ..crud import drop_pending_registration
+
+    try:
+        await drop_pending_registration(email)
+    except Exception as exc:
+        logger.warning(f"Could not clear pending registration for {email}: {exc}")
+
+    return await _create_verified_account(username, email, password_hash)
+
+
+async def confirm_registration(data: ConfirmRegistrationRequest) -> dict:
+    """Complete registration from the 6-digit code instead of the link.
+
+    The app path. It needs nothing but this API — no browser, and no web app
+    reachable from the outside — which is the whole reason the code exists.
+    """
+    from ..crud import take_pending_registration
+
+    email = (data.email or "").strip().lower()
+    code = (data.code or "").strip()
+    if not email or not code:
+        raise HTTPException(
+            HTTPStatus.BAD_REQUEST, "Email and verification code are required."
+        )
+
+    row, reason = await take_pending_registration(email, code)
+    if not row:
+        # One message for every reason. "No such pending registration" versus
+        # "wrong code" would tell a stranger which addresses are mid-signup,
+        # which is exactly the enumeration this avoids; the reason is logged
+        # instead.
+        logger.info(f"Registration code rejected for {email}: {reason}")
+        raise HTTPException(
+            HTTPStatus.BAD_REQUEST,
+            "That code is incorrect or has expired. Please register again.",
+        )
+
+    return await _create_verified_account(
+        row["username"], row["email"], row["password_hash"]
+    )
+
+
+async def _create_verified_account(
+    username: str, email: str, password_hash: str
+) -> dict:
+    """Create the account and switch on the default extensions.
+
+    Shared by both halves of the verification email: the link decodes its token
+    to get here, the code trades a database row for the same three values.
+    Whichever arrives first creates the account, and the uniqueness check below
+    is what makes the second one fail cleanly rather than duplicate anything.
+    """
     existing = await get_account_by_username_or_email(username) \
             or await get_account_by_username_or_email(email)
     if existing:

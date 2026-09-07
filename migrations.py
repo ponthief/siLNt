@@ -594,3 +594,50 @@ async def m027_plain_incoming(db):
     await db.execute(
         "CREATE INDEX idx_plain_incoming_wallet ON silnt.plain_incoming (wallet_id);"
     )
+
+
+async def m028_pending_registrations(db):
+    """Registrations awaiting a 6-digit email code.
+
+    The emailed LINK carries everything needed to create the account, which is
+    why registration needed no server-side state at all. A 6-digit code cannot:
+    it is short enough to type, which means it cannot also carry a username, an
+    email and a password hash. So those wait here until the code arrives.
+
+    The code exists because a deployment can have its web app closed to the
+    outside, leaving the link with nowhere to open — see BUILD_ANDROID.md. The
+    app-facing path must not depend on a browser being able to reach anything
+    except the API.
+
+    What is stored: the same bcrypt hash the token carries, and an HMAC of the
+    code rather than the code itself, so a database leak on its own does not
+    hand over pending registrations. Six digits is only ~20 bits, so the real
+    protection is the attempt cap and the TTL, not the HMAC.
+
+    Keyed by email because that is the only thing the user can be asked to
+    retype alongside the code. Registering twice for one address replaces the
+    pending row rather than accumulating.
+    """
+    await db.execute(
+        f"""
+        CREATE TABLE silnt.pending_registrations (
+            email         TEXT PRIMARY KEY,
+            username      TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            code_hmac     TEXT NOT NULL,
+            -- Wrong guesses so far. The row is dropped once this passes the cap,
+            -- so a caller cannot grind 6 digits.
+            attempts      INTEGER NOT NULL DEFAULT 0,
+            -- Epoch seconds, written explicitly like plain_incoming, so the TTL
+            -- is a plain integer comparison on every backend.
+            created_at    INTEGER NOT NULL
+        );
+        """
+    )
+    # Username uniqueness is enforced at account creation, but a pending row
+    # holding a username someone else is also mid-registering should be findable
+    # cheaply enough to reject early.
+    await db.execute(
+        "CREATE INDEX idx_pending_reg_username "
+        "ON silnt.pending_registrations (username);"
+    )
