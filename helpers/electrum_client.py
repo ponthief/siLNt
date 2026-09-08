@@ -200,6 +200,57 @@ class ElectrumClient:
                 raise ConnectionError("server closed connection")
             self._buf += chunk
 
+    def call_batch(self, calls: list[tuple[str, list]]) -> list[dict]:
+        """Send several calls as one JSON-RPC batch and return them in order.
+
+        The Electrum protocol allows a JSON array of requests answered with an
+        array of responses. That matters here because walking a gap limit of
+        twenty addresses was twenty-plus sequential round trips — the latency
+        was the wait, not the work, and the user is staring at a blank receive
+        address for all of it.
+
+        Responses are paired by id, NOT by position: the spec does not promise
+        order, and mis-pairing would attribute one address's coins to another.
+        Raises on a transport failure or a non-array reply so the caller can
+        fall back to calling them one at a time; a server without batch support
+        must not turn into a broken wallet screen.
+        """
+        assert self._sock is not None, "not connected"
+        if not calls:
+            return []
+
+        reqs = []
+        ids = []
+        for method, params in calls:
+            self._id += 1
+            ids.append(self._id)
+            reqs.append({"id": self._id, "method": method, "params": params})
+        self._sock.sendall((json.dumps(reqs) + "\n").encode())
+
+        wanted = set(ids)
+        by_id: dict[int, dict] = {}
+        while wanted:
+            if b"\n" in self._buf:
+                line, self._buf = self._buf.split(b"\n", 1)
+                if not line.strip():
+                    continue
+                msg = json.loads(line.decode())
+                # A batch is answered with an array; a lone object here means
+                # the server did not batch (or sent a notification).
+                items = msg if isinstance(msg, list) else [msg]
+                for item in items:
+                    mid = item.get("id")
+                    if mid in wanted:
+                        by_id[mid] = item
+                        wanted.discard(mid)
+                continue
+            chunk = self._sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("server closed connection")
+            self._buf += chunk
+
+        return [by_id[i] for i in ids]
+
     def server_version(self) -> list:
         r = self._call("server.version", ["siLNt-spike", "1.4"])
         if "error" in r and r["error"]:

@@ -139,14 +139,12 @@ def estimate_fee(num_inputs: int, fee_rate: float) -> tuple[int, int]:
     return vsize, max(1, math.ceil(vsize * fee_rate))
 
 
-def _scan_one(client: ElectrumClient, address: str) -> dict:
-    """One address: has it ever been used, and what is unspent on it now."""
-    sh = electrum_scripthash(address)
-    # get_history, not list_unspent, decides "used" — an address that received
-    # and was swept has no unspent outputs but must never be handed out again.
-    used = bool(client.get_history(sh))
-    unspent = client.list_unspent(sh) if used else []
+def _summarize(address: str, used: bool, unspent: list) -> dict:
+    """Turn one address's raw unspent list into the shape callers expect.
 
+    Shared by the batched and sequential walks below, so the two cannot drift
+    on what counts as confirmed or how the totals are added up.
+    """
     confirmed: list[dict] = []
     confirmed_sats = 0
     unconfirmed_sats = 0
@@ -182,6 +180,59 @@ def _scan_one(client: ElectrumClient, address: str) -> dict:
     }
 
 
+def _scan_one(client: ElectrumClient, address: str) -> dict:
+    """One address, one round trip at a time. The fallback path."""
+    sh = electrum_scripthash(address)
+    # get_history, not list_unspent, decides "used" — an address that received
+    # and was swept has no unspent outputs but must never be handed out again.
+    used = bool(client.get_history(sh))
+    unspent = client.list_unspent(sh) if used else []
+    return _summarize(address, used, unspent)
+
+
+def _scan_batched(client: ElectrumClient, addresses: list[str]) -> list[dict]:
+    """The same walk in two round trips instead of twenty-plus.
+
+    One batch asks every address for its history; a second asks only the used
+    ones for their unspent outputs. Walking a gap limit sequentially meant the
+    user waited on twenty round trips to be shown a receive address, and the
+    latency was nearly all of that wait.
+
+    Raises if anything about the batch looks wrong, so the caller can retry
+    sequentially — a server that does not batch must still work.
+    """
+    shs = [electrum_scripthash(a) for a in addresses]
+
+    hist = client.call_batch([("blockchain.scripthash.get_history", [sh]) for sh in shs])
+    if len(hist) != len(shs):
+        raise ValueError("batched get_history returned the wrong number of results")
+    used_flags = []
+    for r in hist:
+        if r.get("error"):
+            raise ValueError(f"batched get_history failed: {r['error']}")
+        used_flags.append(bool(r.get("result")))
+
+    # Only the used addresses can hold coins, so only they are asked. On a fresh
+    # chain that is zero further calls.
+    used_idx = [i for i, u in enumerate(used_flags) if u]
+    unspent_by_idx: dict[int, list] = {}
+    if used_idx:
+        res = client.call_batch(
+            [("blockchain.scripthash.listunspent", [shs[i]]) for i in used_idx]
+        )
+        if len(res) != len(used_idx):
+            raise ValueError("batched listunspent returned the wrong number of results")
+        for i, r in zip(used_idx, res):
+            if r.get("error"):
+                raise ValueError(f"batched listunspent failed: {r['error']}")
+            unspent_by_idx[i] = r.get("result") or []
+
+    return [
+        _summarize(a, used_flags[i], unspent_by_idx.get(i, []))
+        for i, a in enumerate(addresses)
+    ]
+
+
 def scan_addresses(
     addresses: list[str], host: str, port: int, use_tls: bool = False
 ) -> dict:
@@ -197,7 +248,15 @@ def scan_addresses(
     try:
         client.connect()
         client.server_version()
-        per_address = [_scan_one(client, a) for a in addresses]
+        try:
+            per_address = _scan_batched(client, addresses)
+        except Exception as exc:
+            # A server that does not batch, or answers oddly, falls back to one
+            # call at a time — slower, but exactly what it did before batching
+            # existed. Logged at info because it is a capability difference, not
+            # a fault.
+            logger.info(f"plain scan: batch unavailable ({exc}); falling back")
+            per_address = [_scan_one(client, a) for a in addresses]
     finally:
         client.close()
 
