@@ -312,6 +312,151 @@ ok(
     keys[0].get_public_key().verify(ec.Signature.parse(items[0][:-1]), h),
 )
 
+# ── batched vs sequential walk ───────────────────────────────────────────────
+# Batching turned twenty-plus round trips into two, which is the difference
+# between a receive address appearing at once and after a visible wait. The risk
+# is that the two paths disagree: pairing a batch response to the wrong address
+# would attribute one address's coins to another, and the wallet would sign with
+# the wrong key. So both paths run over the same fake server and must produce
+# byte-identical results.
+def _check_batched_walk():
+    _scan_batched = _s._scan_batched
+    _scan_one = _s._scan_one
+
+    # Three addresses: unused, used-with-coins, used-and-emptied. The last is
+    # the one that matters — no unspent outputs, but must still read as used.
+    #
+    # DERIVED, not written out: a hand-typed bech32 string fails its checksum
+    # and the check dies on setup rather than testing anything.
+    addrs = [
+        _s.plain_address_for_key(f"{n:064x}", "signet") for n in (11, 12, 13)
+    ]
+    HISTORY = {0: [], 1: [{"tx_hash": "aa", "height": 100}], 2: [{"tx_hash": "bb", "height": 90}]}
+    UNSPENT = {
+        1: [
+            {"tx_hash": "aa", "tx_pos": 0, "height": 100, "value": 50_000},
+            {"tx_hash": "cc", "tx_pos": 1, "height": 0, "value": 7_000},
+        ],
+        2: [],
+    }
+
+    class FakeClient:
+        """Stands in for ElectrumClient at the call_batch boundary.
+
+        Answers in the order asked, because that is call_batch's contract —
+        it has already paired responses to requests by id. Whether it does
+        that correctly is tested separately below, against a socket that
+        deliberately replies out of order.
+        """
+
+        def __init__(self):
+            self.round_trips = 0
+            self._sh_to_idx = {}
+
+        def _idx(self, sh):
+            return self._sh_to_idx[sh]
+
+        def call_batch(self, calls):
+            self.round_trips += 1
+            out = []
+            for n, (method, params) in enumerate(calls):
+                i = self._idx(params[0])
+                result = HISTORY[i] if "get_history" in method else UNSPENT.get(i, [])
+                out.append({"id": n, "result": result})
+            return out
+
+        def get_history(self, sh):
+            self.round_trips += 1
+            return HISTORY[self._idx(sh)]
+
+        def list_unspent(self, sh):
+            self.round_trips += 1
+            return UNSPENT.get(self._idx(sh), [])
+
+    electrum_scripthash = __import__(
+        f"{PKG}.helpers.electrum_client", fromlist=["*"]
+    ).electrum_scripthash
+
+    fake = FakeClient()
+    for i, a in enumerate(addrs):
+        fake._sh_to_idx[electrum_scripthash(a)] = i
+
+    batched = _scan_batched(fake, addrs)
+    batch_trips = fake.round_trips
+
+    fake.round_trips = 0
+    sequential = [_scan_one(fake, a) for a in addrs]
+    seq_trips = fake.round_trips
+
+    ok("batched and sequential walks agree exactly", batched == sequential,
+          f"\n  batched={batched}\n  sequential={sequential}")
+    ok("an emptied address still reads as used",
+          batched[2]["used"] and batched[2]["utxos"] == [], str(batched[2]))
+    ok("confirmed and unconfirmed stay apart",
+          batched[1]["confirmed_sats"] == 50_000
+          and batched[1]["unconfirmed_sats"] == 7_000
+          and batched[1]["unconfirmed_count"] == 1, str(batched[1]))
+    ok("unused addresses cost no second call", batch_trips == 2, f"{batch_trips} round trips")
+    ok(f"batching cut {seq_trips} round trips to {batch_trips}", batch_trips < seq_trips)
+
+
+_check_batched_walk()
+
+
+# ── call_batch pairs by id, not position ────────────────────────────────────
+# The one place a batch can corrupt a wallet: if responses were matched to
+# requests by position and the server replied in a different order, one
+# address's history would be attributed to another. The client would then hand
+# out an address it believes unused, or sign for coins with the wrong key. The
+# Electrum spec does not promise order, so this is tested against a socket that
+# replies backwards.
+def _check_batch_pairing():
+    ElectrumClient = __import__(
+        f"{PKG}.helpers.electrum_client", fromlist=["*"]
+    ).ElectrumClient
+
+    import json as _json
+
+    class ReversingSocket:
+        """Answers a JSON-RPC batch with the results in reverse order."""
+
+        def __init__(self):
+            self.sent = None
+
+        def sendall(self, data):
+            self.sent = _json.loads(data.decode())
+
+        def recv(self, _n):
+            # Echo each request's id back with a result naming it, reversed.
+            out = [{"id": r["id"], "result": f"result-for-{r['params'][0]}"} for r in self.sent]
+            out.reverse()
+            return (_json.dumps(out) + "\n").encode()
+
+    c = ElectrumClient("fake", 0)
+    c._sock = ReversingSocket()
+    c._buf = b""
+
+    got = c.call_batch(
+        [("blockchain.scripthash.get_history", [f"sh{i}"]) for i in range(4)]
+    )
+    expected = [f"result-for-sh{i}" for i in range(4)]
+    ok(
+        "a batch answered in reverse is still paired correctly",
+        [r["result"] for r in got] == expected,
+        f"{[r['result'] for r in got]}",
+    )
+    ok("every request is answered", len(got) == 4, str(len(got)))
+
+    # An empty batch must not touch the socket at all.
+    c2 = ElectrumClient("fake", 0)
+    c2._sock = ReversingSocket()
+    c2._buf = b""
+    ok("an empty batch sends nothing", c2.call_batch([]) == [] and c2._sock.sent is None)
+
+
+_check_batch_pairing()
+
+
 print()
 if FAILED:
     print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))
