@@ -288,7 +288,7 @@ if scan_ep is not None:
 print("\ndeleting a wallet clears what a re-import would inherit")
 crud = open(os.path.join(ROOT, "crud.py")).read()
 delete_fn = crud.split("async def delete_silnt_wallet(")[1].split("\nasync def ")[0]
-for table in ("background_scan", "plain_incoming", "spend_alerts", "broadcast_txids"):
+for table in ("background_scan", "plain_incoming"):
     check(f"silnt.{table} rows are removed", f"silnt.{table}" in delete_fn)
 
 delete_ep = views.split("async def api_wallet_delete(")[1].split("\n@silnt_api_router")[0]

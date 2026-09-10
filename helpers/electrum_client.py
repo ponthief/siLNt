@@ -142,9 +142,8 @@ def address_to_scriptpubkey(addr: str) -> bytes:
 def scripthash_for_scriptpubkey(spk: bytes) -> str:
     """Electrum scripthash for a raw scriptPubKey.
 
-    Separate from electrum_scripthash because a Silent Payments output has no
-    address to go through: what the wallet stores is the 32-byte x-only output
-    key, and watching it means hashing the script directly.
+    Separate from electrum_scripthash for callers that already hold the script
+    and have no address to decode.
     """
     return hashlib.sha256(spk).digest()[::-1].hex()
 

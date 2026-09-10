@@ -509,6 +509,3 @@ class AdminAlert(BaseModel):
     meta:         Optional[str] = None
     acknowledged: bool = False
     created_at:   int
-
-class AckSpendAlertRequest(BaseModel):
-    txid: str

@@ -643,49 +643,20 @@ async def m028_pending_registrations(db):
     )
 
 
-async def m029_spend_watch(db):
-    """Watching the wallet's own coins for a spend it did not make.
+async def m030_drop_spend_watch(db):
+    """Remove the unexpected-spend watch tables.
 
-    A compromised spend key is silent: the attacker signs with the same
-    authority the owner has, and nothing about the transaction looks unusual.
-    The wallet only finds out when it next scans and its balance has gone.
+    The feature they backed was withdrawn: a "coins left your wallet and it did
+    not send them" warning reads as an emergency, and every plausible cause
+    other than a stolen key — a broadcast whose txid was not recorded, a
+    restored wallet, an indexer disagreeing with our own records — produced the
+    same alarming wording. A warning that cannot reliably tell those apart from
+    theft costs more trust than it buys.
 
-    Detecting it needs no secret at all. Every Silent Payments output this
-    wallet owns is P2TR, and silnt.utxos already stores the 32-byte x-only
-    output key, so the scriptPubKey is 0x51 0x20 || pub_key and the server can
-    watch it read-only. That matters: the alert works for wallets that never
-    uploaded a scan key, and it reaches a phone whose app is closed.
-
-    Two tables, because the interesting question is "spent by whom":
-
-    broadcast_txids is every txid this server sent. spent_in_txid on the utxos
-    row already implies it, but only when the client supplied spent_outpoints —
-    a broadcast without them marks nothing, and would then look like a stranger
-    spending the coins. Recording the txid directly does not depend on the
-    caller getting that right.
-
-    spend_alerts is what has already been reported, so a spend is announced once
-    rather than on every pass, and so the app can show it after the push is gone.
+    A new number rather than editing m029, which has already run on deployed
+    instances and so would never be re-applied. DROP ... IF EXISTS so a fresh
+    install, where m029 no longer exists to create them, is a no-op. The index
+    on spend_alerts goes with its table.
     """
-    await db.execute(
-        """
-        CREATE TABLE silnt.broadcast_txids (
-            txid       TEXT PRIMARY KEY,
-            wallet_id  TEXT NOT NULL,
-            created_at INTEGER NOT NULL
-        );
-        """
-    )
-    await db.execute(
-        """
-        CREATE TABLE silnt.spend_alerts (
-            txid         TEXT PRIMARY KEY,
-            wallet_id    TEXT NOT NULL,
-            detected_at  INTEGER NOT NULL,
-            acknowledged BOOLEAN NOT NULL DEFAULT FALSE
-        );
-        """
-    )
-    await db.execute(
-        "CREATE INDEX idx_spend_alerts_wallet ON silnt.spend_alerts (wallet_id, acknowledged)"
-    )
+    await db.execute("DROP TABLE IF EXISTS silnt.spend_alerts")
+    await db.execute("DROP TABLE IF EXISTS silnt.broadcast_txids")
