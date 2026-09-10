@@ -17,6 +17,7 @@ from .helpers.wallet import (
 )
 from .helpers.scan import (
     scan_wallet, get_scan_progress, request_scan_stop, get_tx_status,
+    clear_wallet_scan_state, mark_scan_inactive,
     BIP352_LABELED_ADDRESS_INDICES,
 )
 from .helpers.address_resolver import bip353_resolve
@@ -39,7 +40,11 @@ from .helpers.email_verification import (
 )
 from mnemonic import Mnemonic
 from .helpers.dust_check import evaluate_dust_for_wallet
-from .helpers.scan_rate_limiter import check_scan_allowed, mark_scan_finished
+from .helpers.scan_rate_limiter import (
+    check_scan_allowed,
+    clear_wallet_limits,
+    mark_scan_finished,
+)
 from .helpers.invite_rate_limiter import check_invite_allowed, record_invite
 from .helpers.forgot_password import request_password_reset
 from .helpers.transactions import get_wallet_transaction_detail, list_wallet_transactions
@@ -108,6 +113,7 @@ from .crud import (
     update_address_label,
     get_wallet_address,
     mark_utxos_spent_by_tx,
+    record_broadcast_txid,
     set_utxo_freeze_manual,
     clear_utxo_freeze_manual,
     count_trusted_devices,
@@ -201,6 +207,7 @@ from .crud import (
 )
 
 from .models import (
+    AckSpendAlertRequest,
     BackendConfig,
     CreateWallet,
     WalletAccount,
@@ -526,6 +533,20 @@ async def api_wallet_delete(wallet_id: str):
         raise HTTPException(
             status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
         )
+    # In-memory scan state goes first, before anything can fail: a wallet id is
+    # reproducible from the seed ("sp" + sha256(network:sp_address)), so
+    # importing the same recovery phrase again produces the SAME id. Anything
+    # left in these dictionaries is inherited by the new wallet — an active
+    # flag it cannot clear, a cooldown it did not earn, a concurrency slot that
+    # blocks every scan on the account.
+    #
+    # It also stops a scan that is running right now: the wallet row is about to
+    # disappear underneath it, and a stop request is the orderly way out.
+    clear_wallet_scan_state(wallet_id)
+    clear_wallet_limits(wallet_id, wallet.user)
+    # After the clear, not before — clear_wallet_scan_state drops the stop flag
+    # along with everything else, so setting it first would cancel this.
+    request_scan_stop(wallet_id)
      # Clean up BitMail state before wiping the wallet:
     # 1. Cancel all pending requests so none linger in the admin queue.
     try:
@@ -884,12 +905,20 @@ async def api_scan_wallet(
             new_found = (result or {}).get("utxos_found", 0) if isinstance(result, dict) else 0
             if new_found > 0:
                 await _notify_payment_found(wallet, new_found, (result or {}).get("amount_found"))
+        # _mark_scan_failed used to be called here and DID NOT EXIST, so every
+        # one of these handlers raised NameError instead of releasing the scan.
+        # The wallet was left reporting active=True in memory for the lifetime
+        # of the process: the app polled a scan that was not running, the
+        # background sweep skipped the wallet, and — because ids are reproducible
+        # from the seed — deleting and re-importing the same phrase inherited the
+        # stuck flag and could never scan again. scan_wallet now clears the flag
+        # itself; these calls are the explicit belt to that braces.
         except ValueError as e:
-            logger.error(f"Scan value error for {wallet_id}: {e}"); _mark_scan_failed(wallet_id)
+            logger.error(f"Scan value error for {wallet_id}: {e}"); mark_scan_inactive(wallet_id)
         except RuntimeError as e:
-            logger.error(f"Scan runtime error for {wallet_id}: {e}"); _mark_scan_failed(wallet_id)
+            logger.error(f"Scan runtime error for {wallet_id}: {e}"); mark_scan_inactive(wallet_id)
         except Exception as e:
-            logger.error(f"Scan unexpected error for {wallet_id}: {e}", exc_info=True); _mark_scan_failed(wallet_id)
+            logger.error(f"Scan unexpected error for {wallet_id}: {e}", exc_info=True); mark_scan_inactive(wallet_id)
         finally:
             actual = (result or {}).get("blocks_scanned") if isinstance(result, dict) else None
             mark_scan_finished(
@@ -914,6 +943,13 @@ async def api_stop_scan(
     # Charge only for blocks actually scanned so far, and clear the per-wallet
     # cooldown so the user can immediately retry (e.g. fix the range and rescan).
     actual = get_scan_progress(wallet_id).get("current", 0)
+    # Report it stopped now rather than at the next batch boundary. This is also
+    # the only way out of a wallet whose active flag outlived the scan behind it:
+    # without it, Stop does nothing for a scan that is not running, and the
+    # wallet stays unscannable until LNbits restarts. A scan that IS still
+    # running exits at its next batch and writes the same thing again; the
+    # concurrency limit and the cooldown keep a second one from overlapping it.
+    mark_scan_inactive(wallet_id)
     mark_scan_finished(
         key_info.wallet.user, wallet_id,
         actual_blocks=actual,
@@ -1147,6 +1183,76 @@ async def _notify_send_confirmed(user_id: str) -> None:
         )
     except Exception as e:
         logger.warning(f"send-confirmed push failed for user {user_id}: {e}")
+
+
+async def _notify_unexpected_spend(user_id: str) -> None:
+    """Push when coins left a wallet that did not send them.
+
+    Deliberately urgent and deliberately vague. Urgent because this is the one
+    alert worth waking someone for; vague because the title and body pass
+    through Google in plaintext, so no amount, wallet or txid goes in — the same
+    rule the other pushes follow.
+
+    It does NOT suggest replacing the transaction. RBF against someone holding
+    your spend key is a fee auction they can always counter, and winning it
+    changes nothing durable because they still have the key. Moving what is left
+    is the action that helps, so that is the action it names.
+    """
+    try:
+        from .crud import list_fcm_tokens_for_user
+        from .helpers.fcm import send_fcm
+
+        tokens = await list_fcm_tokens_for_user(user_id)
+        if not tokens:
+            return
+        await send_fcm(
+            tokens,
+            "Unrecognised transaction",
+            "Coins left your wallet in a transaction it did not send. Open "
+            "Thrilla now and move your remaining funds to a new wallet.",
+            {"type": "unexpected_spend"},
+        )
+    except Exception as e:
+        logger.warning(f"unexpected-spend push failed for user {user_id}: {e}")
+
+
+async def run_unexpected_spend_checks() -> int:
+    """Watch every wallet's coins for a spend it did not make.
+
+    Runs for EVERY wallet holding coins, not just background-scan opt-ins, for
+    the same reason run_send_confirmation_checks does: it needs no scan key,
+    only the output keys already in silnt.utxos, so there is nothing extra to
+    consent to — and it is what reaches a phone whose app is closed.
+
+    Returns how many wallets had something newly unexpected.
+    """
+    flagged = 0
+    try:
+        from .crud import get_silnt_wallet, wallets_with_watchable_utxos
+        from .helpers.spend_watch import check_wallet_for_unexpected_spends
+
+        wallet_ids = await wallets_with_watchable_utxos()
+    except Exception as e:
+        logger.warning(f"[silnt] could not list wallets to watch: {e}")
+        return 0
+
+    for wallet_id in wallet_ids:
+        try:
+            wallet = await get_silnt_wallet(wallet_id)
+            if not wallet:
+                continue
+            host, port, tls, _ = await _fulcrum_cfg(wallet.network)
+            if not host:
+                continue
+            found = await check_wallet_for_unexpected_spends(wallet, host, port, tls)
+            if found:
+                flagged += 1
+                await _notify_unexpected_spend(wallet.user)
+        except Exception as e:
+            # One wallet's failure must not stop the sweep — the next wallet may
+            # be the one actually being drained.
+            logger.warning(f"[silnt] spend watch failed for {wallet_id}: {e}")
+    return flagged
 
 
 async def run_send_confirmation_checks() -> int:
@@ -1506,6 +1612,17 @@ async def api_broadcast_transaction(data: BroadcastTxRequest):
             # ── Mark the spent inputs immediately so Activity shows the Sent tx
             #    without waiting for a rescan. Use the exact outpoints the client
             #    sent; this is keyed on (txid, vout), so it never over-marks.
+            # Recorded before anything else touches the row: this is what the
+            # spend watch checks against, and unlike the outpoint marking below
+            # it does not depend on the client having supplied spent_outpoints.
+            # A broadcast we forgot would be reported as a stranger spending the
+            # coins.
+            if data.wallet_id:
+                try:
+                    await record_broadcast_txid(data.wallet_id, txid)
+                except Exception as e:
+                    logger.warning(f"could not record broadcast txid {txid}: {e}")
+
             if data.wallet_id and data.spent_outpoints:
                 # data.spent_outpoints is a list of {txid, vout} models/dicts.
                 input_outpoints = [
@@ -1766,6 +1883,52 @@ async def api_register_start(data: RegistrationRequest, request: Request) -> dic
 @silnt_api_router.post("/api/v1/auth/register-verify")
 async def api_register_verify(data: VerifyRegistrationRequest) -> dict:
     return await complete_registration(data.token)
+
+@silnt_api_router.get(
+    "/api/v1/spend-alerts/{wallet_id}", dependencies=[Depends(require_trusted_device)]
+)
+async def api_list_spend_alerts(
+    wallet_id: str, key_info: WalletTypeInfo = Depends(require_trusted_device)
+):
+    """Unexpected spends recorded for this wallet.
+
+    The push is the urgent channel but it is easily missed or dismissed; this is
+    what lets the app keep showing the warning until the user acts on it.
+
+    The explorer base comes back with them because the client cannot derive it:
+    it is per-network admin configuration (BackendConfig.mempool_url), and the
+    first thing someone does with an alert is look at what the transaction
+    actually did.
+    """
+    from .crud import get_backend_config, get_silnt_wallet, list_spend_alerts
+
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet or wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Not your wallet.")
+    backend = await get_backend_config(wallet.network)
+    base = (backend.mempool_url or "https://mempool.space").rstrip("/")
+    return {"alerts": await list_spend_alerts(wallet_id), "explorer_base": base}
+
+
+@silnt_api_router.post(
+    "/api/v1/spend-alerts/{wallet_id}/ack",
+    dependencies=[Depends(require_trusted_device_admin)],
+)
+async def api_ack_spend_alert(
+    wallet_id: str,
+    data: AckSpendAlertRequest,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """Dismiss one alert. Admin-keyed: silencing a compromise warning is not
+    something a read-only key should be able to do."""
+    from .crud import acknowledge_spend_alert, get_silnt_wallet
+
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet or wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Not your wallet.")
+    await acknowledge_spend_alert(wallet_id, data.txid)
+    return {"acknowledged": data.txid}
+
 
 @silnt_api_router.post("/api/v1/auth/register-confirm")
 async def api_register_confirm(data: ConfirmRegistrationRequest) -> dict:

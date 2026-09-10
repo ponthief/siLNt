@@ -81,6 +81,20 @@ async def delete_silnt_wallet(wallet_id: str) -> None:
         "DELETE FROM silnt.plain_incoming WHERE wallet_id = :id",
         {"id": wallet_id},
     )
+    # The spend watch too. Wallet ids are reproducible from the seed, so
+    # deleting a wallet and importing the same recovery phrase again gives the
+    # SAME id — and a leftover row here would greet the new wallet with a
+    # compromise warning about a transaction that has nothing to do with it.
+    # The broadcast log goes for the mirror-image reason: kept, it would vouch
+    # for spends this wallet never made.
+    await db.execute(
+        "DELETE FROM silnt.spend_alerts WHERE wallet_id = :id",
+        {"id": wallet_id},
+    )
+    await db.execute(
+        "DELETE FROM silnt.broadcast_txids WHERE wallet_id = :id",
+        {"id": wallet_id},
+    )
 
 
 # ── Background scanning (opt-in "Remote Scanner") ─────────────────────────────
@@ -3096,3 +3110,119 @@ async def resolve_open_alerts_for(kind: str, key: str) -> int:
         cleared += 1
     return cleared
 
+
+
+# ── Spend watch: coins leaving the wallet without the wallet asking ──────────
+# See migrations.m029 for why this needs no scan key and why the txid log exists
+# separately from utxos.spent_in_txid.
+
+async def record_broadcast_txid(wallet_id: str, txid: str) -> None:
+    """Remember that WE sent this. Best-effort by design: called after a
+    successful broadcast, where failing the request over a bookkeeping row would
+    be worse than the row being missing."""
+    await db.execute(
+        """INSERT INTO silnt.broadcast_txids (txid, wallet_id, created_at)
+           VALUES (:txid, :wid, :ts)
+           ON CONFLICT (txid) DO NOTHING""",
+        {"txid": txid, "wid": wallet_id, "ts": int(time.time())},
+    )
+
+
+async def was_broadcast_by_us(wallet_id: str, txid: str) -> bool:
+    """Did this wallet send this transaction?
+
+    Checks BOTH records: the txid log, and the older spent_in_txid marking that
+    predates it. Either one saying yes is enough — the cost of a false "no" is
+    telling a user their wallet is compromised when it is not, which is the
+    worst thing this feature could do.
+    """
+    row = await db.fetchone(
+        "SELECT 1 FROM silnt.broadcast_txids WHERE txid = :txid AND wallet_id = :wid",
+        {"txid": txid, "wid": wallet_id},
+    )
+    if row:
+        return True
+    return await is_own_sent_tx(wallet_id, txid)
+
+
+async def utxos_to_watch(wallet_id: str) -> list[dict]:
+    """The wallet's own coins that should still be unspent, with the output key
+    needed to watch them. Anything already known spent is not interesting."""
+    rows = await db.fetchall(
+        """SELECT txid, vout, amount, pub_key FROM silnt.utxos
+             WHERE wallet_id = :wid
+               AND utxo_state IN ('unspent', 'unconfirmed')
+               AND spent_in_txid IS NULL""",
+        {"wid": wallet_id},
+    )
+    return [
+        {
+            "txid": r["txid"],
+            "vout": int(r["vout"]),
+            "amount": int(r["amount"] or 0),
+            "pub_key": r["pub_key"],
+        }
+        for r in rows
+    ]
+
+
+async def wallets_with_watchable_utxos() -> list[str]:
+    """Wallet ids holding coins that should still be unspent.
+
+    Driven off silnt.utxos rather than the wallet list: a wallet with no coins
+    has nothing to watch, and this is the sweep's whole work list.
+    """
+    rows = await db.fetchall(
+        """SELECT DISTINCT wallet_id FROM silnt.utxos
+             WHERE utxo_state IN ('unspent', 'unconfirmed')
+               AND spent_in_txid IS NULL"""
+    )
+    return [r["wallet_id"] for r in rows]
+
+
+async def spend_alert_exists(txid: str) -> bool:
+    row = await db.fetchone(
+        "SELECT 1 FROM silnt.spend_alerts WHERE txid = :txid", {"txid": txid}
+    )
+    return row is not None
+
+
+async def record_spend_alert(wallet_id: str, txid: str) -> bool:
+    """Record an unexpected spend. Returns False if it was already known, so the
+    caller announces it exactly once rather than on every pass."""
+    if await spend_alert_exists(txid):
+        return False
+    await db.execute(
+        """INSERT INTO silnt.spend_alerts (txid, wallet_id, detected_at, acknowledged)
+           VALUES (:txid, :wid, :ts, FALSE)
+           ON CONFLICT (txid) DO NOTHING""",
+        {"txid": txid, "wid": wallet_id, "ts": int(time.time())},
+    )
+    return True
+
+
+async def list_spend_alerts(wallet_id: str, include_acknowledged: bool = False) -> list[dict]:
+    sql = """SELECT txid, detected_at, acknowledged FROM silnt.spend_alerts
+               WHERE wallet_id = :wid"""
+    if not include_acknowledged:
+        sql += " AND acknowledged = FALSE"
+    sql += " ORDER BY detected_at DESC"
+    rows = await db.fetchall(sql, {"wid": wallet_id})
+    return [
+        {
+            "txid": r["txid"],
+            "detected_at": int(r["detected_at"] or 0),
+            "acknowledged": bool(r["acknowledged"]),
+        }
+        for r in rows
+    ]
+
+
+async def acknowledge_spend_alert(wallet_id: str, txid: str) -> None:
+    """Dismiss one alert. Kept rather than deleted: a user who dismisses a real
+    compromise and later needs to reconstruct what happened should still find it."""
+    await db.execute(
+        """UPDATE silnt.spend_alerts SET acknowledged = TRUE
+             WHERE wallet_id = :wid AND txid = :txid""",
+        {"wid": wallet_id, "txid": txid},
+    )

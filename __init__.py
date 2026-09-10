@@ -14,6 +14,7 @@ from .views_api import (
     run_background_scans,
     background_tip_advanced,
     run_send_confirmation_checks,
+    run_unexpected_spend_checks,
     BACKGROUND_SCAN_POLL_SECONDS,
     BACKGROUND_SCAN_INTERVAL_SECONDS,
 )
@@ -90,6 +91,12 @@ async def _background_scan_loop():
                 # reaches a user whose app is closed. Kept ahead of the scan so
                 # a slow sweep can't delay it.
                 await run_send_confirmation_checks()
+                # Coins leaving a wallet that did not send them. Beside the
+                # confirmation check for the same reasons: no scan key needed,
+                # every wallet rather than only opt-ins, and it is the path that
+                # reaches a closed app. Ahead of the scan so a slow sweep cannot
+                # delay the one alert worth waking someone for.
+                await run_unexpected_spend_checks()
                 await run_background_scans()
                 last_sweep = time.monotonic()
         except Exception as exc:
