@@ -141,3 +141,25 @@ def mark_scan_finished(
 
     if reset_wallet_cooldown:
         _last_scan_time.pop(wallet_id, None)
+
+
+def clear_wallet_limits(wallet_id: str, user_id: Optional[str] = None) -> None:
+    """Drop the per-wallet limiter state for a wallet that no longer exists.
+
+    Wallet ids are reproducible from the seed, so deleting a wallet and
+    importing the same recovery phrase again yields the SAME id. Without this,
+    the new wallet starts life inside the old one's cooldown, and — if the old
+    wallet was deleted mid-scan — inside a concurrency slot that is never
+    released, so every scan on the account is refused with "another scan is
+    already running".
+
+    The per-IP and per-user block budgets are deliberately left alone: those
+    measure oracle load that really did happen, and deleting a wallet is not a
+    way to buy more of it.
+    """
+    _last_scan_time.pop(wallet_id, None)
+    if user_id is not None:
+        _active_scans[user_id].discard(wallet_id)
+    else:
+        for wallets in _active_scans.values():
+            wallets.discard(wallet_id)

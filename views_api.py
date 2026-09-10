@@ -17,6 +17,7 @@ from .helpers.wallet import (
 )
 from .helpers.scan import (
     scan_wallet, get_scan_progress, request_scan_stop, get_tx_status,
+    clear_wallet_scan_state, mark_scan_inactive,
     BIP352_LABELED_ADDRESS_INDICES,
 )
 from .helpers.address_resolver import bip353_resolve
@@ -39,7 +40,11 @@ from .helpers.email_verification import (
 )
 from mnemonic import Mnemonic
 from .helpers.dust_check import evaluate_dust_for_wallet
-from .helpers.scan_rate_limiter import check_scan_allowed, mark_scan_finished
+from .helpers.scan_rate_limiter import (
+    check_scan_allowed,
+    clear_wallet_limits,
+    mark_scan_finished,
+)
 from .helpers.invite_rate_limiter import check_invite_allowed, record_invite
 from .helpers.forgot_password import request_password_reset
 from .helpers.transactions import get_wallet_transaction_detail, list_wallet_transactions
@@ -528,6 +533,20 @@ async def api_wallet_delete(wallet_id: str):
         raise HTTPException(
             status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
         )
+    # In-memory scan state goes first, before anything can fail: a wallet id is
+    # reproducible from the seed ("sp" + sha256(network:sp_address)), so
+    # importing the same recovery phrase again produces the SAME id. Anything
+    # left in these dictionaries is inherited by the new wallet — an active
+    # flag it cannot clear, a cooldown it did not earn, a concurrency slot that
+    # blocks every scan on the account.
+    #
+    # It also stops a scan that is running right now: the wallet row is about to
+    # disappear underneath it, and a stop request is the orderly way out.
+    clear_wallet_scan_state(wallet_id)
+    clear_wallet_limits(wallet_id, wallet.user)
+    # After the clear, not before — clear_wallet_scan_state drops the stop flag
+    # along with everything else, so setting it first would cancel this.
+    request_scan_stop(wallet_id)
      # Clean up BitMail state before wiping the wallet:
     # 1. Cancel all pending requests so none linger in the admin queue.
     try:
@@ -886,12 +905,20 @@ async def api_scan_wallet(
             new_found = (result or {}).get("utxos_found", 0) if isinstance(result, dict) else 0
             if new_found > 0:
                 await _notify_payment_found(wallet, new_found, (result or {}).get("amount_found"))
+        # _mark_scan_failed used to be called here and DID NOT EXIST, so every
+        # one of these handlers raised NameError instead of releasing the scan.
+        # The wallet was left reporting active=True in memory for the lifetime
+        # of the process: the app polled a scan that was not running, the
+        # background sweep skipped the wallet, and — because ids are reproducible
+        # from the seed — deleting and re-importing the same phrase inherited the
+        # stuck flag and could never scan again. scan_wallet now clears the flag
+        # itself; these calls are the explicit belt to that braces.
         except ValueError as e:
-            logger.error(f"Scan value error for {wallet_id}: {e}"); _mark_scan_failed(wallet_id)
+            logger.error(f"Scan value error for {wallet_id}: {e}"); mark_scan_inactive(wallet_id)
         except RuntimeError as e:
-            logger.error(f"Scan runtime error for {wallet_id}: {e}"); _mark_scan_failed(wallet_id)
+            logger.error(f"Scan runtime error for {wallet_id}: {e}"); mark_scan_inactive(wallet_id)
         except Exception as e:
-            logger.error(f"Scan unexpected error for {wallet_id}: {e}", exc_info=True); _mark_scan_failed(wallet_id)
+            logger.error(f"Scan unexpected error for {wallet_id}: {e}", exc_info=True); mark_scan_inactive(wallet_id)
         finally:
             actual = (result or {}).get("blocks_scanned") if isinstance(result, dict) else None
             mark_scan_finished(
@@ -916,6 +943,13 @@ async def api_stop_scan(
     # Charge only for blocks actually scanned so far, and clear the per-wallet
     # cooldown so the user can immediately retry (e.g. fix the range and rescan).
     actual = get_scan_progress(wallet_id).get("current", 0)
+    # Report it stopped now rather than at the next batch boundary. This is also
+    # the only way out of a wallet whose active flag outlived the scan behind it:
+    # without it, Stop does nothing for a scan that is not running, and the
+    # wallet stays unscannable until LNbits restarts. A scan that IS still
+    # running exits at its next batch and writes the same thing again; the
+    # concurrency limit and the cooldown keep a second one from overlapping it.
+    mark_scan_inactive(wallet_id)
     mark_scan_finished(
         key_info.wallet.user, wallet_id,
         actual_blocks=actual,

@@ -81,6 +81,20 @@ async def delete_silnt_wallet(wallet_id: str) -> None:
         "DELETE FROM silnt.plain_incoming WHERE wallet_id = :id",
         {"id": wallet_id},
     )
+    # The spend watch too. Wallet ids are reproducible from the seed, so
+    # deleting a wallet and importing the same recovery phrase again gives the
+    # SAME id — and a leftover row here would greet the new wallet with a
+    # compromise warning about a transaction that has nothing to do with it.
+    # The broadcast log goes for the mirror-image reason: kept, it would vouch
+    # for spends this wallet never made.
+    await db.execute(
+        "DELETE FROM silnt.spend_alerts WHERE wallet_id = :id",
+        {"id": wallet_id},
+    )
+    await db.execute(
+        "DELETE FROM silnt.broadcast_txids WHERE wallet_id = :id",
+        {"id": wallet_id},
+    )
 
 
 # ── Background scanning (opt-in "Remote Scanner") ─────────────────────────────

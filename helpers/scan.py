@@ -614,7 +614,65 @@ def set_scan_progress(wallet_id, current, total, found, active=True, amount=0):
     }
 
 
+def mark_scan_inactive(wallet_id: str) -> None:
+    """Say this wallet is no longer scanning, keeping the counters it reached.
+
+    A wallet stuck at active=True is worse than one that reports a failure: the
+    app shows a progress bar for a scan that is not running and never finishes,
+    the background sweep skips the wallet (run_background_scans checks this
+    flag), and the scan panel will not even offer a range to retry. Nothing
+    recovers it short of restarting LNbits, because the flag lives in memory.
+    """
+    progress = _scan_progress.get(wallet_id)
+    if progress:
+        progress["active"] = False
+    # No entry means no scan has run for this wallet in this process, and
+    # get_scan_progress already reports that as inactive.
+
+
+def clear_wallet_scan_state(wallet_id: str) -> None:
+    """Forget everything this process remembers about scanning one wallet.
+
+    Called when a wallet is deleted. Wallet ids are deliberately reproducible
+    from the seed ("sp" + sha256(network:sp_address)), so deleting a wallet and
+    importing the same phrase again produces the SAME id — and would otherwise
+    inherit the deleted wallet's scan state. That is not hypothetical: a
+    lingering active=True is exactly what makes a freshly imported wallet
+    refuse to scan and show no Silent Payments balance.
+    """
+    _scan_progress.pop(wallet_id, None)
+    _scan_stop.pop(wallet_id, None)
+
+
 async def scan_wallet(
+    wallet_id: str,
+    scan_secret_hex: str,
+    spend_secret_hex: Optional[str] = None,
+    from_height: Optional[int] = None,
+    to_height: Optional[int] = None,
+    spend_pub_hex: Optional[str] = None,
+) -> dict:
+    """Scan a range of blocks for this wallet's Silent Payments outputs.
+
+    Owns the active flag rather than trusting callers to clear it: whatever
+    happens in here — an oracle timeout, a DB error, the wallet being deleted
+    mid-scan — the wallet must not be left looking busy forever. Every caller
+    got this wrong at least once, so the guarantee belongs at the source.
+    """
+    try:
+        return await _scan_wallet(
+            wallet_id=wallet_id,
+            scan_secret_hex=scan_secret_hex,
+            spend_secret_hex=spend_secret_hex,
+            from_height=from_height,
+            to_height=to_height,
+            spend_pub_hex=spend_pub_hex,
+        )
+    finally:
+        mark_scan_inactive(wallet_id)
+
+
+async def _scan_wallet(
     wallet_id: str,
     scan_secret_hex: str,  # scan private key — detection only
     spend_secret_hex: Optional[str] = None,
