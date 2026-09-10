@@ -108,6 +108,7 @@ from .crud import (
     update_address_label,
     get_wallet_address,
     mark_utxos_spent_by_tx,
+    record_broadcast_txid,
     set_utxo_freeze_manual,
     clear_utxo_freeze_manual,
     count_trusted_devices,
@@ -201,6 +202,7 @@ from .crud import (
 )
 
 from .models import (
+    AckSpendAlertRequest,
     BackendConfig,
     CreateWallet,
     WalletAccount,
@@ -1149,6 +1151,76 @@ async def _notify_send_confirmed(user_id: str) -> None:
         logger.warning(f"send-confirmed push failed for user {user_id}: {e}")
 
 
+async def _notify_unexpected_spend(user_id: str) -> None:
+    """Push when coins left a wallet that did not send them.
+
+    Deliberately urgent and deliberately vague. Urgent because this is the one
+    alert worth waking someone for; vague because the title and body pass
+    through Google in plaintext, so no amount, wallet or txid goes in — the same
+    rule the other pushes follow.
+
+    It does NOT suggest replacing the transaction. RBF against someone holding
+    your spend key is a fee auction they can always counter, and winning it
+    changes nothing durable because they still have the key. Moving what is left
+    is the action that helps, so that is the action it names.
+    """
+    try:
+        from .crud import list_fcm_tokens_for_user
+        from .helpers.fcm import send_fcm
+
+        tokens = await list_fcm_tokens_for_user(user_id)
+        if not tokens:
+            return
+        await send_fcm(
+            tokens,
+            "Unrecognised transaction",
+            "Coins left your wallet in a transaction it did not send. Open "
+            "Thrilla now and move your remaining funds to a new wallet.",
+            {"type": "unexpected_spend"},
+        )
+    except Exception as e:
+        logger.warning(f"unexpected-spend push failed for user {user_id}: {e}")
+
+
+async def run_unexpected_spend_checks() -> int:
+    """Watch every wallet's coins for a spend it did not make.
+
+    Runs for EVERY wallet holding coins, not just background-scan opt-ins, for
+    the same reason run_send_confirmation_checks does: it needs no scan key,
+    only the output keys already in silnt.utxos, so there is nothing extra to
+    consent to — and it is what reaches a phone whose app is closed.
+
+    Returns how many wallets had something newly unexpected.
+    """
+    flagged = 0
+    try:
+        from .crud import get_silnt_wallet, wallets_with_watchable_utxos
+        from .helpers.spend_watch import check_wallet_for_unexpected_spends
+
+        wallet_ids = await wallets_with_watchable_utxos()
+    except Exception as e:
+        logger.warning(f"[silnt] could not list wallets to watch: {e}")
+        return 0
+
+    for wallet_id in wallet_ids:
+        try:
+            wallet = await get_silnt_wallet(wallet_id)
+            if not wallet:
+                continue
+            host, port, tls, _ = await _fulcrum_cfg(wallet.network)
+            if not host:
+                continue
+            found = await check_wallet_for_unexpected_spends(wallet, host, port, tls)
+            if found:
+                flagged += 1
+                await _notify_unexpected_spend(wallet.user)
+        except Exception as e:
+            # One wallet's failure must not stop the sweep — the next wallet may
+            # be the one actually being drained.
+            logger.warning(f"[silnt] spend watch failed for {wallet_id}: {e}")
+    return flagged
+
+
 async def run_send_confirmation_checks() -> int:
     """
     Confirm outstanding sends across all wallets and push on the first
@@ -1506,6 +1578,17 @@ async def api_broadcast_transaction(data: BroadcastTxRequest):
             # ── Mark the spent inputs immediately so Activity shows the Sent tx
             #    without waiting for a rescan. Use the exact outpoints the client
             #    sent; this is keyed on (txid, vout), so it never over-marks.
+            # Recorded before anything else touches the row: this is what the
+            # spend watch checks against, and unlike the outpoint marking below
+            # it does not depend on the client having supplied spent_outpoints.
+            # A broadcast we forgot would be reported as a stranger spending the
+            # coins.
+            if data.wallet_id:
+                try:
+                    await record_broadcast_txid(data.wallet_id, txid)
+                except Exception as e:
+                    logger.warning(f"could not record broadcast txid {txid}: {e}")
+
             if data.wallet_id and data.spent_outpoints:
                 # data.spent_outpoints is a list of {txid, vout} models/dicts.
                 input_outpoints = [
@@ -1766,6 +1849,45 @@ async def api_register_start(data: RegistrationRequest, request: Request) -> dic
 @silnt_api_router.post("/api/v1/auth/register-verify")
 async def api_register_verify(data: VerifyRegistrationRequest) -> dict:
     return await complete_registration(data.token)
+
+@silnt_api_router.get(
+    "/api/v1/spend-alerts/{wallet_id}", dependencies=[Depends(require_trusted_device)]
+)
+async def api_list_spend_alerts(
+    wallet_id: str, key_info: WalletTypeInfo = Depends(require_trusted_device)
+):
+    """Unexpected spends recorded for this wallet.
+
+    The push is the urgent channel but it is easily missed or dismissed; this is
+    what lets the app keep showing the warning until the user acts on it.
+    """
+    from .crud import get_silnt_wallet, list_spend_alerts
+
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet or wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Not your wallet.")
+    return {"alerts": await list_spend_alerts(wallet_id)}
+
+
+@silnt_api_router.post(
+    "/api/v1/spend-alerts/{wallet_id}/ack",
+    dependencies=[Depends(require_trusted_device_admin)],
+)
+async def api_ack_spend_alert(
+    wallet_id: str,
+    data: AckSpendAlertRequest,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """Dismiss one alert. Admin-keyed: silencing a compromise warning is not
+    something a read-only key should be able to do."""
+    from .crud import acknowledge_spend_alert, get_silnt_wallet
+
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet or wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Not your wallet.")
+    await acknowledge_spend_alert(wallet_id, data.txid)
+    return {"acknowledged": data.txid}
+
 
 @silnt_api_router.post("/api/v1/auth/register-confirm")
 async def api_register_confirm(data: ConfirmRegistrationRequest) -> dict:

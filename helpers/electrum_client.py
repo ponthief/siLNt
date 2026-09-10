@@ -139,14 +139,22 @@ def address_to_scriptpubkey(addr: str) -> bytes:
     raise ValueError(f"Unsupported witver/len: v{witver}/{len(prog)}")
 
 
+def scripthash_for_scriptpubkey(spk: bytes) -> str:
+    """Electrum scripthash for a raw scriptPubKey.
+
+    Separate from electrum_scripthash because a Silent Payments output has no
+    address to go through: what the wallet stores is the 32-byte x-only output
+    key, and watching it means hashing the script directly.
+    """
+    return hashlib.sha256(spk).digest()[::-1].hex()
+
+
 def electrum_scripthash(addr: str) -> str:
     """
     Electrum scripthash = sha256(scriptPubKey), BYTE-REVERSED, hex.
     The reversal is the classic gotcha — Electrum uses little-endian here.
     """
-    spk = address_to_scriptpubkey(addr)
-    h = hashlib.sha256(spk).digest()
-    return h[::-1].hex()
+    return scripthash_for_scriptpubkey(address_to_scriptpubkey(addr))
 
 
 # ── minimal Electrum JSON-RPC line client ─────────────────────────────────────
