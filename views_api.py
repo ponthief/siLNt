@@ -1860,13 +1860,20 @@ async def api_list_spend_alerts(
 
     The push is the urgent channel but it is easily missed or dismissed; this is
     what lets the app keep showing the warning until the user acts on it.
+
+    The explorer base comes back with them because the client cannot derive it:
+    it is per-network admin configuration (BackendConfig.mempool_url), and the
+    first thing someone does with an alert is look at what the transaction
+    actually did.
     """
-    from .crud import get_silnt_wallet, list_spend_alerts
+    from .crud import get_backend_config, get_silnt_wallet, list_spend_alerts
 
     wallet = await get_silnt_wallet(wallet_id)
     if not wallet or wallet.user != key_info.wallet.user:
         raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Not your wallet.")
-    return {"alerts": await list_spend_alerts(wallet_id)}
+    backend = await get_backend_config(wallet.network)
+    base = (backend.mempool_url or "https://mempool.space").rstrip("/")
+    return {"alerts": await list_spend_alerts(wallet_id), "explorer_base": base}
 
 
 @silnt_api_router.post(
