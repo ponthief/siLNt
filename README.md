@@ -311,10 +311,41 @@ Every scan logs where its time went:
 Scan timing: 1200 blocks, 3600 oracle requests (3.0/block), 48.2s waiting on the oracle, 1.9s matching outputs
 ```
 
-Read that line before optimising anything. If the oracle wait dominates — which
-is the usual case, since scanning is latency-bound rather than compute-bound —
-then faster matching, in any language, changes nothing. The EC work already runs
-in C via `coincurve` (libsecp256k1) on worker threads.
+Read that line before optimising anything — and note that on this workload the
+answer turned out to be the opposite of the usual assumption. Measured with the
+real `sync_block` over synthetic blocks:
+
+| | µs per tweak |
+|---|---|
+| no labels | 92 |
+| 1 label | 129 |
+| 2 labels | 175 |
+| 4 labels (the default scan set) | **244** |
+
+Matching costs ~250 µs per tweak, linear in the tweak count, so a 500-tweak
+block is ~0.125 s of straight computation and 160 blocks is ~20 s **before any
+network time at all**. Scanning here is compute-bound, not latency-bound.
+
+The label set is the multiplier: every tweak is combined with each label and its
+negation, so the cost is O(tweaks x labels). The scan set is always four labels
+(change m=0, legacy change m=1, and labeled addresses m=2,3), which is why the
+default is 2.7x the no-label cost.
+
+Matching runs on a **single** dedicated worker thread. This is not a limitation
+to be raised: `coincurve` holds the GIL through its calls, so extra matching
+threads contend rather than share. Measured on 4 cores, 8 blocks of 300 tweaks:
+
+| | time |
+|---|---|
+| inline, no executor | 0.61 s |
+| 1 worker | 0.64 s |
+| 2 workers | 1.84 s |
+| 4 workers | 2.18 s |
+| default pool (`min(32, cpu+4)`) | 2.27 s |
+
+Real parallelism needs processes, not threads. Worth doing only after the
+per-tweak cost itself comes down — and the way to do that is
+`SILNT_SCAN_COMPUTE_INDEX`, which moves the work to the oracle entirely.
 
 | Variable | Default | What it does |
 |---|---|---|
