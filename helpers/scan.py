@@ -3,7 +3,7 @@ scan.py — Silent Payments blockchain scanner for the silnt LNbits extension.
 """
 
 from __future__ import annotations
-import asyncio, hashlib, struct
+import asyncio, hashlib, os, struct, time
 from dataclasses import dataclass
 from typing import Optional
 import coincurve, httpx
@@ -402,56 +402,199 @@ async def get_outspend_status(base_mempool_url: str, txid: str, vout: int) -> di
         logger.warning(f"outspend check failed for {txid}:{vout}: {e}")
         return None
 
+# One HTTP client for the whole process, instead of one per request.
+#
+# Every oracle method used to open its own httpx.AsyncClient and close it again,
+# which meant a fresh TCP handshake — and a fresh TLS handshake on top of it —
+# for every single call. Scanning costs roughly three requests per block
+# (tweaks, utxos, spent-outputs), so a ten-thousand-block scan was making about
+# thirty thousand connections where one suffices. On a remote oracle that
+# handshake cost dominates everything else the scanner does; it is latency, not
+# computation, and no amount of faster matching touches it.
+#
+# A module-level client is deliberate rather than one per BlindBitOracleClient:
+# there are five places that construct one of those for a single call, and a
+# per-instance pool would have to be closed by each of them or leak sockets.
+# httpx pools per host internally, so sharing one client across oracles is
+# correct even when they point at different URLs.
+#
+# It is bound to the event loop that first uses it, which in LNbits is the one
+# uvicorn loop. aclose_http() exists for shutdown and for tests.
+_http: Optional[httpx.AsyncClient] = None
+
+# TLS verification is OFF, which is how this has always been, and it is worth
+# naming rather than leaving implicit: anyone able to intercept the oracle
+# connection can serve whatever tweaks and UTXOs they like, which shows a user
+# the wrong balance and reveals which blocks they are interested in. It cannot
+# steal keys — scanning never sees a spend key — but it is not nothing.
+# Overridable so a deployment with a properly certificated oracle can turn it
+# on without a code change.
+_VERIFY_TLS = os.getenv("SILNT_ORACLE_VERIFY_TLS", "").lower() in ("1", "true", "yes")
+
+# Opt-in, because the path it enables has never run. See the note in scan_block.
+_USE_COMPUTE_INDEX = os.getenv("SILNT_SCAN_COMPUTE_INDEX", "").lower() in (
+    "1", "true", "yes",
+)
+
+
+def _env_int(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        return max(lo, min(hi, int(os.getenv(name, "") or default)))
+    except ValueError:
+        return default
+
+
+def get_http_client() -> httpx.AsyncClient:
+    global _http
+    if _http is None or _http.is_closed:
+        _http = httpx.AsyncClient(
+            timeout=30.0,
+            verify=_VERIFY_TLS,
+            # The pool has to be at least as large as the number of block
+            # requests in flight, or the extra ones queue behind it and the
+            # concurrency above is imaginary.
+            limits=httpx.Limits(
+                max_connections=64,
+                max_keepalive_connections=32,
+                keepalive_expiry=60.0,
+            ),
+        )
+    return _http
+
+
+async def aclose_http() -> None:
+    global _http
+    if _http is not None and not _http.is_closed:
+        await _http.aclose()
+    _http = None
+
+
+@dataclass
+class OracleStats:
+    """Where a scan's time actually goes, counted rather than guessed."""
+
+    requests: int = 0
+    request_seconds: float = 0.0
+    match_seconds: float = 0.0
+    blocks: int = 0
+
+    def summary(self) -> str:
+        per_block = (self.requests / self.blocks) if self.blocks else 0
+        return (
+            f"{self.blocks} blocks, {self.requests} oracle requests "
+            f"({per_block:.1f}/block), {self.request_seconds:.1f}s waiting on the "
+            f"oracle, {self.match_seconds:.1f}s matching outputs"
+        )
+
+
 class BlindBitOracleClient:
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
+        self.stats = OracleStats()
 
-    def _client(self):
-        return httpx.AsyncClient(timeout=30.0, verify=False)
+    async def _get(self, path: str) -> httpx.Response:
+        started = time.perf_counter()
+        try:
+            return await get_http_client().get(f"{self.base_url}{path}")
+        finally:
+            self.stats.requests += 1
+            self.stats.request_seconds += time.perf_counter() - started
 
     async def get_chain_tip(self) -> int:
-        async with self._client() as c:
-            return (await c.get(f"{self.base_url}/info")).json()["height"]
+        return (await self._get("/info")).json()["height"]
 
     async def get_tweaks(self, height: int) -> list[bytes]:
-        async with self._client() as c:
-            r = await c.get(f"{self.base_url}/tweaks/{height}")
-            r.raise_for_status()
-            d = r.json()
-            return [
-                bytes.fromhex(t) for t in (d["index"] if isinstance(d, dict) else d)
-            ]
+        r = await self._get(f"/tweaks/{height}")
+        r.raise_for_status()
+        d = r.json()
+        return [bytes.fromhex(t) for t in (d["index"] if isinstance(d, dict) else d)]
 
     async def get_utxos(self, height: int) -> list[dict]:
-        async with self._client() as c:
-            r = await c.get(f"{self.base_url}/utxos/{height}")
-            r.raise_for_status()
-            d = r.json()
-            return d["index"] if isinstance(d, dict) else d
+        r = await self._get(f"/utxos/{height}")
+        r.raise_for_status()
+        d = r.json()
+        return d["index"] if isinstance(d, dict) else d
 
     async def get_spent_outputs(self, height: int) -> Optional[dict]:
-        async with self._client() as c:
-            r = await c.get(f"{self.base_url}/spent-outputs/{height}")
-            return None if r.status_code == 404 else r.json()
+        r = await self._get(f"/spent-outputs/{height}")
+        return None if r.status_code == 404 else r.json()
 
     async def get_compute_index(self, height: int) -> Optional[dict]:
-        async with self._client() as c:
-            r = await c.get(f"{self.base_url}/compute-index/{height}")
-            if r.status_code == 404:
-                return None
-            d = r.json()
-            return d if isinstance(d, dict) and "index" in d else {"index": d}
+        r = await self._get(f"/compute-index/{height}")
+        if r.status_code == 404:
+            return None
+        d = r.json()
+        return d if isinstance(d, dict) and "index" in d else {"index": d}
 
     async def get_block_hash(self, height: int) -> Optional[dict]:
-        async with self._client() as c:
-            r = await c.get(f"{self.base_url}/blockhash/{height}")
-            return None if r.status_code == 404 else r.json()
+        r = await self._get(f"/blockhash/{height}")
+        return None if r.status_code == 404 else r.json()
+
+
+async def _match_in_thread(client, fn, *args):
+    """Run the synchronous EC matching off the event loop, and time it.
+
+    The timing is the point: it is the only way to say whether a slow scan is
+    slow because of the oracle or because of the matching, and that answer
+    decides whether anything is worth optimising here at all.
+    """
+    loop = asyncio.get_event_loop()
+    started = time.perf_counter()
+    try:
+        return await loop.run_in_executor(None, fn, *args)
+    finally:
+        client.stats.match_seconds += time.perf_counter() - started
 
 
 async def scan_block(
     height, client, scan_secret_bytes, spend_pub_bytes, labels,
     network: str,
 ):
+    client.stats.blocks += 1
+
+    # The oracle's compute-index endpoint does the filtering server-side and
+    # returns candidates, instead of this process downloading every tweak and
+    # every UTXO in the block and doing it here. It is the single biggest
+    # saving available — and until now it was unreachable.
+    #
+    # The branch below reads `if labels:` … else use compute-index. But
+    # create_labels() unconditionally includes the change index and the
+    # labeled-address indices, so labels is NEVER empty and the compute-index
+    # path has never executed in production.
+    #
+    # It is therefore untested code in the part of a wallet that decides
+    # whether your money is found, which is why it is opt-in rather than simply
+    # switched on: a bug here does not throw, it silently misses outputs. Set
+    # SILNT_SCAN_COMPUTE_INDEX=1 to use it, and prove it against the path below
+    # on a range with known payments before trusting it.
+    if _USE_COMPUTE_INDEX:
+        compute_data = await client.get_compute_index(height)
+        if compute_data:
+            matches = await _match_in_thread(
+                client, sync_block_from_compute_index,
+                compute_data["index"], scan_secret_bytes, spend_pub_bytes, labels,
+            )
+            if matches:
+                full_utxos = await client.get_utxos(height)
+                lkp = {u["pubkey"]: u for u in full_utxos if "pubkey" in u}
+                for owned in matches:
+                    ph = owned.pub_key.hex()
+                    full = lkp.get(ph) or next(
+                        (u for u in full_utxos if u.get("pubkey", "")[:16] == ph[:16]),
+                        None,
+                    )
+                    if full:
+                        owned.vout = full.get("vout", owned.vout)
+                        owned.amount = full.get("amount", owned.amount)
+                        owned.timestamp = full.get("timestamp") or await get_block_ts(
+                            full.get("txid", ""), network
+                        )
+                        owned.pub_key = bytes.fromhex(full["pubkey"])
+            return matches
+        # 404 means this oracle does not serve compute-index; fall through to
+        # the tweaks+utxos path rather than reporting an empty block, which
+        # would look exactly like "you have no money here".
+
     if labels:
         tweaks = await client.get_tweaks(height)
         if not tweaks:
@@ -461,46 +604,27 @@ async def scan_block(
             return []
         # Offload the synchronous EC matching to a worker thread so it doesn't
         # block the event loop — keeps the API/UI responsive during a scan.
-        loop = asyncio.get_event_loop()
-        owned = await loop.run_in_executor(
-            None, sync_block, tweaks, utxos, scan_secret_bytes, spend_pub_bytes, labels
+        owned = await _match_in_thread(
+            client, sync_block,
+            tweaks, utxos, scan_secret_bytes, spend_pub_bytes, labels,
         )
         for o in owned:
             if not o.timestamp:
                 o.timestamp = await get_block_ts(o.txid.hex(), network)
         return owned
-    compute_data = await client.get_compute_index(height)
-    if compute_data:
-        loop = asyncio.get_event_loop()
-        matches = await loop.run_in_executor(
-            None, sync_block_from_compute_index,
-            compute_data["index"], scan_secret_bytes, spend_pub_bytes, labels
-        )
-        if matches:
-            full_utxos = await client.get_utxos(height)
-            lkp = {u["pubkey"]: u for u in full_utxos if "pubkey" in u}
-            for owned in matches:
-                ph = owned.pub_key.hex()
-                full = lkp.get(ph) or next(
-                    (u for u in full_utxos if u.get("pubkey", "")[:16] == ph[:16]), None
-                )
-                if full:
-                    owned.vout = full.get("vout", owned.vout)
-                    owned.amount = full.get("amount", owned.amount)
-                    owned.timestamp = full.get("timestamp") or await get_block_ts(
-                        full.get("txid", ""), network
-                    )
-                    owned.pub_key = bytes.fromhex(full["pubkey"])
-        return matches
+
+    # labels is empty. create_labels() makes that impossible today, so this is
+    # unreachable in practice — but it is the correct behaviour if the label set
+    # ever becomes genuinely empty, so it stays rather than being deleted.
     tweaks = await client.get_tweaks(height)
     if not tweaks:
         return []
     utxos = await client.get_utxos(height)
     if not utxos:
         return []
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
-        None, sync_block, tweaks, utxos, scan_secret_bytes, spend_pub_bytes, labels
+    return await _match_in_thread(
+        client, sync_block,
+        tweaks, utxos, scan_secret_bytes, spend_pub_bytes, labels,
     )
 
 
@@ -724,9 +848,19 @@ async def _scan_wallet(
     stopped = False
     clear_scan_stop(wallet_id)
     set_scan_progress(wallet_id, 0, total_blocks, 0)
-    # Smaller batches keep the span of work between event-loop yields short, so
-    # navigation/API calls stay responsive during a scan.
-    BATCH_SIZE = 5
+    # How many blocks are in flight at once.
+    #
+    # This was 5, chosen when every request paid for its own TCP and TLS
+    # handshake — in that world more concurrency mostly bought more handshakes.
+    # With a pooled, keep-alive client the requests are cheap and the limit is
+    # what the oracle will tolerate, so the default is higher. Each block is
+    # still a few small requests, and the matching stays on worker threads, so
+    # the event loop keeps yielding and the UI stays responsive.
+    #
+    # Tunable because "what the oracle tolerates" is a property of someone
+    # else's server: lower it if a scan starts drawing timeouts or 429s. The
+    # ceiling is the client's max_connections.
+    BATCH_SIZE = _env_int("SILNT_SCAN_BATCH_SIZE", 24, 1, 64)
 
     for batch_start in range(0, total_blocks, BATCH_SIZE):
         if should_stop(wallet_id):
@@ -853,6 +987,9 @@ async def _scan_wallet(
     logger.info(
         f"Scan done: {blocks_scanned} blocks, {total_found} UTXOs, balance={balance}"
     )
+    # The number that decides what, if anything, to optimise next. If waiting on
+    # the oracle dominates, faster matching — in any language — changes nothing.
+    logger.info(f"Scan timing: {oracle.stats.summary()}")
     set_scan_progress(
         wallet_id, blocks_scanned, total_blocks, total_found,
         active=False, amount=total_found_amount,
