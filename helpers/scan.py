@@ -477,13 +477,38 @@ class OracleStats:
     request_seconds: float = 0.0
     match_seconds: float = 0.0
     blocks: int = 0
+    # Block shape. Matching cost is linear in tweaks, so "how many tweaks does
+    # a block here actually have" is the difference between a diagnosis and a
+    # guess — a signet block with 20 tweaks and a mainnet block with 2000 are
+    # two completely different problems wearing the same symptom.
+    tweaks: int = 0
+    utxos: int = 0
+    wall_seconds: float = 0.0
+
+    def as_dict(self) -> dict:
+        return {
+            "blocks": self.blocks,
+            "wall_seconds": round(self.wall_seconds, 2),
+            "oracle_requests": self.requests,
+            "oracle_seconds": round(self.request_seconds, 2),
+            "match_seconds": round(self.match_seconds, 2),
+            "tweaks": self.tweaks,
+            "utxos": self.utxos,
+            "tweaks_per_block": round(self.tweaks / self.blocks, 1) if self.blocks else 0,
+        }
 
     def summary(self) -> str:
         per_block = (self.requests / self.blocks) if self.blocks else 0
+        tw = (self.tweaks / self.blocks) if self.blocks else 0
+        # request_seconds is summed across concurrent requests, so it can exceed
+        # the wall clock. Say so rather than leaving someone to wonder how 40s
+        # of waiting fits in a 27s scan.
         return (
-            f"{self.blocks} blocks, {self.requests} oracle requests "
-            f"({per_block:.1f}/block), {self.request_seconds:.1f}s waiting on the "
-            f"oracle, {self.match_seconds:.1f}s matching outputs"
+            f"{self.blocks} blocks in {self.wall_seconds:.1f}s wall clock | "
+            f"{self.requests} oracle requests ({per_block:.1f}/block), "
+            f"{self.request_seconds:.1f}s summed across concurrent requests | "
+            f"{self.match_seconds:.1f}s matching | "
+            f"{self.tweaks} tweaks ({tw:.0f}/block), {self.utxos} utxos"
         )
 
 
@@ -623,9 +648,11 @@ async def scan_block(
 
     if labels:
         tweaks = await client.get_tweaks(height)
+        client.stats.tweaks += len(tweaks)
         if not tweaks:
             return []
         utxos = await client.get_utxos(height)
+        client.stats.utxos += len(utxos)
         if not utxos:
             return []
         # Offload the synchronous EC matching to a worker thread so it doesn't
@@ -643,9 +670,11 @@ async def scan_block(
     # unreachable in practice — but it is the correct behaviour if the label set
     # ever becomes genuinely empty, so it stays rather than being deleted.
     tweaks = await client.get_tweaks(height)
+    client.stats.tweaks += len(tweaks)
     if not tweaks:
         return []
     utxos = await client.get_utxos(height)
+    client.stats.utxos += len(utxos)
     if not utxos:
         return []
     return await _match_in_thread(
@@ -853,6 +882,7 @@ async def _scan_wallet(
     spend_pub_hex_resolved = spend_pub_bytes.hex()
 
     oracle = BlindBitOracleClient(base_url=blindbit.blindbit_url)
+    scan_started = time.perf_counter()
     start = max(from_height if from_height is not None else wallet.last_height, 1)
     end = to_height if to_height is not None else await oracle.get_chain_tip()
     logger.info(f"Scanning wallet {wallet_id} blocks {start}–{end}")
@@ -1015,6 +1045,7 @@ async def _scan_wallet(
     )
     # The number that decides what, if anything, to optimise next. If waiting on
     # the oracle dominates, faster matching — in any language — changes nothing.
+    oracle.stats.wall_seconds = time.perf_counter() - scan_started
     logger.info(f"Scan timing: {oracle.stats.summary()}")
     set_scan_progress(
         wallet_id, blocks_scanned, total_blocks, total_found,
@@ -1026,7 +1057,8 @@ async def _scan_wallet(
         "blocks_scanned": blocks_scanned,
         "final_height": last_scanned_height,
         "balance": balance,
-        "stopped": stopped
+        "stopped": stopped,
+        "timing": oracle.stats.as_dict()
     }
 
 
