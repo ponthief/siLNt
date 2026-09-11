@@ -303,3 +303,26 @@ Created by [Ponthief](https://github.com/ponthief) at [Bitaurus](https://bitauru
 ## License
 
 MIT
+## Scanning: tuning and diagnostics
+
+Every scan logs where its time went:
+
+```
+Scan timing: 1200 blocks, 3600 oracle requests (3.0/block), 48.2s waiting on the oracle, 1.9s matching outputs
+```
+
+Read that line before optimising anything. If the oracle wait dominates — which
+is the usual case, since scanning is latency-bound rather than compute-bound —
+then faster matching, in any language, changes nothing. The EC work already runs
+in C via `coincurve` (libsecp256k1) on worker threads.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SILNT_SCAN_BATCH_SIZE` | `24` | Blocks scanned concurrently. Lower it if the oracle starts returning timeouts or 429s; the ceiling is the HTTP pool's `max_connections` (64). |
+| `SILNT_SCAN_COMPUTE_INDEX` | off | Use the oracle's `compute-index` endpoint, which filters server-side instead of downloading every tweak and UTXO per block. **Opt-in: this path has never run in production** — the branch guarding it was unreachable — so verify it against a block range with known payments before trusting it. A mistake here does not raise, it silently misses outputs. |
+| `SILNT_ORACLE_VERIFY_TLS` | off | Verify the oracle's TLS certificate. Off by default only because that is the behaviour this has always had. Turn it on if your oracle has a valid certificate: without it, anyone on the path can serve forged tweaks and UTXOs, which shows a wrong balance and reveals which blocks a user cares about. It cannot leak keys — scanning never sees a spend key. |
+
+Oracle requests share one pooled, keep-alive HTTP client for the whole process.
+Before that they each opened their own connection — and their own TLS handshake
+— so a 10,000-block scan made roughly 30,000 connections instead of reusing a
+handful.
