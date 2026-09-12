@@ -348,3 +348,92 @@ def test_both_parities_of_p0_are_exercised_and_found():
     assert even_found > 5, f"only {even_found} even-parity P_0 cases"
     assert odd_found > 5, f"only {odd_found} odd-parity P_0 cases; the case the "
     "sign-swap argument exists for is not covered"
+
+
+# --- the switches -----------------------------------------------------------
+
+
+class _RecordingLogger:
+    """The module logs through loguru, which conftest stubs out, so caplog
+    cannot see it. This captures what was logged instead."""
+
+    def __init__(self):
+        self.errors = []
+
+    def error(self, msg, *args, **kwargs):
+        self.errors.append(msg % args if args else msg)
+
+    def __getattr__(self, _name):
+        return lambda *a, **k: None
+
+
+def test_verified_mode_returns_forward_result_and_reports_disagreement(
+    monkeypatch,
+):
+    """When the matchers disagree, say so loudly and keep the forward result.
+
+    Simulated by making the reverse matcher drop an output. What is being
+    tested is the safety net itself: that a disagreement on real data would be
+    visible rather than silently costing someone money.
+    """
+    rng = random.Random(5150)
+    tweaks, ci, utxos = build_block(rng, [([None], 1), ([2], 1)])
+
+    expected = scan.sync_block(tweaks, utxos, SCAN_SECRET, SPEND_PUB, LABELS)
+    assert len(expected) == 2, "fixture should contain two payments"
+
+    real_reverse = scan.sync_block_reverse
+
+    def lossy(*args, **kwargs):
+        return real_reverse(*args, **kwargs)[:1]  # drop one
+
+    monkeypatch.setattr(scan, "sync_block_reverse", lossy)
+    rec = _RecordingLogger()
+    monkeypatch.setattr(scan, "logger", rec)
+
+    got = scan.sync_block_verified(ci, utxos, SCAN_SECRET, SPEND_PUB, LABELS)
+
+    assert fingerprint(got) == fingerprint(
+        expected
+    ), "verified mode must return the forward result, not the lossy one"
+    assert any(
+        "MATCHER DISAGREEMENT" in m for m in rec.errors
+    ), f"a disagreement was not reported; logged: {rec.errors}"
+
+
+def test_verified_mode_is_quiet_when_they_agree(monkeypatch):
+    rng = random.Random(5151)
+    tweaks, ci, utxos = build_block(rng, [([None], 2), ([0], 1), ([3], 1)])
+
+    rec = _RecordingLogger()
+    monkeypatch.setattr(scan, "logger", rec)
+
+    got = scan.sync_block_verified(ci, utxos, SCAN_SECRET, SPEND_PUB, LABELS)
+
+    expected = scan.sync_block(tweaks, utxos, SCAN_SECRET, SPEND_PUB, LABELS)
+    assert fingerprint(got) == fingerprint(expected)
+    assert rec.errors == [], rec.errors
+
+
+def test_forward_from_index_matches_plain_forward():
+    """The kill switch must change the matcher, not the data it sees."""
+    for seed in range(15):
+        rng = random.Random(6000 + seed)
+        tweaks, ci, utxos = build_block(rng, [([None], 2), ([2], 1), ([], 3)])
+        direct = scan.sync_block(tweaks, utxos, SCAN_SECRET, SPEND_PUB, LABELS)
+        via_index = scan.sync_block_forward_from_index(
+            ci, utxos, SCAN_SECRET, SPEND_PUB, LABELS
+        )
+        assert fingerprint(via_index) == fingerprint(direct), f"seed={seed}"
+
+
+def test_tweaks_from_compute_index_survives_junk():
+    entries = [
+        {"tweak": "02" + "11" * 32},
+        {"tweak": ""},
+        {"tweak": "not-hex"},
+        {},
+        {"tweak": "03" + "22" * 32},
+    ]
+    got = scan._tweaks_from_compute_index(entries)
+    assert got == [bytes.fromhex("02" + "11" * 32), bytes.fromhex("03" + "22" * 32)]

@@ -391,6 +391,88 @@ def _tx_has_candidate(
     return False
 
 
+def _owned_fingerprint(owned) -> set:
+    """Everything about a detected output that must agree between matchers."""
+    return {
+        (
+            o.txid.hex(),
+            o.vout,
+            o.amount,
+            o.pub_key.hex(),
+            o.priv_key_tweak.hex(),
+            o.label.m if o.label else None,
+        )
+        for o in owned
+    }
+
+
+def _tweaks_from_compute_index(compute_index) -> list[bytes]:
+    """The tweak set, as /range/tweaks would have returned it.
+
+    The oracle writes a compute-index row and a tweak row under the same
+    condition, so the two carry the same transactions — asserted on the oracle
+    side by TestComputeIndexCoversEveryTweak.
+    """
+    tweaks = []
+    for entry in compute_index:
+        tweak_hex = entry.get("tweak", "")
+        if not tweak_hex:
+            continue
+        try:
+            tweaks.append(bytes.fromhex(tweak_hex))
+        except ValueError:
+            continue
+    return tweaks
+
+
+def sync_block_forward_from_index(
+    compute_index, utxos, scan_key, spend_pub_key, labels
+):
+    """Forward matching, driven by the compute index's tweaks.
+
+    For SILNT_SCAN_FORWARD_MATCH: the kill switch should change which matcher
+    runs, not which requests the scan makes, so that turning it on isolates the
+    matcher and nothing else.
+    """
+    return sync_block(
+        _tweaks_from_compute_index(compute_index),
+        utxos, scan_key, spend_pub_key, labels,
+    )
+
+
+def sync_block_verified(compute_index, utxos, scan_key, spend_pub_key, labels):
+    """Run both matchers over the same block and report any disagreement.
+
+    Returns the FORWARD result. sync_block is the path with years of use behind
+    it, so where the two differ it is the one to trust until proven otherwise.
+
+    The tweaks handed to the forward matcher are taken from the compute index
+    itself, so both matchers see exactly the same transactions and a
+    disagreement can only come from the matching, not from one of them having
+    been given different data.
+    """
+    forward = sync_block(
+        _tweaks_from_compute_index(compute_index),
+        utxos, scan_key, spend_pub_key, labels,
+    )
+    reverse = sync_block_reverse(
+        compute_index, utxos, scan_key, spend_pub_key, labels
+    )
+
+    fwd, rev = _owned_fingerprint(forward), _owned_fingerprint(reverse)
+    if fwd != rev:
+        only_forward = fwd - rev
+        only_reverse = rev - fwd
+        logger.error(
+            "MATCHER DISAGREEMENT over %d transactions: forward found %d, "
+            "reverse found %d. Missed by reverse: %s. Extra in reverse: %s. "
+            "Using the forward result.",
+            len(compute_index), len(fwd), len(rev),
+            sorted(only_forward), sorted(only_reverse),
+        )
+    return forward
+
+
 def sync_block_reverse(compute_index, utxos, scan_key, spend_pub_key, labels):
     """Match a block using the tweak-to-txid pairing from the compute index.
 
@@ -585,6 +667,27 @@ _VERIFY_TLS = os.getenv("SILNT_ORACLE_VERIFY_TLS", "").lower() in ("1", "true", 
 
 # Opt-in, because the path it enables has never run. See the note in scan_block.
 _USE_COMPUTE_INDEX = os.getenv("SILNT_SCAN_COMPUTE_INDEX", "").lower() in (
+    "1", "true", "yes",
+)
+
+# Force the forward matcher even where the oracle offers the compute index.
+#
+# A kill switch for sync_block_reverse. sync_block is the older, slower,
+# longer-exercised path, and if a balance ever looks wrong this is the first
+# thing to try: it answers "is the new matcher losing outputs" without
+# rebuilding or downgrading anything.
+_FORWARD_MATCH_ONLY = os.getenv("SILNT_SCAN_FORWARD_MATCH", "").lower() in (
+    "1", "true", "yes",
+)
+
+# Run BOTH matchers on every block and report where they disagree.
+#
+# Costs roughly double the matching, so it is not for normal running. It is for
+# answering, against real chain data rather than a test corpus, whether the two
+# paths actually agree — which is the only question that matters when a wallet
+# reports less than it should. Disagreements are logged loudly and the FORWARD
+# result is used, because it is the one with the longer history.
+_VERIFY_MATCH = os.getenv("SILNT_SCAN_VERIFY_MATCH", "").lower() in (
     "1", "true", "yes",
 )
 
@@ -1147,10 +1250,20 @@ async def match_range_batch(
 
     # The compute index pairs tweaks with txids, so the cheaper reverse matcher
     # applies. Without it, the forward matcher. Both return the same UTXOs —
-    # tests/test_reverse_matching.py holds them to that.
-    use_reverse = data.compute_index is not None
-    index = data.compute_index if use_reverse else data.tweaks
-    matcher = sync_block_reverse if use_reverse else sync_block
+    # tests/test_reverse_matching.py holds them to that, and
+    # SILNT_SCAN_VERIFY_MATCH checks it against real chain data.
+    use_reverse = data.compute_index is not None and not _FORWARD_MATCH_ONLY
+    if use_reverse and _VERIFY_MATCH:
+        index, matcher = data.compute_index, sync_block_verified
+    elif use_reverse:
+        index, matcher = data.compute_index, sync_block_reverse
+    elif data.compute_index is not None:
+        # Forced onto the forward matcher, but the fetch brought the compute
+        # index. Its tweaks are the same set, so use them rather than spending
+        # another request on /range/tweaks.
+        index, matcher = data.compute_index, sync_block_forward_from_index
+    else:
+        index, matcher = data.tweaks, sync_block
 
     results: list = []
     for height in data.heights:
