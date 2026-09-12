@@ -691,6 +691,39 @@ _VERIFY_MATCH = os.getenv("SILNT_SCAN_VERIFY_MATCH", "").lower() in (
     "1", "true", "yes",
 )
 
+_warned_forward_forced = False
+
+
+def _warn_forward_forced(n_labels: int) -> None:
+    """Say so when the kill switch is the reason a scan is slow.
+
+    SILNT_SCAN_FORWARD_MATCH is meant to be turned on for one scan to answer
+    "is the new matcher losing outputs", and then turned off. Left on, it costs
+    the whole difference between the two matchers on every scan afterwards —
+    silently, because it does not change which requests are made, so the phase
+    line still reads "range+compute-index" and everything looks as intended.
+
+    Forward does two curve additions per label per tweak, so the damage grows
+    with the wallet's address count. Measured per tweak on a 4-core box, three
+    outputs per transaction, forward is linear in the label count and reverse
+    is flat (249/143 at 4 labels, 436/145 at 8, 893/145 at 20, 2792/143 at 68),
+    which fits ratio = 0.63 + 0.28 x labels to within a few percent across that
+    whole range. Once per process, with the number, rather than leaving it to
+    be inferred from a scan that is mysteriously slow.
+    """
+    global _warned_forward_forced
+    if _warned_forward_forced:
+        return
+    _warned_forward_forced = True
+    logger.warning(
+        "SILNT_SCAN_FORWARD_MATCH is set, so scanning is using the FORWARD "
+        "matcher even though the oracle serves the compute index. Forward "
+        "costs two curve additions per label per tweak and this wallet has "
+        f"{n_labels} labels, so expect roughly "
+        f"{max(1.0, 0.63 + 0.28 * n_labels):.1f}x the matching time of the "
+        "reverse matcher. Unset SILNT_SCAN_FORWARD_MATCH to use it."
+    )
+
 
 def _env_int(name: str, default: int, lo: int, hi: int) -> int:
     try:
@@ -780,6 +813,26 @@ class OracleStats:
     # like a scan whose matching was free.
     used_range: bool = False
     used_compute_index: bool = False
+    # Which MATCHER ran, and over how many labels.
+    #
+    # used_compute_index says the compute index was FETCHED, not that the
+    # reverse matcher used it: SILNT_SCAN_FORWARD_MATCH forces the forward
+    # matcher while leaving the fetch path untouched, by design, so the two
+    # printed the same phase line while differing by the whole cost of the
+    # scan. Forward does two curve additions per label per tweak, so it is
+    # linear in the label count and reverse is flat:
+    #
+    #   labels    forward      reverse      (4-core box, 3 outputs per tx)
+    #        4   249 us/tw    143 us/tw
+    #        8   436 us/tw    145 us/tw
+    #       20   893 us/tw    145 us/tw
+    #       68  2792 us/tw    143 us/tw
+    #
+    # and _scan_wallet builds one label per saved address, so the label count
+    # is a property of the wallet and not a constant. Reporting the matcher
+    # without the label count would leave the forward numbers unreadable.
+    matcher: str = ""
+    labels: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -797,6 +850,8 @@ class OracleStats:
             "match_batch_seconds": round(self.match_batch_seconds, 2),
             "used_range": self.used_range,
             "used_compute_index": self.used_compute_index,
+            "matcher": self.matcher,
+            "labels": self.labels,
             "spent_seconds": round(self.spent_seconds, 2),
             "persist_seconds": round(self.persist_seconds, 2),
             "unaccounted_seconds": round(
@@ -858,8 +913,17 @@ class OracleStats:
         if self.match_seconds > self.wall_seconds and self.wall_seconds:
             ec_note = f", {self.match_seconds / self.wall_seconds:.0f}x wall — queued"
 
+        # The matcher and the label count, because they are what the match
+        # phase costs. "range+compute-index" says the index was fetched; it
+        # does not say the reverse matcher used it.
+        who = self.matcher or "unknown"
+        per_tweak = ""
+        if self.tweaks and self.match_batch_seconds:
+            per_tweak = f", {self.match_batch_seconds / self.tweaks * 1e6:.0f}us/tweak"
+        matcher_note = f" | matcher {who} over {self.labels} labels{per_tweak}"
+
         return (
-            f"path {path} | {work} "
+            f"path {path}{matcher_note} | {work} "
             f"(EC {self.match_seconds:.1f}s summed across waiters{ec_note}; "
             f"timestamp lookups {self.ts_seconds:.1f}s over {self.ts_lookups}) | "
             f"spent-check {self.spent_seconds:.1f}s | "
@@ -1076,6 +1140,17 @@ _matcher = concurrent.futures.ThreadPoolExecutor(
 )
 
 
+# Short names for the log line. Recorded here rather than at each call site so
+# a matcher added later cannot be left out of the reporting.
+_MATCHER_NAMES = {
+    "sync_block": "forward",
+    "sync_block_forward_from_index": "forward (forced by SILNT_SCAN_FORWARD_MATCH)",
+    "sync_block_reverse": "reverse",
+    "sync_block_verified": "both (SILNT_SCAN_VERIFY_MATCH)",
+    "sync_block_from_compute_index": "compute-index (single-sign)",
+}
+
+
 async def _match_in_thread(client, fn, *args):
     """Run the synchronous EC matching off the event loop, and time it.
 
@@ -1083,6 +1158,7 @@ async def _match_in_thread(client, fn, *args):
     slow because of the oracle or because of the matching, and that answer
     decides whether anything is worth optimising here at all.
     """
+    client.stats.matcher = _MATCHER_NAMES.get(fn.__name__, fn.__name__)
     loop = asyncio.get_event_loop()
     started = time.perf_counter()
     try:
@@ -1328,6 +1404,9 @@ async def match_range_batch(
     # SILNT_SCAN_VERIFY_MATCH checks it against real chain data.
     client.stats.used_range = True
     client.stats.used_compute_index = data.compute_index is not None
+
+    if data.compute_index is not None and _FORWARD_MATCH_ONLY:
+        _warn_forward_forced(len(labels))
 
     use_reverse = data.compute_index is not None and not _FORWARD_MATCH_ONLY
     if use_reverse and _VERIFY_MATCH:
@@ -1658,6 +1737,10 @@ async def _scan_wallet(
     labels = create_labels(
         scan_secret_bytes, indices=[a.label_index for a in saved_addresses]
     )
+    # One label per saved address on top of the four BIP-352 ones, and the
+    # forward matcher's cost is linear in that count — so it belongs in the
+    # timing line, not just in the matcher's own head.
+    oracle.stats.labels = len(labels)
     addr_label_map: dict[int, str] = {
         a.label_index: a.label
         for a in saved_addresses

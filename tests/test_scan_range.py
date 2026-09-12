@@ -666,6 +666,144 @@ def test_as_dict_reports_the_path():
     assert d["used_compute_index"] is True
 
 
+# --- the phase line has to say which MATCHER ran ----------------------------
+#
+# used_compute_index says the index was FETCHED. SILNT_SCAN_FORWARD_MATCH
+# changes the matcher without changing a single request, so a scan with the
+# switch left on printed a phase line identical to one without it while costing
+# several times as much. The matcher is the expensive choice; it has to be in
+# the line.
+
+
+def test_phases_names_the_matcher_and_the_label_count():
+    stats = scan.OracleStats()
+    stats.blocks = 7362
+    stats.wall_seconds = 898.0
+    stats.fetch_seconds = 2.9
+    stats.match_batch_seconds = 886.4
+    stats.match_seconds = 884.4
+    stats.tweaks = 1_494_809
+    stats.used_range = True
+    stats.used_compute_index = True
+    stats.matcher = "reverse"
+    stats.labels = 4
+
+    line = stats.phases()
+    assert "matcher reverse" in line, line
+    assert "4 labels" in line, line
+    # 886.4s over 1,494,809 tweaks is 593us each — the number that says whether
+    # the matching is behaving, and it should not have to be divided by hand.
+    assert "593us/tweak" in line, line
+
+
+def test_phases_distinguishes_the_two_matchers_on_the_same_path():
+    """The bug this exists for: identical fetch path, different matcher."""
+    def line_for(matcher):
+        stats = scan.OracleStats()
+        stats.wall_seconds = 100.0
+        stats.used_range = True
+        stats.used_compute_index = True
+        stats.matcher = matcher
+        stats.labels = 8
+        return stats.phases()
+
+    forward = line_for("forward (forced by SILNT_SCAN_FORWARD_MATCH)")
+    reverse = line_for("reverse")
+
+    assert "range+compute-index" in forward and "range+compute-index" in reverse
+    assert forward != reverse, (
+        "the two matchers print the same phase line, which is exactly the "
+        "ambiguity this is meant to remove"
+    )
+    assert "SILNT_SCAN_FORWARD_MATCH" in forward, forward
+
+
+def test_phases_admits_when_the_matcher_is_unknown():
+    """A scan that matched nothing should not name a matcher it never ran."""
+    stats = scan.OracleStats()
+    stats.wall_seconds = 1.0
+    stats.used_range = True
+    assert "matcher unknown" in stats.phases()
+
+
+@pytest.mark.asyncio
+async def test_reverse_path_records_itself_as_the_matcher():
+    tweak_hex, output_hex = payment_to_us(b"\x88" * 32)
+    utxo = {
+        "txid": "ab" * 32, "vout": 0, "amount": 4_200,
+        "pubkey": output_hex, "timestamp": 1_700_000_000,
+    }
+    client = RecordingClient(all_range_routes([100], tweak_hex, utxo))
+    data = await scan.fetch_range_batch([100], client)
+    await scan.match_range_batch(data, client, SCAN_SECRET, SPEND_PUB, [], "signet")
+
+    assert client.stats.matcher == "reverse", client.stats.matcher
+    assert "matcher reverse" in client.stats.phases()
+
+
+@pytest.mark.asyncio
+async def test_forcing_forward_is_visible_in_the_stats_and_warned_about(
+    monkeypatch, caplog
+):
+    """Turning the kill switch on must be loud and must show up in the timing.
+
+    It is meant to be set for one scan to answer "is the reverse matcher losing
+    outputs" and then unset. Left on, it silently multiplies every later scan's
+    matching cost by roughly 0.63 + 0.28 per label.
+    """
+    tweak_hex, output_hex = payment_to_us(b"\x88" * 32)
+    utxo = {
+        "txid": "ab" * 32, "vout": 0, "amount": 4_200,
+        "pubkey": output_hex, "timestamp": 1_700_000_000,
+    }
+    client = RecordingClient(all_range_routes([100], tweak_hex, utxo))
+    data = await scan.fetch_range_batch([100], client)
+
+    warnings: list[str] = []
+    monkeypatch.setattr(scan, "_FORWARD_MATCH_ONLY", True)
+    monkeypatch.setattr(scan, "_warned_forward_forced", False)
+    monkeypatch.setattr(
+        scan.logger, "warning", lambda msg, *a, **kw: warnings.append(str(msg))
+    )
+
+    results = await scan.match_range_batch(
+        data, client, SCAN_SECRET, SPEND_PUB, [], "signet"
+    )
+
+    # Forcing the matcher must not change what is found.
+    assert len(results[0]) == 1, "forcing the forward matcher lost the payment"
+    assert results[0][0].amount == 4_200
+
+    assert client.stats.matcher.startswith("forward"), client.stats.matcher
+    assert "SILNT_SCAN_FORWARD_MATCH" in client.stats.phases()
+    assert warnings, "the switch changed the cost of the scan without saying so"
+    assert "SILNT_SCAN_FORWARD_MATCH" in warnings[0], warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_forward_forced_warning_fires_once_not_per_batch(monkeypatch):
+    tweak_hex, output_hex = payment_to_us(b"\x88" * 32)
+    utxo = {
+        "txid": "ab" * 32, "vout": 0, "amount": 4_200,
+        "pubkey": output_hex, "timestamp": 1_700_000_000,
+    }
+    warnings: list[str] = []
+    monkeypatch.setattr(scan, "_FORWARD_MATCH_ONLY", True)
+    monkeypatch.setattr(scan, "_warned_forward_forced", False)
+    monkeypatch.setattr(
+        scan.logger, "warning", lambda msg, *a, **kw: warnings.append(str(msg))
+    )
+
+    for _ in range(3):
+        client = RecordingClient(all_range_routes([100], tweak_hex, utxo))
+        data = await scan.fetch_range_batch([100], client)
+        await scan.match_range_batch(
+            data, client, SCAN_SECRET, SPEND_PUB, [], "signet"
+        )
+
+    assert len(warnings) == 1, f"warned {len(warnings)} times across three batches"
+
+
 # --- the fallback must never be silent --------------------------------------
 
 
