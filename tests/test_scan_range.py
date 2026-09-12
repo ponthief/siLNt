@@ -9,6 +9,9 @@ to everything downstream, and the difference is somebody's money.
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 import httpx
 import pytest
 from coincurve import PublicKey
@@ -24,22 +27,79 @@ def response(payload, status=200):
 
 
 class RecordingClient(scan.BlindBitOracleClient):
-    """An oracle client whose HTTP layer is a dictionary of canned responses."""
+    """An oracle client whose HTTP layer is a dictionary of canned responses.
 
-    def __init__(self, routes: dict[str, object], base_url="http://oracle.example"):
+    `delay` makes each response take that long, which is what lets a test tell
+    concurrent requests from sequential ones: three 100ms requests take 100ms
+    together and 300ms one after another.
+    """
+
+    def __init__(
+        self,
+        routes: dict[str, object],
+        base_url="http://oracle.example",
+        delay: float = 0.0,
+    ):
         super().__init__(base_url)
         self.routes = routes
+        self.delay = delay
         self.paths: list[str] = []
+        self.in_flight = 0
+        self.max_in_flight = 0
 
     async def _get(self, path: str) -> httpx.Response:
         self.paths.append(path)
         self.stats.requests += 1
-        for prefix, payload in self.routes.items():
-            if path.startswith(prefix):
-                if isinstance(payload, Exception):
-                    raise payload
-                return response(payload)
-        return response({"error": "not found"}, status=404)
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            if self.delay:
+                await asyncio.sleep(self.delay)
+            for prefix, payload in self.routes.items():
+                if path.startswith(prefix):
+                    if isinstance(payload, Exception):
+                        raise payload
+                    return response(payload)
+            return response({"error": "not found"}, status=404)
+        finally:
+            self.in_flight -= 1
+
+
+def all_range_routes(heights, tweak_hex=None, utxo=None):
+    """Routes for every endpoint a batch fetches, so none of them 404s.
+
+    A current oracle: it serves /range/compute-index, so the scanner takes the
+    reverse-matching path. The compute-index entry is built from the same tweak
+    and txid as the UTXO, because the reverse matcher joins them on txid.
+    """
+    entry = None
+    if tweak_hex:
+        entry = {
+            "txid": (utxo or {}).get("txid", "00" * 32),
+            "tweak": tweak_hex,
+            "outputs": [(utxo or {}).get("pubkey", "")[:16]] if utxo else [],
+        }
+    return {
+        "/range/compute-index": {
+            "blocks": [block_entry(h, [entry] if entry else []) for h in heights]
+        },
+        "/range/tweaks": {
+            "blocks": [
+                block_entry(h, [tweak_hex] if tweak_hex else []) for h in heights
+            ]
+        },
+        "/range/utxos": {
+            "blocks": [block_entry(h, [utxo] if utxo else []) for h in heights]
+        },
+        "/range/spent-outputs": {"blocks": [block_entry(h, []) for h in heights]},
+    }
+
+
+def legacy_range_routes(heights, tweak_hex=None, utxo=None):
+    """An oracle from before /range/compute-index existed: that route 404s."""
+    routes = all_range_routes(heights, tweak_hex, utxo)
+    routes.pop("/range/compute-index")
+    return routes
 
 
 def block_entry(height: int, index: list) -> dict:
@@ -245,9 +305,7 @@ async def test_block_absent_from_range_is_an_error_not_an_empty_block():
     Height 101 is missing from the response, meaning the oracle never indexed
     it. Reporting [] would let the caller record it as scanned.
     """
-    client = RecordingClient(
-        {"/range/tweaks": {"blocks": [block_entry(100, []), block_entry(102, [])]}}
-    )
+    client = RecordingClient(all_range_routes([100, 102]))
 
     results = await scan.scan_blocks_range(
         [100, 101, 102], client, SCAN_SECRET, SPEND_PUB, [], "signet"
@@ -260,56 +318,124 @@ async def test_block_absent_from_range_is_an_error_not_an_empty_block():
 
 
 @pytest.mark.asyncio
-async def test_utxos_not_fetched_when_no_block_has_tweaks():
-    """Nothing to match them against, so the request is pure waste."""
-    client = RecordingClient(
-        {
-            "/range/tweaks": {"blocks": [block_entry(h, []) for h in range(100, 110)]},
-            "/range/utxos": {"blocks": []},
-        }
-    )
+async def test_a_hundred_blocks_cost_three_requests():
+    """The reason the endpoints exist: 100 blocks used to be 300 requests.
 
-    results = await scan.scan_blocks_range(
-        list(range(100, 110)), client, SCAN_SECRET, SPEND_PUB, [], "signet"
-    )
-
-    assert all(r == [] for r in results)
-    assert not any(p.startswith("/range/utxos") for p in client.paths), client.paths
-
-
-@pytest.mark.asyncio
-async def test_a_hundred_blocks_cost_two_requests():
-    """The reason the endpoints exist: 100 blocks used to be 300 requests."""
-    tweak_hex, output_hex = payment_to_us(b"\x55" * 32)
+    Three, not four: the compute index replaces the tweaks request rather than
+    adding to it.
+    """
+    tweak_hex, _ = payment_to_us(b"\x55" * 32)
     heights = list(range(1000, 1100))
+    utxo = {
+        "txid": "ee" * 32,
+        "vout": 0,
+        "amount": 1,
+        "pubkey": "ff" * 32,
+        "timestamp": 1,
+    }
 
-    client = RecordingClient(
-        {
-            "/range/tweaks": {"blocks": [block_entry(h, [tweak_hex]) for h in heights]},
-            "/range/utxos": {
-                "blocks": [
-                    block_entry(
-                        h,
-                        [
-                            {
-                                "txid": "ee" * 32,
-                                "vout": 0,
-                                "amount": 1,
-                                "pubkey": "ff" * 32,
-                                "timestamp": 1,
-                            }
-                        ],
-                    )
-                    for h in heights
-                ]
-            },
-        }
-    )
+    client = RecordingClient(all_range_routes(heights, tweak_hex, utxo))
 
     await scan.scan_blocks_range(heights, client, SCAN_SECRET, SPEND_PUB, [], "signet")
 
-    assert len(client.paths) == 2, client.paths
+    assert len(client.paths) == 3, client.paths
     assert client.stats.blocks == 100
+
+
+@pytest.mark.asyncio
+async def test_batch_requests_are_issued_concurrently():
+    """The three requests do not depend on each other, so they go out together.
+
+    Serialising them was half of a real regression: a batch that waits for the
+    tweaks before asking for the UTXOs pays a round trip it does not need to,
+    on every batch, and on a busy chain that is not small.
+    """
+    heights = list(range(100, 110))
+    delay = 0.1
+    client = RecordingClient(all_range_routes(heights), delay=delay)
+
+    started = time.perf_counter()
+    await scan.fetch_range_batch(heights, client)
+    elapsed = time.perf_counter() - started
+
+    assert len(client.paths) == 3, client.paths
+    assert (
+        client.max_in_flight == 3
+    ), f"peak concurrency was {client.max_in_flight}; the requests ran in sequence"
+    # Sequential would be 3 * delay. Generous bound so a slow machine does not
+    # make this flaky, while still failing outright on serialisation.
+    assert elapsed < delay * 2, f"{elapsed:.3f}s for three {delay}s requests"
+
+
+@pytest.mark.asyncio
+async def test_matching_issues_no_requests():
+    """What makes the pipeline possible.
+
+    The scan loop prefetches batch N+1 while batch N matches. That only
+    overlaps anything if matching is pure computation — if it reaches back to
+    the oracle mid-match, the two stages serialise again and the wall clock
+    goes back to being their sum. This is the structural guard on that.
+    """
+    tweak_hex, output_hex = payment_to_us(b"\x66" * 32)
+    heights = [100, 101]
+    utxo = {
+        "txid": "ab" * 32,
+        "vout": 0,
+        "amount": 7,
+        "pubkey": output_hex,
+        "timestamp": 1_700_000_000,
+    }
+    client = RecordingClient(all_range_routes(heights, tweak_hex, utxo))
+
+    data = await scan.fetch_range_batch(heights, client)
+    requests_after_fetch = len(client.paths)
+
+    results = await scan.match_range_batch(
+        data, client, SCAN_SECRET, SPEND_PUB, [], "signet"
+    )
+
+    assert len(client.paths) == requests_after_fetch, (
+        f"matching made {len(client.paths) - requests_after_fetch} oracle "
+        f"request(s): {client.paths[requests_after_fetch:]}"
+    )
+    # And it still found the payments, so the guard is not vacuous.
+    assert all(len(r) == 1 for r in results), results
+
+
+@pytest.mark.asyncio
+async def test_prefetch_overlaps_matching():
+    """A batch's fetch runs while the previous batch is still matching.
+
+    Modelled directly: start the next fetch, then do the (blocking) match, and
+    check the fetch finished during it rather than after. This is the shape the
+    scan loop implements.
+    """
+    tweak_hex, output_hex = payment_to_us(b"\x77" * 32)
+    heights = [100, 101]
+    utxo = {
+        "txid": "cd" * 32,
+        "vout": 0,
+        "amount": 9,
+        "pubkey": output_hex,
+        "timestamp": 1_700_000_000,
+    }
+    routes = all_range_routes(heights, tweak_hex, utxo)
+
+    prefetch_client = RecordingClient(routes, delay=0.15)
+    match_client = RecordingClient(routes)
+    data = await scan.fetch_range_batch(heights, match_client)
+
+    started = time.perf_counter()
+    prefetch = asyncio.create_task(scan.fetch_range_batch(heights, prefetch_client))
+    await scan.match_range_batch(
+        data, match_client, SCAN_SECRET, SPEND_PUB, [], "signet"
+    )
+    await prefetch
+    elapsed = time.perf_counter() - started
+
+    # Sequential would be the match plus the full 0.15s fetch. Overlapped, the
+    # total is bounded by the slower of the two.
+    assert elapsed < 0.3, f"{elapsed:.3f}s — the prefetch did not overlap the match"
 
 
 @pytest.mark.asyncio
@@ -402,3 +528,72 @@ async def test_owned_utxo_query_runs_once_per_batch_not_once_per_block():
     assert (
         len(utxo_queries) == 1
     ), f"{len(utxo_queries)} identical queries for {len(heights)} blocks"
+
+
+# --- oracle generations -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_current_oracle_uses_compute_index_and_not_tweaks():
+    """With the route available, the scanner takes the reverse-matching path."""
+    tweak_hex, output_hex = payment_to_us(b"\x88" * 32)
+    utxo = {
+        "txid": "ab" * 32,
+        "vout": 0,
+        "amount": 4_200,
+        "pubkey": output_hex,
+        "timestamp": 1_700_000_000,
+    }
+    client = RecordingClient(all_range_routes([100], tweak_hex, utxo))
+
+    data = await scan.fetch_range_batch([100], client)
+
+    assert data.compute_index is not None, "compute index was not used"
+    assert not any(p.startswith("/range/tweaks") for p in client.paths), client.paths
+
+    results = await scan.match_range_batch(
+        data, client, SCAN_SECRET, SPEND_PUB, [], "signet"
+    )
+    assert len(results[0]) == 1, "the payment was not detected on the reverse path"
+    assert results[0][0].amount == 4_200
+
+
+@pytest.mark.asyncio
+async def test_oracle_without_compute_index_falls_back_to_tweaks():
+    """An older oracle 404s the route; the scan continues on forward matching."""
+    tweak_hex, output_hex = payment_to_us(b"\x99" * 32)
+    utxo = {
+        "txid": "cd" * 32,
+        "vout": 1,
+        "amount": 777,
+        "pubkey": output_hex,
+        "timestamp": 1_700_000_000,
+    }
+    client = RecordingClient(legacy_range_routes([100], tweak_hex, utxo))
+
+    data = await scan.fetch_range_batch([100], client)
+
+    assert data.error is None, data.error
+    assert data.compute_index is None
+    assert data.tweaks is not None, "no tweaks fetched after the 404"
+    assert any(p.startswith("/range/tweaks") for p in client.paths), client.paths
+
+    results = await scan.match_range_batch(
+        data, client, SCAN_SECRET, SPEND_PUB, [], "signet"
+    )
+    assert len(results[0]) == 1, "the payment was not detected on the fallback path"
+    assert results[0][0].amount == 777
+
+
+@pytest.mark.asyncio
+async def test_compute_index_probe_happens_once_per_client():
+    """After a 404 the scanner stops asking, rather than paying for it per batch."""
+    client = RecordingClient(legacy_range_routes(list(range(100, 120))))
+
+    await scan.fetch_range_batch(list(range(100, 110)), client)
+    first = sum(1 for p in client.paths if p.startswith("/range/compute-index"))
+    await scan.fetch_range_batch(list(range(110, 120)), client)
+    second = sum(1 for p in client.paths if p.startswith("/range/compute-index"))
+
+    assert first == 1, f"probed {first} times in the first batch"
+    assert second == 1, f"probed again on the second batch (total {second})"

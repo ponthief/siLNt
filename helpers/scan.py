@@ -324,6 +324,115 @@ def sync_block(tweaks, utxos, scan_key, spend_pub_key, labels):
     return owned
 
 
+def _tx_has_candidate(opk: bytes, out_keys: list[bytes], label_x: set) -> bool:
+    """Could any of this transaction's outputs belong to us?
+
+    The reverse of what sync_block does, and the reason this is cheaper.
+
+    sync_block cannot tell which transaction a tweak belongs to — /tweaks
+    returns tweaks and nothing else — so it enumerates forwards: build every
+    output the tweak could produce (the plain one, plus each label added and
+    negated) and look each up among the block's outputs. With four labels that
+    is nine curve operations for every tweak in the block, spent almost
+    entirely on transactions that are nobody's.
+
+    Given the tweak's own transaction, the test inverts: subtract the plain
+    candidate from each of that transaction's outputs and see whether the
+    difference is a label. One curve operation per output, and the label
+    comparison is a set lookup.
+
+    Both sign combinations are required. The scanner only ever sees an output
+    x-only, so it reconstructs P_0 with even parity forced; where the true P_0
+    is odd, b33 is -P_0 and only the other sign yields the label. Testing one
+    sign silently misses about 40% of labeled payments — which is exactly the
+    defect in sync_block_from_compute_index below.
+    """
+    if opk in out_keys:
+        return True
+    if not label_x:
+        return False
+
+    neg_opk33 = negate_public_key(b"\x02" + opk)
+    for out in out_keys:
+        for parity in (b"\x02", b"\x03"):
+            try:
+                diff = add_public_keys(parity + out, neg_opk33)
+            except Exception:
+                continue
+            if diff[1:] in label_x:
+                return True
+    return False
+
+
+def sync_block_reverse(compute_index, utxos, scan_key, spend_pub_key, labels):
+    """Match a block using the tweak-to-txid pairing from the compute index.
+
+    Returns exactly what sync_block returns for the same block. Only the
+    *filter* differs — which transactions are worth looking at closely. Once a
+    transaction is a candidate, extraction runs through the same
+    receiver_scan_transaction_with_shared_secret that sync_block uses, so the
+    part that decides amounts, vouts and key tweaks is not reimplemented here.
+
+    `compute_index` entries are the oracle's compute-index rows: dicts with
+    "txid" and "tweak" hex. Their "outputs" field is ignored — it holds 8-byte
+    prefixes, and point arithmetic needs whole keys, which is why the UTXOs are
+    needed alongside.
+    """
+    if not compute_index or not utxos:
+        return []
+
+    by_txid: dict[str, list[dict]] = {}
+    for u in utxos:
+        by_txid.setdefault(u["txid"], []).append(u)
+
+    label_x = {label.pub_key[1:] for label in labels}
+
+    owned: list[OwnedUTXO] = []
+    for entry in compute_index:
+        txid_hex = entry.get("txid", "")
+        tweak_hex = entry.get("tweak", "")
+        if not txid_hex or not tweak_hex:
+            continue
+        rel_utxos = by_txid.get(txid_hex)
+        if not rel_utxos:
+            continue
+
+        try:
+            tweak = bytes.fromhex(tweak_hex)
+            shared_secret = create_shared_secret(tweak, scan_key)
+            opk, _ = create_output_pub_key_and_tweak(shared_secret, spend_pub_key, 0)
+        except Exception as e:
+            logger.warning(f"compute_index txid={txid_hex}: {e}")
+            continue
+
+        out_keys = [bytes.fromhex(u["pubkey"]) for u in rel_utxos]
+        if not _tx_has_candidate(opk, out_keys, label_x):
+            continue
+
+        # Candidate: hand it to the same extraction sync_block uses. The shared
+        # secret is already computed, so this skips recomputing it.
+        found = receiver_scan_transaction_with_shared_secret(
+            scan_key, spend_pub_key, labels, out_keys, shared_secret,
+        )
+        for fo in found:
+            for u in rel_utxos:
+                if fo.output == bytes.fromhex(u["pubkey"]):
+                    owned.append(
+                        OwnedUTXO(
+                            txid=bytes.fromhex(u["txid"]),
+                            vout=u["vout"],
+                            amount=u["amount"],
+                            priv_key_tweak=fo.sec_key_tweak,
+                            pub_key=fo.output,
+                            utxo_state="unspent",
+                            timestamp=u.get("timestamp", 0),
+                            label=fo.label,
+                        )
+                    )
+                    break
+    return owned
+
+
 def sync_block_from_compute_index(index, scan_key, spend_pub_key, labels):
     owned: list[OwnedUTXO] = []
     for entry in index:
@@ -513,6 +622,13 @@ class OracleStats:
     fetch_seconds: float = 0.0    # gathering scan_block over a batch
     spent_seconds: float = 0.0    # mark_spent_utxos_batch
     persist_seconds: float = 0.0  # database writes for what was found
+    # Time spent matching a batch whose data was already in hand. On the range
+    # path this is separate from fetch_seconds, and the pair is the whole
+    # diagnosis: if fetch_seconds is near zero while match_batch_seconds is
+    # large, the prefetch is hiding the network and the scan is compute-bound.
+    # If both are large, they are running in sequence and something broke the
+    # pipeline.
+    match_batch_seconds: float = 0.0
 
     def as_dict(self) -> dict:
         return {
@@ -527,11 +643,13 @@ class OracleStats:
             "timestamp_lookups": self.ts_lookups,
             "timestamp_seconds": round(self.ts_seconds, 2),
             "fetch_seconds": round(self.fetch_seconds, 2),
+            "match_batch_seconds": round(self.match_batch_seconds, 2),
             "spent_seconds": round(self.spent_seconds, 2),
             "persist_seconds": round(self.persist_seconds, 2),
             "unaccounted_seconds": round(
                 self.wall_seconds
-                - self.fetch_seconds - self.spent_seconds - self.persist_seconds,
+                - self.fetch_seconds - self.match_batch_seconds
+                - self.spent_seconds - self.persist_seconds,
                 2,
             ),
         }
@@ -559,11 +677,13 @@ class OracleStats:
         """
         other = (
             self.wall_seconds
-            - self.fetch_seconds - self.spent_seconds - self.persist_seconds
+            - self.fetch_seconds - self.match_batch_seconds
+            - self.spent_seconds - self.persist_seconds
         )
         return (
-            f"fetch {self.fetch_seconds:.1f}s "
-            f"(matching {self.match_seconds:.1f}s, "
+            f"fetch-wait {self.fetch_seconds:.1f}s | "
+            f"match {self.match_batch_seconds:.1f}s "
+            f"(EC {self.match_seconds:.1f}s, "
             f"timestamp lookups {self.ts_seconds:.1f}s over {self.ts_lookups}) | "
             f"spent-check {self.spent_seconds:.1f}s | "
             f"persist {self.persist_seconds:.1f}s | "
@@ -592,6 +712,8 @@ class BlindBitOracleClient:
         self.base_url = base_url.rstrip("/")
         self.stats = OracleStats()
         self._range_limit: int | None = None
+        # None until the first /range/compute-index attempt says either way.
+        self._supports_compute_index_range: bool | None = None
 
     async def _get(self, path: str) -> httpx.Response:
         started = time.perf_counter()
@@ -654,6 +776,31 @@ class BlindBitOracleClient:
         self, start: int, end: int
     ) -> dict[int, list[str]]:
         return await self._get_range("/range/spent-outputs", start, end)
+
+    async def get_compute_index_range(
+        self, start: int, end: int
+    ) -> dict[int, list[dict]] | None:
+        """Compute-index rows per height, or None if this oracle lacks the route.
+
+        These carry the txid alongside each tweak, which is what the reverse
+        matcher needs. An oracle built before the route existed answers 404, and
+        that is a capability answer rather than a failure: the caller falls back
+        to /range/tweaks and the forward matcher.
+        """
+        r = await self._get(f"/range/compute-index?start={start}&end={end}")
+        if r.status_code == 404:
+            self._supports_compute_index_range = False
+            return None
+        r.raise_for_status()
+        data = r.json()
+        out: dict[int, list[dict]] = {}
+        for block in data.get("blocks") or []:
+            height = (block.get("block_identifier") or {}).get("block_height")
+            if height is None:
+                continue
+            out[int(height)] = block.get("index") or []
+        self._supports_compute_index_range = True
+        return out
 
     async def get_tweaks(self, height: int) -> list[bytes]:
         r = await self._get(f"/tweaks/{height}")
@@ -828,60 +975,157 @@ async def _resolve_timestamps(owned, client, network):
             client.stats.ts_seconds += time.perf_counter() - _t
 
 
-async def scan_blocks_range(
-    heights, client, scan_secret_bytes, spend_pub_bytes, labels, network,
+@dataclass
+class RangeBatch:
+    """Everything the oracle has to say about one span of blocks.
+
+    Fetching is separated from matching so the two can overlap. They are the
+    scan's two costs and they use different resources — one waits on the
+    network, the other saturates a CPU — so running them strictly in sequence
+    means each idles while the other works, and the wall clock is their sum
+    instead of their maximum.
+    """
+
+    heights: list[int]
+    # Exactly one of these is populated. compute_index carries (txid, tweak)
+    # and drives the reverse matcher; tweaks is the fallback for an oracle
+    # without /range/compute-index and drives the forward one.
+    tweaks: dict[int, list[bytes]] | None
+    utxos: dict[int, list[dict]]
+    compute_index: dict[int, list[dict]] | None = None
+    # None means the spent-outputs range request failed and the caller should
+    # fetch per block instead. An empty dict means it succeeded and there was
+    # nothing spent.
+    spent: dict[int, set[str]] | None = None
+    error: Exception | None = None
+
+
+async def fetch_range_batch(heights, client) -> RangeBatch:
+    """Every oracle read a batch needs, issued at once.
+
+    The three requests do not depend on each other, so they go out together.
+    Asking for the tweaks, waiting, and only then asking for the UTXOs pays two
+    round trips where one would do — and on a busy chain that second trip is
+    not small.
+
+    Errors are captured rather than raised: this runs as a prefetch task while
+    the previous batch matches, and a task that raises into nobody's await is
+    both a lost error and a warning on stderr.
+    """
+    if not heights:
+        return RangeBatch([], {}, {})
+
+    start, end = heights[0], heights[-1]
+
+    # Prefer the compute index: it pairs each tweak with its txid, which lets
+    # the matcher test a tweak against its own transaction's outputs instead of
+    # enumerating every output the tweak could produce. An oracle without the
+    # route answers 404 and we fall back to plain tweaks for the rest of the
+    # scan.
+    want_compute_index = client._supports_compute_index_range is not False
+    index_call = (
+        client.get_compute_index_range(start, end)
+        if want_compute_index
+        else client.get_tweaks_range(start, end)
+    )
+
+    index_res, utxos_res, spent_res = await asyncio.gather(
+        index_call,
+        client.get_utxos_range(start, end),
+        client.get_spent_outputs_range(start, end),
+        return_exceptions=True,
+    )
+
+    # An index and the UTXOs are both required to detect a payment, so either
+    # one failing fails the batch and drops the scan to the per-block path.
+    for res in (index_res, utxos_res):
+        if isinstance(res, BaseException):
+            return RangeBatch(heights, None, {}, error=res)
+
+    compute_index = None
+    tweaks_res = None
+    if not want_compute_index:
+        tweaks_res = index_res
+    elif index_res is None:
+        # 404: the route is not there. Fetch the tweaks now — one extra round
+        # trip, once per scan, and only against an older oracle.
+        logger.info(
+            "oracle has no /range/compute-index; using tweaks and forward matching"
+        )
+        try:
+            tweaks_res = await client.get_tweaks_range(start, end)
+        except Exception as e:
+            return RangeBatch(heights, None, {}, error=e)
+    else:
+        compute_index = index_res
+
+    # The spent-outputs index is secondary — it moves already-detected UTXOs to
+    # spent, and reconcile_unconfirmed_spent runs at the end of every scan
+    # regardless. So its failure degrades to a per-block fetch rather than
+    # failing the batch.
+    spent: dict[int, set[str]] | None
+    if isinstance(spent_res, BaseException):
+        logger.warning(
+            f"spent-outputs range {start}-{end} failed ({spent_res}); "
+            f"falling back to per-block requests"
+        )
+        spent = None
+    else:
+        spent = {h: set(idx) for h, idx in spent_res.items() if idx}
+
+    if compute_index is not None:
+        for entries in compute_index.values():
+            client.stats.tweaks += len(entries)
+    else:
+        for tweaks in tweaks_res.values():
+            client.stats.tweaks += len(tweaks)
+    for utxos in utxos_res.values():
+        client.stats.utxos += len(utxos)
+
+    return RangeBatch(
+        heights, tweaks_res, utxos_res, compute_index=compute_index, spent=spent
+    )
+
+
+async def match_range_batch(
+    data: RangeBatch, client, scan_secret_bytes, spend_pub_bytes, labels, network,
 ):
-    """Scan a contiguous span of blocks using the oracle's range endpoints.
+    """Match an already-fetched batch.
 
-    This is the whole point of the range endpoints. The per-block path costs
-    three HTTP round trips for every block, so a ten-thousand-block scan is
-    thirty thousand requests; against a remote oracle that is what the scan
-    spends its time on, and no amount of faster matching at either end touches
-    it. Here a span of blocks costs one request for the tweaks and at most one
-    more for the UTXOs.
-
-    Returns a list aligned with `heights`, each entry either a list of
+    Returns a list aligned with data.heights, each entry either a list of
     OwnedUTXO or an Exception — the same shape
     asyncio.gather(return_exceptions=True) produces for the per-block path, so
     the caller treats both identically.
     """
-    if not heights:
-        return []
+    if data.error is not None:
+        raise data.error
 
-    start, end = heights[0], heights[-1]
-    client.stats.blocks += len(heights)
+    client.stats.blocks += len(data.heights)
 
-    tweaks_by_height = await client.get_tweaks_range(start, end)
-    for tweaks in tweaks_by_height.values():
-        client.stats.tweaks += len(tweaks)
-
-    # The UTXOs are only worth fetching for blocks that actually have tweaks;
-    # with none in the span there is nothing to match them against, and the
-    # request is skipped entirely. On chains where most blocks hold no silent
-    # payment that halves the requests again.
-    utxos_by_height: dict[int, list[dict]] = {}
-    if any(tweaks_by_height.get(h) for h in heights):
-        utxos_by_height = await client.get_utxos_range(start, end)
-        for utxos in utxos_by_height.values():
-            client.stats.utxos += len(utxos)
+    # The compute index pairs tweaks with txids, so the cheaper reverse matcher
+    # applies. Without it, the forward matcher. Both return the same UTXOs —
+    # tests/test_reverse_matching.py holds them to that.
+    use_reverse = data.compute_index is not None
+    index = data.compute_index if use_reverse else data.tweaks
+    matcher = sync_block_reverse if use_reverse else sync_block
 
     results: list = []
-    for height in heights:
-        if height not in tweaks_by_height:
+    for height in data.heights:
+        if index is None or height not in index:
             # Absent, not empty. See BlockNotIndexedError.
             results.append(BlockNotIndexedError(height))
             continue
 
-        tweaks = tweaks_by_height[height]
-        utxos = utxos_by_height.get(height) or []
-        if not tweaks or not utxos:
+        entries = index[height]
+        utxos = data.utxos.get(height) or []
+        if not entries or not utxos:
             results.append([])
             continue
 
         try:
             owned = await _match_in_thread(
-                client, sync_block,
-                tweaks, utxos, scan_secret_bytes, spend_pub_bytes, labels,
+                client, matcher,
+                entries, utxos, scan_secret_bytes, spend_pub_bytes, labels,
             )
             await _resolve_timestamps(owned, client, network)
             results.append(owned)
@@ -889,6 +1133,22 @@ async def scan_blocks_range(
             results.append(e)
 
     return results
+
+
+async def scan_blocks_range(
+    heights, client, scan_secret_bytes, spend_pub_bytes, labels, network,
+):
+    """Fetch and match one span of blocks.
+
+    The unpipelined form: the scan loop fetches the next batch while matching
+    this one, so it calls fetch_range_batch and match_range_batch separately.
+    """
+    if not heights:
+        return []
+    data = await fetch_range_batch(heights, client)
+    return await match_range_batch(
+        data, client, scan_secret_bytes, spend_pub_bytes, labels, network
+    )
 
 
 async def _fetch_spent_outputs(client, heights) -> dict[int, set[str]]:
@@ -924,7 +1184,9 @@ async def _fetch_spent_outputs(client, heights) -> dict[int, set[str]]:
     return {h: s for h, s in pairs if s}
 
 
-async def mark_spent_utxos_batch(heights, client, wallet_id, owned_utxos_lookup, network):
+async def mark_spent_utxos_batch(
+    heights, client, wallet_id, owned_utxos_lookup, network, spent_by_height=None,
+):
     """
     Short-hash matches move UTXOs to 'unconfirmed_spent' (provisional), then each
     is verified against the exact outpoint via mempool outspend before finalizing.
@@ -954,7 +1216,11 @@ async def mark_spent_utxos_batch(heights, client, wallet_id, owned_utxos_lookup,
     if not rows:
         return
 
-    spent_by_height = await _fetch_spent_outputs(client, heights)
+    # Already on hand when the scan loop prefetched it alongside the tweaks and
+    # UTXOs; only fetched here when it did not (the per-block path, or a range
+    # request that failed).
+    if spent_by_height is None:
+        spent_by_height = await _fetch_spent_outputs(client, heights)
 
     # An outpoint settled earlier in this batch is not re-checked: the UPDATEs
     # are already guarded on utxo_state so a repeat would be a no-op, but it
@@ -1195,16 +1461,46 @@ async def _scan_wallet(
     range_limit = await oracle.get_range_limit()
     use_range = range_limit > 0
     if use_range:
-        BATCH_SIZE = min(range_limit, _env_int("SILNT_SCAN_RANGE_BATCH", 100, 1, 1000))
+        # Smaller than the oracle's cap on purpose. The batch is the pipeline
+        # stage: the scan can only overlap a fetch with a match if there is a
+        # next batch to fetch, so a scan of 119 blocks in batches of 100 has
+        # two stages and hides almost nothing, while the same scan in batches
+        # of 25 hides nearly all of it. Measured over that scan with ~800
+        # tweaks per block: 43s at batch 100 without the pipeline, 27s at batch
+        # 100 with it, 23s at batch 20-40 — where 22s is the matching alone and
+        # therefore the floor.
+        #
+        # Bigger batches only save requests, and at 3 per batch there is little
+        # left to save.
+        BATCH_SIZE = min(range_limit, _env_int("SILNT_SCAN_RANGE_BATCH", 25, 1, 1000))
         logger.info(
             f"oracle supports block ranges (max {range_limit}); "
             f"scanning in batches of {BATCH_SIZE}"
         )
 
+    def batch_at(batch_start: int) -> list[int]:
+        return list(
+            range(start + batch_start, min(start + batch_start + BATCH_SIZE, end + 1))
+        )
+
+    # The in-flight fetch for the NEXT batch, started before matching this one.
+    #
+    # Without this the scan alternates between two idle resources: the network
+    # waits while a batch matches, then the CPU waits while the next batch
+    # downloads, and the wall clock is their sum. Overlapping them makes it
+    # roughly their maximum instead.
+    prefetch_task: asyncio.Task | None = None
+    prefetch_heights: list[int] | None = None
+
+    def cancel_prefetch():
+        if prefetch_task is not None and not prefetch_task.done():
+            prefetch_task.cancel()
+
     for batch_start in range(0, total_blocks, BATCH_SIZE):
         if should_stop(wallet_id):
             logger.info(f"Scan stopped at {last_scanned_height}")
             stopped = True
+            cancel_prefetch()
             await set_last_scan_height(wallet_id, last_scanned_height)
             set_scan_progress(
                 wallet_id, blocks_scanned, total_blocks, total_found,
@@ -1213,9 +1509,7 @@ async def _scan_wallet(
             clear_scan_stop(wallet_id)
             break
 
-        batch = list(
-            range(start + batch_start, min(start + batch_start + BATCH_SIZE, end + 1))
-        )
+        batch = batch_at(batch_start)
 
         owned_rows = await db.fetchall(
             "SELECT txid, vout FROM silnt.utxos WHERE wallet_id = :wallet_id AND utxo_state IN ('unspent', 'unconfirmed_spent')",
@@ -1223,33 +1517,57 @@ async def _scan_wallet(
         )
         owned_utxos_lookup = {f"{r['txid']}:{r['vout']}": r for r in owned_rows}
 
-        _t = time.perf_counter()
+        batch_results = None
+        batch_spent = None
+
         if use_range:
-            try:
-                batch_results = await scan_blocks_range(
-                    batch,
+            # Take the prefetched data if it is for this batch, otherwise fetch
+            # now (first batch, or the prefetch was skipped).
+            _t = time.perf_counter()
+            if prefetch_task is not None and prefetch_heights == batch:
+                data = await prefetch_task
+            else:
+                cancel_prefetch()
+                data = await fetch_range_batch(batch, oracle)
+            prefetch_task = None
+            prefetch_heights = None
+            oracle.stats.fetch_seconds += time.perf_counter() - _t
+
+            if data.error is not None:
+                # A truncated response, a timeout, an oracle that advertised
+                # the endpoints but cannot serve them. Drop to the per-block
+                # path for the rest of the scan rather than abandoning it;
+                # correctness is identical and only the request count differs.
+                logger.warning(
+                    f"range scan of blocks {batch[0]}-{batch[-1]} failed "
+                    f"({data.error}); falling back to per-block scanning"
+                )
+                use_range = False
+            else:
+                # Start the NEXT batch downloading before matching this one.
+                next_start = batch_start + BATCH_SIZE
+                if next_start < total_blocks and not should_stop(wallet_id):
+                    next_batch = batch_at(next_start)
+                    if next_batch:
+                        prefetch_heights = next_batch
+                        prefetch_task = asyncio.create_task(
+                            fetch_range_batch(next_batch, oracle)
+                        )
+
+                batch_spent = data.spent
+                _t = time.perf_counter()
+                batch_results = await match_range_batch(
+                    data,
                     oracle,
                     scan_secret_bytes,
                     spend_pub_bytes,
                     labels,
                     wallet.network,
                 )
-            except Exception as e:
-                # The range request failed as a whole — a truncated response, a
-                # timeout, an oracle that advertised the endpoints but cannot
-                # serve them. Drop to the per-block path for the rest of the
-                # scan rather than abandoning it; correctness is identical and
-                # only the request count differs.
-                logger.warning(
-                    f"range scan of blocks {batch[0]}-{batch[-1]} failed ({e}); "
-                    f"falling back to per-block scanning for this scan"
-                )
-                use_range = False
-                batch_results = None
-        else:
-            batch_results = None
+                oracle.stats.match_batch_seconds += time.perf_counter() - _t
 
         if batch_results is None:
+            _t = time.perf_counter()
             batch_results = await asyncio.gather(
                 *[
                     scan_block(
@@ -1264,10 +1582,13 @@ async def _scan_wallet(
                 ],
                 return_exceptions=True,
             )
-        oracle.stats.fetch_seconds += time.perf_counter() - _t
+            oracle.stats.fetch_seconds += time.perf_counter() - _t
 
         _t = time.perf_counter()
-        await mark_spent_utxos_batch(batch, oracle, wallet_id, owned_utxos_lookup, wallet.network)
+        await mark_spent_utxos_batch(
+            batch, oracle, wallet_id, owned_utxos_lookup, wallet.network,
+            spent_by_height=batch_spent,
+        )
         oracle.stats.spent_seconds += time.perf_counter() - _t
 
         _t = time.perf_counter()
@@ -1337,6 +1658,10 @@ async def _scan_wallet(
         # Yield to the event loop between batches so other requests (wallet
         # loads, navigation) get serviced promptly during a long scan.
         await asyncio.sleep(0)
+
+    # A prefetch can still be in flight if the loop left early; nothing will
+    # await it, so cancel it rather than leaving a task holding a connection.
+    cancel_prefetch()
 
     await set_last_scan_height(wallet_id, last_scanned_height)
     set_scan_progress(
