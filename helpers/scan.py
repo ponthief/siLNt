@@ -571,10 +571,27 @@ class OracleStats:
         )
 
 
+class BlockNotIndexedError(Exception):
+    """The oracle served a range but left this height out of it.
+
+    The range endpoints omit heights they have never indexed — above the sync
+    tip, or below the oracle's sync_start_height — while a block that really
+    holds nothing comes back present with an empty index. Keeping the two apart
+    matters: treating "never indexed" as "empty" is how a scanner marks a block
+    scanned without ever having looked at it, and any payment in that block is
+    then invisible until a manual rescan.
+    """
+
+    def __init__(self, height: int):
+        super().__init__(f"oracle has not indexed block {height}")
+        self.height = height
+
+
 class BlindBitOracleClient:
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
         self.stats = OracleStats()
+        self._range_limit: int | None = None
 
     async def _get(self, path: str) -> httpx.Response:
         started = time.perf_counter()
@@ -586,6 +603,57 @@ class BlindBitOracleClient:
 
     async def get_chain_tip(self) -> int:
         return (await self._get("/info")).json()["height"]
+
+    async def get_range_limit(self) -> int:
+        """How many blocks this oracle serves per /range/* request.
+
+        0 means no range endpoints — an older oracle, or an operator who turned
+        them off — and the caller must fall back to the per-block ones. Probed
+        once per client and remembered, since it cannot change under us within
+        a scan.
+        """
+        if self._range_limit is None:
+            try:
+                info = (await self._get("/info")).json()
+                self._range_limit = max(0, int(info.get("max_range_blocks") or 0))
+            except Exception as e:
+                logger.info(
+                    f"oracle at {self.base_url} did not report range support "
+                    f"({e}); scanning block by block"
+                )
+                self._range_limit = 0
+        return self._range_limit
+
+    async def _get_range(self, path: str, start: int, end: int) -> dict[int, list]:
+        """Fetch one /range/* endpoint, keyed by block height.
+
+        A truncated response — which is how the oracle signals a failure it hit
+        after the status line went out — fails to parse here and raises, which
+        is the point: the batch is retried or reported, never mistaken for a
+        run of empty blocks.
+        """
+        r = await self._get(f"{path}?start={start}&end={end}")
+        r.raise_for_status()
+        data = r.json()
+        out: dict[int, list] = {}
+        for block in data.get("blocks") or []:
+            height = (block.get("block_identifier") or {}).get("block_height")
+            if height is None:
+                continue
+            out[int(height)] = block.get("index") or []
+        return out
+
+    async def get_tweaks_range(self, start: int, end: int) -> dict[int, list[bytes]]:
+        raw = await self._get_range("/range/tweaks", start, end)
+        return {h: [bytes.fromhex(t) for t in idx] for h, idx in raw.items()}
+
+    async def get_utxos_range(self, start: int, end: int) -> dict[int, list[dict]]:
+        return await self._get_range("/range/utxos", start, end)
+
+    async def get_spent_outputs_range(
+        self, start: int, end: int
+    ) -> dict[int, list[str]]:
+        return await self._get_range("/range/spent-outputs", start, end)
 
     async def get_tweaks(self, height: int) -> list[bytes]:
         r = await self._get(f"/tweaks/{height}")
@@ -750,6 +818,112 @@ async def scan_block(
     )
 
 
+async def _resolve_timestamps(owned, client, network):
+    """Fill in timestamps the oracle did not supply, one explorer call each."""
+    for o in owned:
+        if not o.timestamp:
+            _t = time.perf_counter()
+            o.timestamp = await get_block_ts(o.txid.hex(), network)
+            client.stats.ts_lookups += 1
+            client.stats.ts_seconds += time.perf_counter() - _t
+
+
+async def scan_blocks_range(
+    heights, client, scan_secret_bytes, spend_pub_bytes, labels, network,
+):
+    """Scan a contiguous span of blocks using the oracle's range endpoints.
+
+    This is the whole point of the range endpoints. The per-block path costs
+    three HTTP round trips for every block, so a ten-thousand-block scan is
+    thirty thousand requests; against a remote oracle that is what the scan
+    spends its time on, and no amount of faster matching at either end touches
+    it. Here a span of blocks costs one request for the tweaks and at most one
+    more for the UTXOs.
+
+    Returns a list aligned with `heights`, each entry either a list of
+    OwnedUTXO or an Exception — the same shape
+    asyncio.gather(return_exceptions=True) produces for the per-block path, so
+    the caller treats both identically.
+    """
+    if not heights:
+        return []
+
+    start, end = heights[0], heights[-1]
+    client.stats.blocks += len(heights)
+
+    tweaks_by_height = await client.get_tweaks_range(start, end)
+    for tweaks in tweaks_by_height.values():
+        client.stats.tweaks += len(tweaks)
+
+    # The UTXOs are only worth fetching for blocks that actually have tweaks;
+    # with none in the span there is nothing to match them against, and the
+    # request is skipped entirely. On chains where most blocks hold no silent
+    # payment that halves the requests again.
+    utxos_by_height: dict[int, list[dict]] = {}
+    if any(tweaks_by_height.get(h) for h in heights):
+        utxos_by_height = await client.get_utxos_range(start, end)
+        for utxos in utxos_by_height.values():
+            client.stats.utxos += len(utxos)
+
+    results: list = []
+    for height in heights:
+        if height not in tweaks_by_height:
+            # Absent, not empty. See BlockNotIndexedError.
+            results.append(BlockNotIndexedError(height))
+            continue
+
+        tweaks = tweaks_by_height[height]
+        utxos = utxos_by_height.get(height) or []
+        if not tweaks or not utxos:
+            results.append([])
+            continue
+
+        try:
+            owned = await _match_in_thread(
+                client, sync_block,
+                tweaks, utxos, scan_secret_bytes, spend_pub_bytes, labels,
+            )
+            await _resolve_timestamps(owned, client, network)
+            results.append(owned)
+        except Exception as e:
+            results.append(e)
+
+    return results
+
+
+async def _fetch_spent_outputs(client, heights) -> dict[int, set[str]]:
+    """Spent-output shorthashes for a batch, keyed by height.
+
+    One request for the whole span where the oracle supports ranges, and the
+    old request-per-height otherwise.
+    """
+    if not heights:
+        return {}
+
+    if await client.get_range_limit() > 0:
+        try:
+            raw = await client.get_spent_outputs_range(heights[0], heights[-1])
+            return {h: set(idx) for h, idx in raw.items() if idx}
+        except Exception as e:
+            logger.warning(
+                f"spent-outputs range {heights[0]}-{heights[-1]} failed ({e}); "
+                f"falling back to per-block requests"
+            )
+
+    async def one(height: int):
+        try:
+            data = await client.get_spent_outputs(height)
+        except Exception as e:
+            logger.warning(f"spent-outputs for block {height} failed: {e}")
+            return height, set()
+        if not data:
+            return height, set()
+        return height, set(data.get("index") or [])
+
+    pairs = await asyncio.gather(*[one(h) for h in heights])
+    return {h: s for h, s in pairs if s}
+
+
 async def mark_spent_utxos_batch(heights, client, wallet_id, owned_utxos_lookup, network):
     """
     Short-hash matches move UTXOs to 'unconfirmed_spent' (provisional), then each
@@ -757,31 +931,47 @@ async def mark_spent_utxos_batch(heights, client, wallet_id, owned_utxos_lookup,
     Replaces the previous version that finalized 'spent' directly on an 8-byte
     short-hash match.
     """
-    if not owned_utxos_lookup:
+    if not owned_utxos_lookup or not heights:
         return
 
     # Resolve the mempool base once for verification.
     backend = await get_backend_config(network)
     mempool_base = backend.mempool_url or "https://mempool.space"
 
+    # The wallet's live outputs, read ONCE for the whole batch.
+    #
+    # This query does not depend on the height, but it used to sit inside the
+    # per-height coroutine — so a batch issued one identical query per block,
+    # all concurrently, for a result that is the same every time. At the batch
+    # sizes the range endpoints make practical that is a hundred round trips to
+    # the database to learn the same thing a hundred times.
+    rows = await db.fetchall(
+        """SELECT txid, vout, pub_key FROM silnt.utxos
+           WHERE wallet_id = :wallet_id
+           AND utxo_state IN ('unspent', 'unconfirmed_spent')""",
+        {"wallet_id": wallet_id},
+    )
+    if not rows:
+        return
+
+    spent_by_height = await _fetch_spent_outputs(client, heights)
+
+    # An outpoint settled earlier in this batch is not re-checked: the UPDATEs
+    # are already guarded on utxo_state so a repeat would be a no-op, but it
+    # would still spend an explorer round trip to learn nothing.
+    settled: set[tuple[str, int]] = set()
+
     async def check_height(height: int):
         try:
-            spent_data = await client.get_spent_outputs(height)
-            if not spent_data:
-                return
-            spent_set = set(spent_data.get("index", []))
+            spent_set = spent_by_height.get(height)
             if not spent_set:
                 return
 
-            rows = await db.fetchall(
-                """SELECT txid, vout, pub_key FROM silnt.utxos
-                   WHERE wallet_id = :wallet_id
-                   AND utxo_state IN ('unspent', 'unconfirmed_spent')""",
-                {"wallet_id": wallet_id},
-            )
             for row in rows:
                 short_pub = row["pub_key"][:16]  # 8 bytes = 16 hex chars
                 if short_pub not in spent_set:
+                    continue
+                if (row["txid"], row["vout"]) in settled:
                     continue
                 # PROVISIONAL: short-hash match → mark unconfirmed_spent, do NOT
                 # finalize. Only flip from 'unspent'; leave existing
@@ -810,6 +1000,12 @@ async def mark_spent_utxos_batch(heights, client, wallet_id, owned_utxos_lookup,
                              AND utxo_state = 'unconfirmed_spent'""",
                         {"txid": row["txid"], "vout": row["vout"], "wallet_id": wallet_id},
                     )
+                    # Terminal: finalised as spent, so later blocks in this
+                    # batch need not re-check it. A false positive below is NOT
+                    # settled — the outpoint is genuinely unspent, and a later
+                    # block in the same batch may be the one that really spends
+                    # it.
+                    settled.add((row["txid"], row["vout"]))
                     logger.info(
                         f"Confirmed {row['txid']}:{row['vout']} spent (outspend) "
                         f"at block {height}"
@@ -832,9 +1028,14 @@ async def mark_spent_utxos_batch(heights, client, wallet_id, owned_utxos_lookup,
             logger.warning(f"mark_spent_utxos error at block {height}: {e}")
 
     # Verification adds an explorer call per matched UTXO. Matches are rare
-    # (only your own spends), so this stays cheap. Kept within the same
-    # asyncio.gather over heights as before.    
-    await asyncio.gather(*[check_height(h) for h in heights])
+    # (only your own spends), so this stays cheap.
+    #
+    # Walked in height order rather than gathered: the heights share the `rows`
+    # snapshot and the `settled` set, and running them concurrently would race
+    # on both. Ordering also means an outpoint is settled by the first block
+    # that spends it, which is the block that actually did.
+    for height in heights:
+        await check_height(height)
 
 
 async def set_last_scan_height(wallet_id: str, height: int) -> None:
@@ -969,6 +1170,9 @@ async def _scan_wallet(
     last_scanned_height = start
     total_blocks = end - start + 1
     stopped = False
+    # Height of the first block this scan could not read. Once set, the resume
+    # point stops advancing, so the next scan comes back for it.
+    scan_gap_height: int | None = None
     clear_scan_stop(wallet_id)
     set_scan_progress(wallet_id, 0, total_blocks, 0)
     # How many blocks are in flight at once.
@@ -984,6 +1188,18 @@ async def _scan_wallet(
     # else's server: lower it if a scan starts drawing timeouts or 429s. The
     # ceiling is the client's max_connections.
     BATCH_SIZE = _env_int("SILNT_SCAN_BATCH_SIZE", 24, 1, 64)
+
+    # If the oracle serves /range/*, a batch costs one or two requests instead
+    # of three per block, so the batch wants to be as large as the oracle
+    # allows rather than as large as the connection pool allows.
+    range_limit = await oracle.get_range_limit()
+    use_range = range_limit > 0
+    if use_range:
+        BATCH_SIZE = min(range_limit, _env_int("SILNT_SCAN_RANGE_BATCH", 100, 1, 1000))
+        logger.info(
+            f"oracle supports block ranges (max {range_limit}); "
+            f"scanning in batches of {BATCH_SIZE}"
+        )
 
     for batch_start in range(0, total_blocks, BATCH_SIZE):
         if should_stop(wallet_id):
@@ -1008,20 +1224,46 @@ async def _scan_wallet(
         owned_utxos_lookup = {f"{r['txid']}:{r['vout']}": r for r in owned_rows}
 
         _t = time.perf_counter()
-        batch_results = await asyncio.gather(
-            *[
-                scan_block(
-                    h,
+        if use_range:
+            try:
+                batch_results = await scan_blocks_range(
+                    batch,
                     oracle,
                     scan_secret_bytes,
                     spend_pub_bytes,
                     labels,
                     wallet.network,
                 )
-                for h in batch
-            ],
-            return_exceptions=True,
-        )
+            except Exception as e:
+                # The range request failed as a whole — a truncated response, a
+                # timeout, an oracle that advertised the endpoints but cannot
+                # serve them. Drop to the per-block path for the rest of the
+                # scan rather than abandoning it; correctness is identical and
+                # only the request count differs.
+                logger.warning(
+                    f"range scan of blocks {batch[0]}-{batch[-1]} failed ({e}); "
+                    f"falling back to per-block scanning for this scan"
+                )
+                use_range = False
+                batch_results = None
+        else:
+            batch_results = None
+
+        if batch_results is None:
+            batch_results = await asyncio.gather(
+                *[
+                    scan_block(
+                        h,
+                        oracle,
+                        scan_secret_bytes,
+                        spend_pub_bytes,
+                        labels,
+                        wallet.network,
+                    )
+                    for h in batch
+                ],
+                return_exceptions=True,
+            )
         oracle.stats.fetch_seconds += time.perf_counter() - _t
 
         _t = time.perf_counter()
@@ -1032,6 +1274,17 @@ async def _scan_wallet(
         for h, result in zip(batch, batch_results):
             if isinstance(result, Exception):
                 logger.error(f"Block {h} error: {result}")
+                # Remember the first block we could not scan and stop advancing
+                # the resume point past it.
+                #
+                # This used to just `continue`, so later blocks in the batch
+                # carried last_scanned_height beyond the failure and the next
+                # scan resumed above it — the block was never looked at again,
+                # and any payment in it stayed invisible until someone manually
+                # rescanned the range. Leaving the resume point below the gap
+                # costs a re-scan of blocks already done, which is only slow.
+                if scan_gap_height is None:
+                    scan_gap_height = h
                 continue
             if result:
                 # Inherit address labels onto matching UTXOs (added earlier)
@@ -1071,7 +1324,8 @@ async def _scan_wallet(
                     )
                     continue
             blocks_scanned += 1
-            last_scanned_height = h
+            if scan_gap_height is None:
+                last_scanned_height = h
 
         set_scan_progress(
             wallet_id, blocks_scanned, total_blocks, total_found,
@@ -1116,6 +1370,13 @@ async def _scan_wallet(
     logger.info(
         f"Scan done: {blocks_scanned} blocks, {total_found} UTXOs, balance={balance}"
     )
+    if scan_gap_height is not None:
+        logger.warning(
+            f"Wallet {wallet_id}: block {scan_gap_height} could not be read, so the "
+            f"resume point was held at {last_scanned_height}. The next scan will "
+            f"cover it again; the blocks above it were scanned but are not "
+            f"recorded as such."
+        )
     # The number that decides what, if anything, to optimise next. If waiting on
     # the oracle dominates, faster matching — in any language — changes nothing.
     oracle.stats.wall_seconds = time.perf_counter() - scan_started
@@ -1132,6 +1393,9 @@ async def _scan_wallet(
         "final_height": last_scanned_height,
         "balance": balance,
         "stopped": stopped,
+        # The first block this scan could not read, if any. Callers that report
+        # a scan as complete should say "incomplete" when this is set.
+        "gap_height": scan_gap_height,
         "timing": oracle.stats.as_dict()
     }
 
