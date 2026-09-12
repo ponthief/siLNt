@@ -350,8 +350,33 @@ per-tweak cost itself comes down — and the way to do that is
 | Variable | Default | What it does |
 |---|---|---|
 | `SILNT_SCAN_BATCH_SIZE` | `24` | Blocks scanned concurrently. Lower it if the oracle starts returning timeouts or 429s; the ceiling is the HTTP pool's `max_connections` (64). |
-| `SILNT_SCAN_COMPUTE_INDEX` | off | Use the oracle's `compute-index` endpoint, which filters server-side instead of downloading every tweak and UTXO per block. **Opt-in: this path has never run in production** — the branch guarding it was unreachable — so verify it against a block range with known payments before trusting it. A mistake here does not raise, it silently misses outputs. |
+| `SILNT_SCAN_COMPUTE_INDEX` | off | `1` uses the oracle's `compute-index` endpoint, which filters server-side: **one oracle request per block instead of three**. `verify` runs both paths per block and logs disagreements while still returning the trusted result — see below. **This path has never run in production** (the branch guarding it was unreachable), and a mistake in it does not raise, it silently misses outputs. Run `verify` first. |
 | `SILNT_ORACLE_VERIFY_TLS` | off | Verify the oracle's TLS certificate. Off by default only because that is the behaviour this has always had. Turn it on if your oracle has a valid certificate: without it, anyone on the path can serve forged tweaks and UTXOs, which shows a wrong balance and reveals which blocks a user cares about. It cannot leak keys — scanning never sees a spend key. |
+
+### Proving the fast path before trusting it
+
+The oracle's per-request service time is the floor on a scan: three requests per
+block at ~28 ms each is ~5.7 s per hundred blocks, and no amount of client-side
+concurrency gets under it if the oracle serialises. `compute-index` is the lever
+that matters, because it cuts the request count rather than trying to make
+requests faster.
+
+But it decides whether your money is found, so prove it on your own data first:
+
+```bash
+SILNT_SCAN_COMPUTE_INDEX=verify   # then rescan a range whose payments you know
+docker logs lnbits 2>&1 | grep "compute-index verify"
+```
+
+In `verify` mode each block is scanned **both** ways and the results compared on
+(txid, vout, output key). Timestamps are excluded deliberately — the two paths
+source them differently and they are display metadata, not money. The **legacy**
+result is always what gets returned, so a bug in the fast path cannot cost a
+payment while it is being evaluated. A silent log means they agreed; a
+`MISMATCH` line names exactly which outputs differed.
+
+Once a range with known payments comes back clean, switch to
+`SILNT_SCAN_COMPUTE_INDEX=1`.
 
 Oracle requests share one pooled, keep-alive HTTP client for the whole process.
 Before that they each opened their own connection — and their own TLS handshake

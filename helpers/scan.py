@@ -432,9 +432,17 @@ _http: Optional[httpx.AsyncClient] = None
 _VERIFY_TLS = os.getenv("SILNT_ORACLE_VERIFY_TLS", "").lower() in ("1", "true", "yes")
 
 # Opt-in, because the path it enables has never run. See the note in scan_block.
-_USE_COMPUTE_INDEX = os.getenv("SILNT_SCAN_COMPUTE_INDEX", "").lower() in (
-    "1", "true", "yes",
-)
+#
+#   unset / 0  legacy path: tweaks + utxos per block, plus the spent check.
+#   verify     run BOTH per block, compare, log any disagreement, and RETURN
+#              THE LEGACY RESULT. Costs more, proves the fast path against the
+#              one already trusted with your money.
+#   1 / true   compute-index only. One oracle request per block instead of
+#              three, which on a local oracle at ~28ms of service time per
+#              request is most of a scan.
+_COMPUTE_INDEX_MODE = os.getenv("SILNT_SCAN_COMPUTE_INDEX", "").strip().lower()
+_USE_COMPUTE_INDEX = _COMPUTE_INDEX_MODE in ("1", "true", "yes")
+_VERIFY_COMPUTE_INDEX = _COMPUTE_INDEX_MODE == "verify"
 
 
 def _env_int(name: str, default: int, lo: int, hi: int) -> int:
@@ -656,55 +664,100 @@ async def _match_in_thread(client, fn, *args):
         client.stats.match_seconds += time.perf_counter() - started
 
 
+def _owned_fingerprint(owned) -> set:
+    """What two scan paths must agree on, reduced to something comparable.
+
+    txid, vout and the output key — identity and spendability. Deliberately not
+    the timestamp, which the two paths source differently and which is display
+    metadata, not money.
+    """
+    return {(o.txid.hex(), o.vout, o.pub_key.hex()) for o in (owned or [])}
+
+
 async def scan_block(
     height, client, scan_secret_bytes, spend_pub_bytes, labels,
     network: str,
 ):
     client.stats.blocks += 1
 
-    # The oracle's compute-index endpoint does the filtering server-side and
-    # returns candidates, instead of this process downloading every tweak and
-    # every UTXO in the block and doing it here. It is the single biggest
-    # saving available — and until now it was unreachable.
-    #
-    # The branch below reads `if labels:` … else use compute-index. But
-    # create_labels() unconditionally includes the change index and the
-    # labeled-address indices, so labels is NEVER empty and the compute-index
-    # path has never executed in production.
-    #
-    # It is therefore untested code in the part of a wallet that decides
-    # whether your money is found, which is why it is opt-in rather than simply
-    # switched on: a bug here does not throw, it silently misses outputs. Set
-    # SILNT_SCAN_COMPUTE_INDEX=1 to use it, and prove it against the path below
-    # on a range with known payments before trusting it.
-    if _USE_COMPUTE_INDEX:
-        compute_data = await client.get_compute_index(height)
-        if compute_data:
-            matches = await _match_in_thread(
-                client, sync_block_from_compute_index,
-                compute_data["index"], scan_secret_bytes, spend_pub_bytes, labels,
+    # Verification mode: run the fast path and the trusted one over the same
+    # block and report any disagreement. The LEGACY result is what gets
+    # returned, so a bug in the fast path cannot cost anyone a payment while it
+    # is being evaluated. Slower than either path alone, by design — this is a
+    # thing you run once over a range whose payments you already know, not a
+    # setting to leave on.
+    if _VERIFY_COMPUTE_INDEX:
+        fast = None
+        try:
+            fast = await _scan_block_compute_index(
+                height, client, scan_secret_bytes, spend_pub_bytes, labels, network
             )
-            if matches:
-                full_utxos = await client.get_utxos(height)
-                lkp = {u["pubkey"]: u for u in full_utxos if "pubkey" in u}
-                for owned in matches:
-                    ph = owned.pub_key.hex()
-                    full = lkp.get(ph) or next(
-                        (u for u in full_utxos if u.get("pubkey", "")[:16] == ph[:16]),
-                        None,
-                    )
-                    if full:
-                        owned.vout = full.get("vout", owned.vout)
-                        owned.amount = full.get("amount", owned.amount)
-                        owned.timestamp = full.get("timestamp") or await get_block_ts(
-                            full.get("txid", ""), network
-                        )
-                        owned.pub_key = bytes.fromhex(full["pubkey"])
-            return matches
-        # 404 means this oracle does not serve compute-index; fall through to
-        # the tweaks+utxos path rather than reporting an empty block, which
-        # would look exactly like "you have no money here".
+        except Exception as e:
+            logger.error(f"compute-index verify: block {height} raised {e!r}")
+        legacy = await _scan_block_legacy(
+            height, client, scan_secret_bytes, spend_pub_bytes, labels, network
+        )
+        a, b = _owned_fingerprint(fast), _owned_fingerprint(legacy)
+        if fast is None:
+            logger.error(f"compute-index verify: block {height} FAST PATH FAILED")
+        elif a != b:
+            logger.error(
+                f"compute-index verify: block {height} MISMATCH — "
+                f"fast-only={sorted(a - b)} legacy-only={sorted(b - a)}"
+            )
+        else:
+            logger.debug(f"compute-index verify: block {height} agrees ({len(b)} owned)")
+        return legacy
 
+    if _USE_COMPUTE_INDEX:
+        return await _scan_block_compute_index(
+            height, client, scan_secret_bytes, spend_pub_bytes, labels, network
+        )
+    return await _scan_block_legacy(
+        height, client, scan_secret_bytes, spend_pub_bytes, labels, network
+    )
+
+
+async def _scan_block_compute_index(
+    height, client, scan_secret_bytes, spend_pub_bytes, labels, network: str,
+):
+    """One oracle request per block: the oracle does the filtering."""
+    compute_data = await client.get_compute_index(height)
+    if not compute_data:
+        # 404 means this oracle does not serve compute-index. Fall back rather
+        # than report an empty block, which would look exactly like having no
+        # money here.
+        return await _scan_block_legacy(
+            height, client, scan_secret_bytes, spend_pub_bytes, labels, network
+        )
+    matches = await _match_in_thread(
+        client, sync_block_from_compute_index,
+        compute_data["index"], scan_secret_bytes, spend_pub_bytes, labels,
+    )
+    if matches:
+        full_utxos = await client.get_utxos(height)
+        client.stats.utxos += len(full_utxos)
+        lkp = {u["pubkey"]: u for u in full_utxos if "pubkey" in u}
+        for owned in matches:
+            ph = owned.pub_key.hex()
+            full = lkp.get(ph) or next(
+                (u for u in full_utxos if u.get("pubkey", "")[:16] == ph[:16]), None
+            )
+            if full:
+                owned.vout = full.get("vout", owned.vout)
+                owned.amount = full.get("amount", owned.amount)
+                owned.timestamp = full.get("timestamp") or await get_block_ts(
+                    full.get("txid", ""), network
+                )
+                owned.pub_key = bytes.fromhex(full["pubkey"])
+    return matches
+
+
+async def _scan_block_legacy(
+    height, client, scan_secret_bytes, spend_pub_bytes, labels, network: str,
+):
+    """The path that has always run: every tweak and every UTXO in the block,
+    matched here. Two oracle requests per block, plus the spent check."""
     if labels:
         tweaks = await client.get_tweaks(height)
         client.stats.tweaks += len(tweaks)
