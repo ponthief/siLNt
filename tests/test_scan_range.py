@@ -664,3 +664,83 @@ def test_as_dict_reports_the_path():
     d = stats.as_dict()
     assert d["used_range"] is True
     assert d["used_compute_index"] is True
+
+
+# --- the fallback must never be silent --------------------------------------
+
+
+class _Recorder:
+    """Captures the module's loguru calls, which conftest otherwise stubs out."""
+
+    def __init__(self):
+        self.warnings = []
+        self.infos = []
+
+    def warning(self, msg, *a, **k):
+        self.warnings.append(msg % a if a else msg)
+
+    def info(self, msg, *a, **k):
+        self.infos.append(msg % a if a else msg)
+
+    def __getattr__(self, _n):
+        return lambda *a, **k: None
+
+
+@pytest.mark.asyncio
+async def test_missing_field_warns_rather_than_falling_back_silently(monkeypatch):
+    """The case that cost two debugging rounds.
+
+    /info answers, but the binary predates the endpoints so the field is
+    absent. This used to set the limit to 0 and log nothing at all — the only
+    symptom being a request count three times higher, several lines away.
+    """
+    rec = _Recorder()
+    monkeypatch.setattr(scan, "logger", rec)
+    client = RecordingClient({"/info": {"height": 500, "network": "signet"}})
+
+    assert await client.get_range_limit() == 0
+    assert rec.warnings, "fell back with no warning at all"
+    joined = " ".join(rec.warnings)
+    assert "max_range_blocks" in joined
+    assert "Rebuild and restart" in joined, joined
+
+
+@pytest.mark.asyncio
+async def test_unreachable_info_warns(monkeypatch):
+    rec = _Recorder()
+    monkeypatch.setattr(scan, "logger", rec)
+    client = RecordingClient({"/info": httpx.ConnectError("refused")})
+
+    assert await client.get_range_limit() == 0
+    assert any("/info failed" in w for w in rec.warnings), rec.warnings
+
+
+@pytest.mark.asyncio
+async def test_explicit_zero_warns(monkeypatch):
+    rec = _Recorder()
+    monkeypatch.setattr(scan, "logger", rec)
+    client = RecordingClient({"/info": {"height": 5, "max_range_blocks": 0}})
+
+    assert await client.get_range_limit() == 0
+    assert any("disabled" in w for w in rec.warnings), rec.warnings
+
+
+@pytest.mark.asyncio
+async def test_non_numeric_value_warns(monkeypatch):
+    rec = _Recorder()
+    monkeypatch.setattr(scan, "logger", rec)
+    client = RecordingClient({"/info": {"max_range_blocks": "lots"}})
+
+    assert await client.get_range_limit() == 0
+    assert any("not a number" in w for w in rec.warnings), rec.warnings
+
+
+@pytest.mark.asyncio
+async def test_support_is_announced(monkeypatch):
+    rec = _Recorder()
+    monkeypatch.setattr(scan, "logger", rec)
+    client = RecordingClient({"/info": {"height": 5, "max_range_blocks": 100}})
+
+    assert await client.get_range_limit() == 100
+    assert any("serves block ranges" in i for i in rec.infos), rec.infos
+    assert not rec.warnings, rec.warnings

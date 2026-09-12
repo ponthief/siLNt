@@ -911,16 +911,59 @@ class BlindBitOracleClient:
         once per client and remembered, since it cannot change under us within
         a scan.
         """
-        if self._range_limit is None:
-            try:
-                info = (await self._get("/info")).json()
-                self._range_limit = max(0, int(info.get("max_range_blocks") or 0))
-            except Exception as e:
-                logger.info(
-                    f"oracle at {self.base_url} did not report range support "
-                    f"({e}); scanning block by block"
-                )
-                self._range_limit = 0
+        if self._range_limit is not None:
+            return self._range_limit
+
+        # Every outcome says something, including the one that used to say
+        # nothing. An oracle whose /info answers but omits max_range_blocks is
+        # an oracle running a binary older than the endpoints — the commonest
+        # cause by far, since merging the change is not the same as rebuilding
+        # and restarting it — and that case previously fell back in total
+        # silence. The only symptom was a request count three times higher than
+        # it should be, several log lines away.
+        try:
+            resp = await self._get("/info")
+            info = resp.json()
+        except Exception as e:
+            logger.warning(
+                f"oracle at {self.base_url}: /info failed ({e}); "
+                f"scanning block by block, which is ~3x the requests"
+            )
+            self._range_limit = 0
+            return self._range_limit
+
+        raw = info.get("max_range_blocks")
+        if raw is None:
+            logger.warning(
+                f"oracle at {self.base_url} answered /info but reported no "
+                f"max_range_blocks, so it predates the /range endpoints. "
+                f"Scanning block by block, which is ~3x the requests. "
+                f"Rebuild and restart the oracle to use them. "
+                f"(/info returned: {sorted(info)})"
+            )
+            self._range_limit = 0
+            return self._range_limit
+
+        try:
+            self._range_limit = max(0, int(raw))
+        except (TypeError, ValueError):
+            logger.warning(
+                f"oracle at {self.base_url} reported max_range_blocks={raw!r}, "
+                f"which is not a number; scanning block by block"
+            )
+            self._range_limit = 0
+            return self._range_limit
+
+        if self._range_limit == 0:
+            logger.warning(
+                f"oracle at {self.base_url} reports max_range_blocks=0, so the "
+                f"range endpoints are disabled there; scanning block by block"
+            )
+        else:
+            logger.info(
+                f"oracle at {self.base_url} serves block ranges "
+                f"(max_range_blocks={self._range_limit})"
+            )
         return self._range_limit
 
     async def _get_range(self, path: str, start: int, end: int) -> dict[int, list]:
