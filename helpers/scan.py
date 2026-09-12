@@ -833,6 +833,13 @@ class OracleStats:
     # without the label count would leave the forward numbers unreadable.
     matcher: str = ""
     labels: int = 0
+    # Measured INSIDE the matcher thread. match_cpu_seconds is that thread's own
+    # CPU time, which does not advance while the GIL is held elsewhere;
+    # match_thread_wall_seconds is the wall clock over the same calls. The gap
+    # between them is time the matcher spent waiting for the interpreter rather
+    # than computing -- see _timed_match.
+    match_cpu_seconds: float = 0.0
+    match_thread_wall_seconds: float = 0.0
 
     def as_dict(self) -> dict:
         return {
@@ -852,6 +859,8 @@ class OracleStats:
             "used_compute_index": self.used_compute_index,
             "matcher": self.matcher,
             "labels": self.labels,
+            "match_cpu_seconds": round(self.match_cpu_seconds, 2),
+            "match_thread_wall_seconds": round(self.match_thread_wall_seconds, 2),
             "spent_seconds": round(self.spent_seconds, 2),
             "persist_seconds": round(self.persist_seconds, 2),
             "unaccounted_seconds": round(
@@ -921,6 +930,21 @@ class OracleStats:
         if self.tweaks and self.match_batch_seconds:
             per_tweak = f", {self.match_batch_seconds / self.tweaks * 1e6:.0f}us/tweak"
         matcher_note = f" | matcher {who} over {self.labels} labels{per_tweak}"
+
+        # Was the matcher computing, or waiting for the GIL? Stated as a
+        # verdict rather than as two numbers to subtract, because the two cases
+        # have opposite fixes.
+        if self.match_thread_wall_seconds > 0:
+            busy = self.match_cpu_seconds / self.match_thread_wall_seconds
+            verdict = (
+                "compute-bound" if busy >= 0.8
+                else f"STARVED by other threads, {1 / max(busy, 1e-9):.1f}x slower"
+            )
+            matcher_note += (
+                f" | matcher CPU {self.match_cpu_seconds:.1f}s of "
+                f"{self.match_thread_wall_seconds:.1f}s in-thread "
+                f"({busy * 100:.0f}% busy, {verdict})"
+            )
 
         return (
             f"path {path}{matcher_note} | {work} "
@@ -1151,6 +1175,38 @@ _MATCHER_NAMES = {
 }
 
 
+def _timed_match(stats, fn, *args):
+    """Run the matcher and record how much of its wall time was actually CPU.
+
+    This distinguishes the two reasons matching can be slow, which no other
+    number here can tell apart.
+
+    The scan pipelines: the next batch is fetched while the current one is
+    matched. Fetching is not free CPU -- httpx gunzips the body and json.loads
+    builds a dict per UTXO, on the order of 800 MB of JSON over a long scan --
+    and all of it runs on the event loop thread while the matcher runs on this
+    one. Both hold the GIL, so they do not overlap, they interleave. Measured on
+    a 4-core box with a realistic batch payload parsing beside it, the matcher
+    went from 147.6 to 401.6 us/tweak: 2.7x slower without doing any more work.
+
+    When that happens fetch_seconds still reads near zero, because the await is
+    satisfied instantly -- the work already happened -- so the cost lands on the
+    match phase and the matcher takes the blame for the prefetch's CPU.
+
+    time.thread_time() is this thread's own CPU time, so it does not advance
+    while the GIL is held elsewhere. Comparing it against wall time separates
+    "the matching is expensive" from "the matching is being starved", and those
+    have opposite fixes: a cheaper matcher against a cheaper parse or a
+    separate process.
+    """
+    cpu0, wall0 = time.thread_time(), time.perf_counter()
+    try:
+        return fn(*args)
+    finally:
+        stats.match_cpu_seconds += time.thread_time() - cpu0
+        stats.match_thread_wall_seconds += time.perf_counter() - wall0
+
+
 async def _match_in_thread(client, fn, *args):
     """Run the synchronous EC matching off the event loop, and time it.
 
@@ -1162,7 +1218,9 @@ async def _match_in_thread(client, fn, *args):
     loop = asyncio.get_event_loop()
     started = time.perf_counter()
     try:
-        return await loop.run_in_executor(_matcher, fn, *args)
+        return await loop.run_in_executor(
+            _matcher, _timed_match, client.stats, fn, *args
+        )
     finally:
         client.stats.match_seconds += time.perf_counter() - started
 

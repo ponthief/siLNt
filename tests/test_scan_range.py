@@ -726,6 +726,129 @@ def test_phases_admits_when_the_matcher_is_unknown():
     assert "matcher unknown" in stats.phases()
 
 
+# --- was the matcher computing, or waiting for the GIL? ---------------------
+
+
+def test_phases_calls_a_busy_matcher_compute_bound():
+    stats = scan.OracleStats()
+    stats.wall_seconds = 100.0
+    stats.used_range = True
+    stats.matcher = "reverse"
+    stats.match_thread_wall_seconds = 100.0
+    stats.match_cpu_seconds = 97.0
+
+    line = stats.phases()
+    assert "compute-bound" in line, line
+    assert "STARVED" not in line, line
+
+
+def test_phases_reports_a_starved_matcher_as_starved_with_the_factor():
+    """The case this exists for: the prefetch parsing beside the matcher.
+
+    fetch_seconds reads near zero because the await is satisfied instantly, so
+    without this the matcher takes the blame for CPU the fetch spent.
+    """
+    stats = scan.OracleStats()
+    stats.wall_seconds = 898.0
+    stats.used_range = True
+    stats.used_compute_index = True
+    stats.matcher = "reverse"
+    stats.match_thread_wall_seconds = 886.0
+    stats.match_cpu_seconds = 220.0  # a quarter of its own wall clock
+
+    line = stats.phases()
+    assert "STARVED" in line, line
+    assert "4.0x slower" in line, line
+    assert "25% busy" in line, line
+
+
+def test_phases_omits_the_verdict_when_nothing_was_matched():
+    """No matching means no measurement; do not print 0% busy as a verdict."""
+    stats = scan.OracleStats()
+    stats.wall_seconds = 1.0
+    stats.used_range = True
+    line = stats.phases()
+    assert "busy" not in line, line
+
+
+@pytest.mark.asyncio
+async def test_matcher_cpu_time_is_actually_recorded():
+    """The counters must come from a real run, not stay at their defaults."""
+    tweak_hex, output_hex = payment_to_us(b"\x88" * 32)
+    utxo = {
+        "txid": "ab" * 32, "vout": 0, "amount": 4_200,
+        "pubkey": output_hex, "timestamp": 1_700_000_000,
+    }
+    client = RecordingClient(all_range_routes([100], tweak_hex, utxo))
+    data = await scan.fetch_range_batch([100], client)
+    await scan.match_range_batch(data, client, SCAN_SECRET, SPEND_PUB, [], "signet")
+
+    assert client.stats.match_thread_wall_seconds > 0, "in-thread wall not measured"
+    assert client.stats.match_cpu_seconds > 0, "matcher CPU time not measured"
+    # CPU cannot exceed the wall clock of the same single-threaded calls.
+    assert (
+        client.stats.match_cpu_seconds
+        <= client.stats.match_thread_wall_seconds + 1e-3
+    ), (client.stats.match_cpu_seconds, client.stats.match_thread_wall_seconds)
+
+
+@pytest.mark.asyncio
+async def test_starvation_is_detected_when_another_thread_burns_cpu():
+    """End to end: the instrument must actually see contention, not just
+    have a field for it.
+
+    A thread spinning on pure-Python work holds the GIL in the same way the
+    prefetch's json.loads does, so the matcher's CPU time falls behind its wall
+    time. If this assertion ever fails, the measurement is not measuring
+    anything and the phase line's verdict is decoration.
+    """
+    import threading
+
+    # Deliberately small: the point is whether the ratio MOVES, and a spinning
+    # thread makes the loaded run many times slower than the quiet one, so a
+    # large block here costs seconds of suite time to prove the same thing.
+    tweak_hex, _ = payment_to_us(b"\x88" * 32)
+    utxos = [
+        {"txid": f"{i:064x}", "vout": 0, "amount": 1,
+         "pubkey": PublicKey.from_secret(bytes([1] + [0] * 30 + [i + 1]))
+                   .format(compressed=True)[1:].hex(),
+         "timestamp": 0}
+        for i in range(24)
+    ]
+    index = [{"txid": u["txid"], "tweak": tweak_hex} for u in utxos]
+
+    def measure(with_load: bool):
+        stats = scan.OracleStats()
+        stop = threading.Event()
+        t = None
+        if with_load:
+            def spin():
+                x = 0
+                while not stop.is_set():
+                    x = (x * 31 + 7) % 1_000_003
+            t = threading.Thread(target=spin, daemon=True)
+            t.start()
+        try:
+            scan._timed_match(
+                stats, scan.sync_block_reverse,
+                index, utxos, SCAN_SECRET, SPEND_PUB, [],
+            )
+        finally:
+            stop.set()
+            if t:
+                t.join(timeout=5)
+        return stats.match_cpu_seconds / stats.match_thread_wall_seconds
+
+    quiet = measure(False)
+    loaded = measure(True)
+
+    assert quiet > 0.8, f"idle matcher measured as only {quiet:.0%} busy"
+    assert loaded < quiet, (
+        f"contention invisible: {loaded:.0%} busy under load vs "
+        f"{quiet:.0%} idle — the starvation verdict would never fire"
+    )
+
+
 @pytest.mark.asyncio
 async def test_reverse_path_records_itself_as_the_matcher():
     tweak_hex, output_hex = payment_to_us(b"\x88" * 32)
