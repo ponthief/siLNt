@@ -484,6 +484,15 @@ class OracleStats:
     tweaks: int = 0
     utxos: int = 0
     wall_seconds: float = 0.0
+    # Phases of the batch loop. These are sequential with respect to each other,
+    # so unlike request_seconds they sum to (about) the wall clock — which is
+    # what makes them able to say where the time went rather than only where
+    # some of it went. The first instrumentation covered oracle requests and
+    # matching alone, and on a real signet scan those two accounted for well
+    # under half of it.
+    fetch_seconds: float = 0.0    # gathering scan_block over a batch
+    spent_seconds: float = 0.0    # mark_spent_utxos_batch
+    persist_seconds: float = 0.0  # database writes for what was found
 
     def as_dict(self) -> dict:
         return {
@@ -495,6 +504,14 @@ class OracleStats:
             "tweaks": self.tweaks,
             "utxos": self.utxos,
             "tweaks_per_block": round(self.tweaks / self.blocks, 1) if self.blocks else 0,
+            "fetch_seconds": round(self.fetch_seconds, 2),
+            "spent_seconds": round(self.spent_seconds, 2),
+            "persist_seconds": round(self.persist_seconds, 2),
+            "unaccounted_seconds": round(
+                self.wall_seconds
+                - self.fetch_seconds - self.spent_seconds - self.persist_seconds,
+                2,
+            ),
         }
 
     def summary(self) -> str:
@@ -508,7 +525,12 @@ class OracleStats:
             f"{self.requests} oracle requests ({per_block:.1f}/block), "
             f"{self.request_seconds:.1f}s summed across concurrent requests | "
             f"{self.match_seconds:.1f}s matching | "
-            f"{self.tweaks} tweaks ({tw:.0f}/block), {self.utxos} utxos"
+            f"{self.tweaks} tweaks ({tw:.0f}/block), {self.utxos} utxos\n"
+            f"           phases: fetch {self.fetch_seconds:.1f}s "
+            f"(of which matching {self.match_seconds:.1f}s), "
+            f"spent-check {self.spent_seconds:.1f}s, "
+            f"persist {self.persist_seconds:.1f}s, "
+            f"other {self.wall_seconds - self.fetch_seconds - self.spent_seconds - self.persist_seconds:.1f}s"
         )
 
 
@@ -940,6 +962,7 @@ async def _scan_wallet(
         )
         owned_utxos_lookup = {f"{r['txid']}:{r['vout']}": r for r in owned_rows}
 
+        _t = time.perf_counter()
         batch_results = await asyncio.gather(
             *[
                 scan_block(
@@ -954,9 +977,13 @@ async def _scan_wallet(
             ],
             return_exceptions=True,
         )
+        oracle.stats.fetch_seconds += time.perf_counter() - _t
 
+        _t = time.perf_counter()
         await mark_spent_utxos_batch(batch, oracle, wallet_id, owned_utxos_lookup, wallet.network)
+        oracle.stats.spent_seconds += time.perf_counter() - _t
 
+        _t = time.perf_counter()
         for h, result in zip(batch, batch_results):
             if isinstance(result, Exception):
                 logger.error(f"Block {h} error: {result}")
@@ -1006,6 +1033,7 @@ async def _scan_wallet(
             amount=total_found_amount,
         )
         await set_last_scan_height(wallet_id, last_scanned_height)
+        oracle.stats.persist_seconds += time.perf_counter() - _t
 
         # Yield to the event loop between batches so other requests (wallet
         # loads, navigation) get serviced promptly during a long scan.
