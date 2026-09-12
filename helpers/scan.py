@@ -547,13 +547,27 @@ class OracleStats:
             f"{self.requests} oracle requests ({per_block:.1f}/block), "
             f"{self.request_seconds:.1f}s summed across concurrent requests | "
             f"{self.match_seconds:.1f}s matching | "
-            f"{self.tweaks} tweaks ({tw:.0f}/block), {self.utxos} utxos\n"
-            f"           phases: fetch {self.fetch_seconds:.1f}s "
-            f"(of which matching {self.match_seconds:.1f}s, "
-            f"timestamp lookups {self.ts_seconds:.1f}s over {self.ts_lookups}), "
-            f"spent-check {self.spent_seconds:.1f}s, "
-            f"persist {self.persist_seconds:.1f}s, "
-            f"other {self.wall_seconds - self.fetch_seconds - self.spent_seconds - self.persist_seconds:.1f}s"
+            f"{self.tweaks} tweaks ({tw:.0f}/block), {self.utxos} utxos"
+        )
+
+    def phases(self) -> str:
+        """The breakdown, as its OWN log line.
+
+        This used to be a newline inside summary(), which meant a plain
+        `grep "Scan timing"` returned the totals and silently dropped the part
+        that says where the time went — which is the part worth having.
+        """
+        other = (
+            self.wall_seconds
+            - self.fetch_seconds - self.spent_seconds - self.persist_seconds
+        )
+        return (
+            f"fetch {self.fetch_seconds:.1f}s "
+            f"(matching {self.match_seconds:.1f}s, "
+            f"timestamp lookups {self.ts_seconds:.1f}s over {self.ts_lookups}) | "
+            f"spent-check {self.spent_seconds:.1f}s | "
+            f"persist {self.persist_seconds:.1f}s | "
+            f"other {other:.1f}s"
         )
 
 
@@ -1106,6 +1120,7 @@ async def _scan_wallet(
     # the oracle dominates, faster matching — in any language — changes nothing.
     oracle.stats.wall_seconds = time.perf_counter() - scan_started
     logger.info(f"Scan timing: {oracle.stats.summary()}")
+    logger.info(f"Scan phases: {oracle.stats.phases()}")
     set_scan_progress(
         wallet_id, blocks_scanned, total_blocks, total_found,
         active=False, amount=total_found_amount,
