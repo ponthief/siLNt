@@ -775,6 +775,11 @@ class OracleStats:
     # If both are large, they are running in sequence and something broke the
     # pipeline.
     match_batch_seconds: float = 0.0
+    # Which path actually ran. Without this the phase line is ambiguous in the
+    # one way that matters: a scan silently falling back to per-block looks
+    # like a scan whose matching was free.
+    used_range: bool = False
+    used_compute_index: bool = False
 
     def as_dict(self) -> dict:
         return {
@@ -790,6 +795,8 @@ class OracleStats:
             "timestamp_seconds": round(self.ts_seconds, 2),
             "fetch_seconds": round(self.fetch_seconds, 2),
             "match_batch_seconds": round(self.match_batch_seconds, 2),
+            "used_range": self.used_range,
+            "used_compute_index": self.used_compute_index,
             "spent_seconds": round(self.spent_seconds, 2),
             "persist_seconds": round(self.persist_seconds, 2),
             "unaccounted_seconds": round(
@@ -826,10 +833,34 @@ class OracleStats:
             - self.fetch_seconds - self.match_batch_seconds
             - self.spent_seconds - self.persist_seconds
         )
+
+        if self.used_range:
+            path = "range+compute-index" if self.used_compute_index else "range+tweaks"
+            # On the range path fetch and match are separate phases and each is
+            # measured on its own, so the two numbers mean what they say.
+            work = (
+                f"fetch-wait {self.fetch_seconds:.1f}s | "
+                f"match {self.match_batch_seconds:.1f}s"
+            )
+        else:
+            path = "PER-BLOCK (range endpoints not in use)"
+            # Here fetch_seconds wraps the whole gather, which does the fetching
+            # AND the matching, so splitting them would be a fiction. Say so
+            # rather than printing a match phase of zero and letting it read as
+            # "matching was free".
+            work = f"fetch+match {self.fetch_seconds:.1f}s (not separable on this path)"
+
+        # match_seconds times the await on a single-threaded executor, so with
+        # many blocks in flight it sums queueing as well as work and can exceed
+        # the wall clock several times over. It is a relative signal, not a
+        # duration.
+        ec_note = ""
+        if self.match_seconds > self.wall_seconds and self.wall_seconds:
+            ec_note = f", {self.match_seconds / self.wall_seconds:.0f}x wall — queued"
+
         return (
-            f"fetch-wait {self.fetch_seconds:.1f}s | "
-            f"match {self.match_batch_seconds:.1f}s "
-            f"(EC {self.match_seconds:.1f}s, "
+            f"path {path} | {work} "
+            f"(EC {self.match_seconds:.1f}s summed across waiters{ec_note}; "
             f"timestamp lookups {self.ts_seconds:.1f}s over {self.ts_lookups}) | "
             f"spent-check {self.spent_seconds:.1f}s | "
             f"persist {self.persist_seconds:.1f}s | "
@@ -1252,6 +1283,9 @@ async def match_range_batch(
     # applies. Without it, the forward matcher. Both return the same UTXOs —
     # tests/test_reverse_matching.py holds them to that, and
     # SILNT_SCAN_VERIFY_MATCH checks it against real chain data.
+    client.stats.used_range = True
+    client.stats.used_compute_index = data.compute_index is not None
+
     use_reverse = data.compute_index is not None and not _FORWARD_MATCH_ONLY
     if use_reverse and _VERIFY_MATCH:
         index, matcher = data.compute_index, sync_block_verified

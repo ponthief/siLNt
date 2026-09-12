@@ -597,3 +597,70 @@ async def test_compute_index_probe_happens_once_per_client():
 
     assert first == 1, f"probed {first} times in the first batch"
     assert second == 1, f"probed again on the second batch (total {second})"
+
+
+# --- the phase line has to say which path ran -------------------------------
+
+
+def test_phases_names_the_per_block_path_and_does_not_claim_free_matching():
+    """A scan that fell back must not read as a scan with fast matching.
+
+    The reported symptom that made this necessary: `match 0.0s` on a scan that
+    had silently dropped to the per-block path. The zero was accurate — the
+    counter is only touched on the range path — but read as "matching cost
+    nothing", which is the opposite of the truth.
+    """
+    stats = scan.OracleStats()
+    stats.blocks = 3292
+    stats.wall_seconds = 414.1
+    stats.fetch_seconds = 391.1
+    stats.match_seconds = 3970.8  # summed over a single-threaded executor
+    stats.spent_seconds = 20.6
+    stats.persist_seconds = 1.5
+    stats.used_range = False
+
+    line = stats.phases()
+
+    assert "PER-BLOCK" in line, line
+    assert "not separable" in line, line
+    assert (
+        "match 0.0s" not in line
+    ), f"still claims matching was free on the per-block path: {line}"
+    # The EC figure exceeds the wall clock; it must be labelled, not presented
+    # as a duration.
+    assert "summed across waiters" in line, line
+    assert "queued" in line, line
+
+
+def test_phases_names_the_range_path():
+    stats = scan.OracleStats()
+    stats.blocks = 119
+    stats.wall_seconds = 23.0
+    stats.fetch_seconds = 2.0
+    stats.match_batch_seconds = 19.0
+    stats.match_seconds = 18.5
+    stats.used_range = True
+    stats.used_compute_index = True
+
+    line = stats.phases()
+    assert "range+compute-index" in line, line
+    assert "fetch-wait 2.0s" in line, line
+    assert "match 19.0s" in line, line
+    assert "queued" not in line, line
+
+
+def test_phases_distinguishes_range_with_and_without_compute_index():
+    stats = scan.OracleStats()
+    stats.wall_seconds = 10.0
+    stats.used_range = True
+    stats.used_compute_index = False
+    assert "range+tweaks" in stats.phases()
+
+
+def test_as_dict_reports_the_path():
+    stats = scan.OracleStats()
+    stats.used_range = True
+    stats.used_compute_index = True
+    d = stats.as_dict()
+    assert d["used_range"] is True
+    assert d["used_compute_index"] is True
