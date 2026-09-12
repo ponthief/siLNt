@@ -324,6 +324,115 @@ def sync_block(tweaks, utxos, scan_key, spend_pub_key, labels):
     return owned
 
 
+def _tx_has_candidate(opk: bytes, out_keys: list[bytes], label_x: set) -> bool:
+    """Could any of this transaction's outputs belong to us?
+
+    The reverse of what sync_block does, and the reason this is cheaper.
+
+    sync_block cannot tell which transaction a tweak belongs to — /tweaks
+    returns tweaks and nothing else — so it enumerates forwards: build every
+    output the tweak could produce (the plain one, plus each label added and
+    negated) and look each up among the block's outputs. With four labels that
+    is nine curve operations for every tweak in the block, spent almost
+    entirely on transactions that are nobody's.
+
+    Given the tweak's own transaction, the test inverts: subtract the plain
+    candidate from each of that transaction's outputs and see whether the
+    difference is a label. One curve operation per output, and the label
+    comparison is a set lookup.
+
+    Both sign combinations are required. The scanner only ever sees an output
+    x-only, so it reconstructs P_0 with even parity forced; where the true P_0
+    is odd, b33 is -P_0 and only the other sign yields the label. Testing one
+    sign silently misses about 40% of labeled payments — which is exactly the
+    defect in sync_block_from_compute_index below.
+    """
+    if opk in out_keys:
+        return True
+    if not label_x:
+        return False
+
+    neg_opk33 = negate_public_key(b"\x02" + opk)
+    for out in out_keys:
+        for parity in (b"\x02", b"\x03"):
+            try:
+                diff = add_public_keys(parity + out, neg_opk33)
+            except Exception:
+                continue
+            if diff[1:] in label_x:
+                return True
+    return False
+
+
+def sync_block_reverse(compute_index, utxos, scan_key, spend_pub_key, labels):
+    """Match a block using the tweak-to-txid pairing from the compute index.
+
+    Returns exactly what sync_block returns for the same block. Only the
+    *filter* differs — which transactions are worth looking at closely. Once a
+    transaction is a candidate, extraction runs through the same
+    receiver_scan_transaction_with_shared_secret that sync_block uses, so the
+    part that decides amounts, vouts and key tweaks is not reimplemented here.
+
+    `compute_index` entries are the oracle's compute-index rows: dicts with
+    "txid" and "tweak" hex. Their "outputs" field is ignored — it holds 8-byte
+    prefixes, and point arithmetic needs whole keys, which is why the UTXOs are
+    needed alongside.
+    """
+    if not compute_index or not utxos:
+        return []
+
+    by_txid: dict[str, list[dict]] = {}
+    for u in utxos:
+        by_txid.setdefault(u["txid"], []).append(u)
+
+    label_x = {label.pub_key[1:] for label in labels}
+
+    owned: list[OwnedUTXO] = []
+    for entry in compute_index:
+        txid_hex = entry.get("txid", "")
+        tweak_hex = entry.get("tweak", "")
+        if not txid_hex or not tweak_hex:
+            continue
+        rel_utxos = by_txid.get(txid_hex)
+        if not rel_utxos:
+            continue
+
+        try:
+            tweak = bytes.fromhex(tweak_hex)
+            shared_secret = create_shared_secret(tweak, scan_key)
+            opk, _ = create_output_pub_key_and_tweak(shared_secret, spend_pub_key, 0)
+        except Exception as e:
+            logger.warning(f"compute_index txid={txid_hex}: {e}")
+            continue
+
+        out_keys = [bytes.fromhex(u["pubkey"]) for u in rel_utxos]
+        if not _tx_has_candidate(opk, out_keys, label_x):
+            continue
+
+        # Candidate: hand it to the same extraction sync_block uses. The shared
+        # secret is already computed, so this skips recomputing it.
+        found = receiver_scan_transaction_with_shared_secret(
+            scan_key, spend_pub_key, labels, out_keys, shared_secret,
+        )
+        for fo in found:
+            for u in rel_utxos:
+                if fo.output == bytes.fromhex(u["pubkey"]):
+                    owned.append(
+                        OwnedUTXO(
+                            txid=bytes.fromhex(u["txid"]),
+                            vout=u["vout"],
+                            amount=u["amount"],
+                            priv_key_tweak=fo.sec_key_tweak,
+                            pub_key=fo.output,
+                            utxo_state="unspent",
+                            timestamp=u.get("timestamp", 0),
+                            label=fo.label,
+                        )
+                    )
+                    break
+    return owned
+
+
 def sync_block_from_compute_index(index, scan_key, spend_pub_key, labels):
     owned: list[OwnedUTXO] = []
     for entry in index:
@@ -603,6 +712,8 @@ class BlindBitOracleClient:
         self.base_url = base_url.rstrip("/")
         self.stats = OracleStats()
         self._range_limit: int | None = None
+        # None until the first /range/compute-index attempt says either way.
+        self._supports_compute_index_range: bool | None = None
 
     async def _get(self, path: str) -> httpx.Response:
         started = time.perf_counter()
@@ -665,6 +776,31 @@ class BlindBitOracleClient:
         self, start: int, end: int
     ) -> dict[int, list[str]]:
         return await self._get_range("/range/spent-outputs", start, end)
+
+    async def get_compute_index_range(
+        self, start: int, end: int
+    ) -> dict[int, list[dict]] | None:
+        """Compute-index rows per height, or None if this oracle lacks the route.
+
+        These carry the txid alongside each tweak, which is what the reverse
+        matcher needs. An oracle built before the route existed answers 404, and
+        that is a capability answer rather than a failure: the caller falls back
+        to /range/tweaks and the forward matcher.
+        """
+        r = await self._get(f"/range/compute-index?start={start}&end={end}")
+        if r.status_code == 404:
+            self._supports_compute_index_range = False
+            return None
+        r.raise_for_status()
+        data = r.json()
+        out: dict[int, list[dict]] = {}
+        for block in data.get("blocks") or []:
+            height = (block.get("block_identifier") or {}).get("block_height")
+            if height is None:
+                continue
+            out[int(height)] = block.get("index") or []
+        self._supports_compute_index_range = True
+        return out
 
     async def get_tweaks(self, height: int) -> list[bytes]:
         r = await self._get(f"/tweaks/{height}")
@@ -851,8 +987,12 @@ class RangeBatch:
     """
 
     heights: list[int]
-    tweaks: dict[int, list[bytes]]
+    # Exactly one of these is populated. compute_index carries (txid, tweak)
+    # and drives the reverse matcher; tweaks is the fallback for an oracle
+    # without /range/compute-index and drives the forward one.
+    tweaks: dict[int, list[bytes]] | None
     utxos: dict[int, list[dict]]
+    compute_index: dict[int, list[dict]] | None = None
     # None means the spent-outputs range request failed and the caller should
     # fetch per block instead. An empty dict means it succeeded and there was
     # nothing spent.
@@ -877,18 +1017,47 @@ async def fetch_range_batch(heights, client) -> RangeBatch:
 
     start, end = heights[0], heights[-1]
 
-    tweaks_res, utxos_res, spent_res = await asyncio.gather(
-        client.get_tweaks_range(start, end),
+    # Prefer the compute index: it pairs each tweak with its txid, which lets
+    # the matcher test a tweak against its own transaction's outputs instead of
+    # enumerating every output the tweak could produce. An oracle without the
+    # route answers 404 and we fall back to plain tweaks for the rest of the
+    # scan.
+    want_compute_index = client._supports_compute_index_range is not False
+    index_call = (
+        client.get_compute_index_range(start, end)
+        if want_compute_index
+        else client.get_tweaks_range(start, end)
+    )
+
+    index_res, utxos_res, spent_res = await asyncio.gather(
+        index_call,
         client.get_utxos_range(start, end),
         client.get_spent_outputs_range(start, end),
         return_exceptions=True,
     )
 
-    # Tweaks and UTXOs are both required to detect a payment, so either one
-    # failing fails the batch and drops the scan to the per-block path.
-    for res in (tweaks_res, utxos_res):
+    # An index and the UTXOs are both required to detect a payment, so either
+    # one failing fails the batch and drops the scan to the per-block path.
+    for res in (index_res, utxos_res):
         if isinstance(res, BaseException):
-            return RangeBatch(heights, {}, {}, error=res)
+            return RangeBatch(heights, None, {}, error=res)
+
+    compute_index = None
+    tweaks_res = None
+    if not want_compute_index:
+        tweaks_res = index_res
+    elif index_res is None:
+        # 404: the route is not there. Fetch the tweaks now — one extra round
+        # trip, once per scan, and only against an older oracle.
+        logger.info(
+            "oracle has no /range/compute-index; using tweaks and forward matching"
+        )
+        try:
+            tweaks_res = await client.get_tweaks_range(start, end)
+        except Exception as e:
+            return RangeBatch(heights, None, {}, error=e)
+    else:
+        compute_index = index_res
 
     # The spent-outputs index is secondary — it moves already-detected UTXOs to
     # spent, and reconcile_unconfirmed_spent runs at the end of every scan
@@ -904,12 +1073,18 @@ async def fetch_range_batch(heights, client) -> RangeBatch:
     else:
         spent = {h: set(idx) for h, idx in spent_res.items() if idx}
 
-    for tweaks in tweaks_res.values():
-        client.stats.tweaks += len(tweaks)
+    if compute_index is not None:
+        for entries in compute_index.values():
+            client.stats.tweaks += len(entries)
+    else:
+        for tweaks in tweaks_res.values():
+            client.stats.tweaks += len(tweaks)
     for utxos in utxos_res.values():
         client.stats.utxos += len(utxos)
 
-    return RangeBatch(heights, tweaks_res, utxos_res, spent=spent)
+    return RangeBatch(
+        heights, tweaks_res, utxos_res, compute_index=compute_index, spent=spent
+    )
 
 
 async def match_range_batch(
@@ -927,23 +1102,30 @@ async def match_range_batch(
 
     client.stats.blocks += len(data.heights)
 
+    # The compute index pairs tweaks with txids, so the cheaper reverse matcher
+    # applies. Without it, the forward matcher. Both return the same UTXOs —
+    # tests/test_reverse_matching.py holds them to that.
+    use_reverse = data.compute_index is not None
+    index = data.compute_index if use_reverse else data.tweaks
+    matcher = sync_block_reverse if use_reverse else sync_block
+
     results: list = []
     for height in data.heights:
-        if height not in data.tweaks:
+        if index is None or height not in index:
             # Absent, not empty. See BlockNotIndexedError.
             results.append(BlockNotIndexedError(height))
             continue
 
-        tweaks = data.tweaks[height]
+        entries = index[height]
         utxos = data.utxos.get(height) or []
-        if not tweaks or not utxos:
+        if not entries or not utxos:
             results.append([])
             continue
 
         try:
             owned = await _match_in_thread(
-                client, sync_block,
-                tweaks, utxos, scan_secret_bytes, spend_pub_bytes, labels,
+                client, matcher,
+                entries, utxos, scan_secret_bytes, spend_pub_bytes, labels,
             )
             await _resolve_timestamps(owned, client, network)
             results.append(owned)

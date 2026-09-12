@@ -331,6 +331,46 @@ negation, so the cost is O(tweaks x labels). The scan set is always four labels
 (change m=0, legacy change m=1, and labeled addresses m=2,3), which is why the
 default is 2.7x the no-label cost.
 
+### Reverse matching
+
+That multiplier exists only because `/tweaks` returns tweaks and nothing else.
+Not knowing which transaction a tweak belongs to, the scanner has to enumerate
+**forwards**: build every output the tweak could possibly produce — the plain
+one, plus each label added and negated — and look all nine up among the block's
+outputs. Nine curve operations per tweak, spent almost entirely on transactions
+belonging to other people.
+
+`/range/compute-index` pairs each tweak with its txid. Given the transaction,
+the test inverts: subtract the plain candidate from that transaction's own
+outputs and see whether the difference is a label. One curve operation per
+output, and the label comparison becomes a set lookup.
+
+| matcher | per block (800 tweaks, 4 labels, 2 outputs/tx) |
+|---|---|
+| `sync_block` (forward) | 135.7 ms |
+| `sync_block_reverse` | 94.7 ms |
+| | **1.43x** |
+
+On the reported 119-block scan that is ~23.2s of matching down to ~16.2s. The
+scanner uses it automatically when the oracle serves `/range/compute-index`, and
+falls back to forward matching when it does not — detected once per scan.
+
+**Both sign combinations are required.** The scanner only ever sees an output
+x-only, so it reconstructs P_0 with even parity forced; where the true P_0 is
+odd, the reconstruction is -P_0 and only the other sign yields the label.
+Testing one sign silently misses ~40% of labeled payments — including change,
+which lives at m=0. That is not hypothetical: it is precisely the defect in
+`sync_block_from_compute_index`, the opt-in path behind
+`SILNT_SCAN_COMPUTE_INDEX` that has never run in production.
+
+Because this decides whether money is found, `tests/test_reverse_matching.py`
+holds the two matchers to returning *identical* results — same txids, vouts,
+amounts, key tweaks and labels — across a randomised corpus of plain payments,
+every label, multiple outputs to us in one transaction, mixed labels, and
+decoys. A separate test counts how many transactions reach extraction, because
+a filter that passed everything would still be correct and would silently undo
+the whole saving.
+
 Matching runs on a **single** dedicated worker thread. This is not a limitation
 to be raised: `coincurve` holds the GIL through its calls, so extra matching
 threads contend rather than share. Measured on 4 cores, 8 blocks of 300 tweaks:

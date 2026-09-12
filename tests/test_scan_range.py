@@ -66,8 +66,23 @@ class RecordingClient(scan.BlindBitOracleClient):
 
 
 def all_range_routes(heights, tweak_hex=None, utxo=None):
-    """Routes for every endpoint a batch fetches, so none of them 404s."""
+    """Routes for every endpoint a batch fetches, so none of them 404s.
+
+    A current oracle: it serves /range/compute-index, so the scanner takes the
+    reverse-matching path. The compute-index entry is built from the same tweak
+    and txid as the UTXO, because the reverse matcher joins them on txid.
+    """
+    entry = None
+    if tweak_hex:
+        entry = {
+            "txid": (utxo or {}).get("txid", "00" * 32),
+            "tweak": tweak_hex,
+            "outputs": [(utxo or {}).get("pubkey", "")[:16]] if utxo else [],
+        }
     return {
+        "/range/compute-index": {
+            "blocks": [block_entry(h, [entry] if entry else []) for h in heights]
+        },
         "/range/tweaks": {
             "blocks": [
                 block_entry(h, [tweak_hex] if tweak_hex else []) for h in heights
@@ -78,6 +93,13 @@ def all_range_routes(heights, tweak_hex=None, utxo=None):
         },
         "/range/spent-outputs": {"blocks": [block_entry(h, []) for h in heights]},
     }
+
+
+def legacy_range_routes(heights, tweak_hex=None, utxo=None):
+    """An oracle from before /range/compute-index existed: that route 404s."""
+    routes = all_range_routes(heights, tweak_hex, utxo)
+    routes.pop("/range/compute-index")
+    return routes
 
 
 def block_entry(height: int, index: list) -> dict:
@@ -297,7 +319,11 @@ async def test_block_absent_from_range_is_an_error_not_an_empty_block():
 
 @pytest.mark.asyncio
 async def test_a_hundred_blocks_cost_three_requests():
-    """The reason the endpoints exist: 100 blocks used to be 300 requests."""
+    """The reason the endpoints exist: 100 blocks used to be 300 requests.
+
+    Three, not four: the compute index replaces the tweaks request rather than
+    adding to it.
+    """
     tweak_hex, _ = payment_to_us(b"\x55" * 32)
     heights = list(range(1000, 1100))
     utxo = {
@@ -333,9 +359,9 @@ async def test_batch_requests_are_issued_concurrently():
     elapsed = time.perf_counter() - started
 
     assert len(client.paths) == 3, client.paths
-    assert client.max_in_flight == 3, (
-        f"peak concurrency was {client.max_in_flight}; the requests ran in sequence"
-    )
+    assert (
+        client.max_in_flight == 3
+    ), f"peak concurrency was {client.max_in_flight}; the requests ran in sequence"
     # Sequential would be 3 * delay. Generous bound so a slow machine does not
     # make this flaky, while still failing outright on serialisation.
     assert elapsed < delay * 2, f"{elapsed:.3f}s for three {delay}s requests"
@@ -502,3 +528,72 @@ async def test_owned_utxo_query_runs_once_per_batch_not_once_per_block():
     assert (
         len(utxo_queries) == 1
     ), f"{len(utxo_queries)} identical queries for {len(heights)} blocks"
+
+
+# --- oracle generations -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_current_oracle_uses_compute_index_and_not_tweaks():
+    """With the route available, the scanner takes the reverse-matching path."""
+    tweak_hex, output_hex = payment_to_us(b"\x88" * 32)
+    utxo = {
+        "txid": "ab" * 32,
+        "vout": 0,
+        "amount": 4_200,
+        "pubkey": output_hex,
+        "timestamp": 1_700_000_000,
+    }
+    client = RecordingClient(all_range_routes([100], tweak_hex, utxo))
+
+    data = await scan.fetch_range_batch([100], client)
+
+    assert data.compute_index is not None, "compute index was not used"
+    assert not any(p.startswith("/range/tweaks") for p in client.paths), client.paths
+
+    results = await scan.match_range_batch(
+        data, client, SCAN_SECRET, SPEND_PUB, [], "signet"
+    )
+    assert len(results[0]) == 1, "the payment was not detected on the reverse path"
+    assert results[0][0].amount == 4_200
+
+
+@pytest.mark.asyncio
+async def test_oracle_without_compute_index_falls_back_to_tweaks():
+    """An older oracle 404s the route; the scan continues on forward matching."""
+    tweak_hex, output_hex = payment_to_us(b"\x99" * 32)
+    utxo = {
+        "txid": "cd" * 32,
+        "vout": 1,
+        "amount": 777,
+        "pubkey": output_hex,
+        "timestamp": 1_700_000_000,
+    }
+    client = RecordingClient(legacy_range_routes([100], tweak_hex, utxo))
+
+    data = await scan.fetch_range_batch([100], client)
+
+    assert data.error is None, data.error
+    assert data.compute_index is None
+    assert data.tweaks is not None, "no tweaks fetched after the 404"
+    assert any(p.startswith("/range/tweaks") for p in client.paths), client.paths
+
+    results = await scan.match_range_batch(
+        data, client, SCAN_SECRET, SPEND_PUB, [], "signet"
+    )
+    assert len(results[0]) == 1, "the payment was not detected on the fallback path"
+    assert results[0][0].amount == 777
+
+
+@pytest.mark.asyncio
+async def test_compute_index_probe_happens_once_per_client():
+    """After a 404 the scanner stops asking, rather than paying for it per batch."""
+    client = RecordingClient(legacy_range_routes(list(range(100, 120))))
+
+    await scan.fetch_range_batch(list(range(100, 110)), client)
+    first = sum(1 for p in client.paths if p.startswith("/range/compute-index"))
+    await scan.fetch_range_batch(list(range(110, 120)), client)
+    second = sum(1 for p in client.paths if p.startswith("/range/compute-index"))
+
+    assert first == 1, f"probed {first} times in the first batch"
+    assert second == 1, f"probed again on the second batch (total {second})"
