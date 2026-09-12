@@ -306,3 +306,45 @@ def test_reverse_is_not_accidentally_matching_everything():
     tweaks, ci, utxos = build_block(rng, [([], 6) for _ in range(10)])
     reverse = scan.sync_block_reverse(ci, utxos, SCAN_SECRET, SPEND_PUB, LABELS)
     assert reverse == []
+
+
+def test_both_parities_of_p0_are_exercised_and_found():
+    """The sign-swap reasoning, pinned directly.
+
+    The filter now derives both sign tries from one parse of the output, and
+    the argument that this is safe rests on the pair {O-E, O+E} being reached
+    either way — starting from the true P_0 rather than the even-parity point
+    merely swaps which addition yields which member.
+
+    That argument is only load-bearing when P_0 is odd. The randomised sweep
+    hits both parities, but nothing asserts it does, so a change in the corpus
+    could quietly stop covering the case the reasoning is about.
+    """
+    even_found = odd_found = 0
+
+    for seed in range(60):
+        rng = random.Random(90_000 + seed)
+        # A labeled payment, so the filter's label branch is what decides.
+        tweaks, ci, utxos = build_block(rng, [([2], 2)])
+
+        # Recover the parity of P_0 the way the sender computed it.
+        tweak = tweaks[0]
+        shared = scan.create_shared_secret(tweak, SCAN_SECRET)
+        _opk, t_k = scan.create_output_pub_key_and_tweak(shared, SPEND_PUB, 0)
+        p0 = (
+            PublicKey(SPEND_PUB)
+            .combine([PublicKey.from_secret(t_k)])
+            .format(compressed=True)
+        )
+
+        found = assert_identical(tweaks, ci, utxos, note=f"parity seed={seed}")
+        assert len(found) == 1, f"labeled payment not found (seed {seed})"
+
+        if p0[0] == 0x02:
+            even_found += 1
+        else:
+            odd_found += 1
+
+    assert even_found > 5, f"only {even_found} even-parity P_0 cases"
+    assert odd_found > 5, f"only {odd_found} odd-parity P_0 cases; the case the "
+    "sign-swap argument exists for is not covered"

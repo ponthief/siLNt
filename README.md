@@ -347,13 +347,46 @@ output, and the label comparison becomes a set lookup.
 
 | matcher | per block (800 tweaks, 4 labels, 2 outputs/tx) |
 |---|---|
-| `sync_block` (forward) | 135.7 ms |
-| `sync_block_reverse` | 94.7 ms |
-| | **1.43x** |
+| `sync_block` (forward) | ~140 ms |
+| `sync_block_reverse` | **~70 ms** |
+| | **~2.0x** |
 
-On the reported 119-block scan that is ~23.2s of matching down to ~16.2s. The
+On the reported 119-block scan that is ~23.2s of matching down to ~11.5s. The
 scanner uses it automatically when the oracle serves `/range/compute-index`, and
 falls back to forward matching when it does not — detected once per scan.
+
+### Why it is not a language problem
+
+Half of that 2x came from the algorithm above; the other half came from not
+serialising. `coincurve` is libsecp256k1 behind cffi, so the curve arithmetic is
+already native — a rewrite in Rust or C would call the same library. Measuring
+where a tweak's time actually goes:
+
+| | us/tweak | share |
+|---|---|---|
+| curve arithmetic | 58.9 | 49.9% |
+| serialise/parse round-trips | 46.2 | 39.2% |
+| Python interpreter | 12.9 | 10.9% |
+
+The interpreter is not the problem. The round-trips were: the helpers take and
+return compressed bytes, so every intermediate point was serialised and
+immediately re-parsed, and **parsing a compressed point costs a modular square
+root — 5.2 us, against 2.8 us for the addition it feeds.** Ten parses per tweak.
+
+So `sync_block_reverse` keeps points parsed. The spend key is decoded once per
+block rather than once per transaction, and both sign tries come from one parse
+of each output: writing E for the even-parity point at the candidate's
+x-coordinate and O for the output's, the two tests are x(O - E) and
+x((-O) - E) = x(O + E), so the pair {O - E, O + E} is reached with one parse and
+two additions instead of two parses. That the caller may pass the true P_0
+rather than E only swaps which addition yields which member, and both are
+tested — `test_both_parities_of_p0_are_exercised_and_found` pins exactly that,
+and fails if either sign is dropped.
+
+A native rewrite's remaining headroom is the ~50% that is genuine curve
+arithmetic, so roughly 11.5s to 8s. Its real advantage would be releasing the
+GIL for multi-core matching — which processes can also provide, without a second
+implementation of money-detection logic to keep in sync.
 
 **Both sign combinations are required.** The scanner only ever sees an output
 x-only, so it reconstructs P_0 with even parity forced; where the true P_0 is
