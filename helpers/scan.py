@@ -462,11 +462,29 @@ def get_http_client() -> httpx.AsyncClient:
     return _http
 
 
+_mempool_http: Optional[httpx.AsyncClient] = None
+
+
+def get_mempool_client() -> httpx.AsyncClient:
+    """Pooled client for the mempool explorer. Verifies TLS, unlike the oracle's."""
+    global _mempool_http
+    if _mempool_http is None or _mempool_http.is_closed:
+        _mempool_http = httpx.AsyncClient(
+            timeout=10.0,
+            limits=httpx.Limits(max_connections=32, max_keepalive_connections=16,
+                                keepalive_expiry=60.0),
+        )
+    return _mempool_http
+
+
 async def aclose_http() -> None:
-    global _http
+    global _http, _mempool_http
     if _http is not None and not _http.is_closed:
         await _http.aclose()
     _http = None
+    if _mempool_http is not None and not _mempool_http.is_closed:
+        await _mempool_http.aclose()
+    _mempool_http = None
 
 
 @dataclass
@@ -484,6 +502,17 @@ class OracleStats:
     tweaks: int = 0
     utxos: int = 0
     wall_seconds: float = 0.0
+    # Phases of the batch loop. These are sequential with respect to each other,
+    # so unlike request_seconds they sum to (about) the wall clock — which is
+    # what makes them able to say where the time went rather than only where
+    # some of it went. The first instrumentation covered oracle requests and
+    # matching alone, and on a real signet scan those two accounted for well
+    # under half of it.
+    ts_lookups: int = 0           # per-found-output timestamp lookups
+    ts_seconds: float = 0.0
+    fetch_seconds: float = 0.0    # gathering scan_block over a batch
+    spent_seconds: float = 0.0    # mark_spent_utxos_batch
+    persist_seconds: float = 0.0  # database writes for what was found
 
     def as_dict(self) -> dict:
         return {
@@ -495,6 +524,16 @@ class OracleStats:
             "tweaks": self.tweaks,
             "utxos": self.utxos,
             "tweaks_per_block": round(self.tweaks / self.blocks, 1) if self.blocks else 0,
+            "timestamp_lookups": self.ts_lookups,
+            "timestamp_seconds": round(self.ts_seconds, 2),
+            "fetch_seconds": round(self.fetch_seconds, 2),
+            "spent_seconds": round(self.spent_seconds, 2),
+            "persist_seconds": round(self.persist_seconds, 2),
+            "unaccounted_seconds": round(
+                self.wall_seconds
+                - self.fetch_seconds - self.spent_seconds - self.persist_seconds,
+                2,
+            ),
         }
 
     def summary(self) -> str:
@@ -508,7 +547,13 @@ class OracleStats:
             f"{self.requests} oracle requests ({per_block:.1f}/block), "
             f"{self.request_seconds:.1f}s summed across concurrent requests | "
             f"{self.match_seconds:.1f}s matching | "
-            f"{self.tweaks} tweaks ({tw:.0f}/block), {self.utxos} utxos"
+            f"{self.tweaks} tweaks ({tw:.0f}/block), {self.utxos} utxos\n"
+            f"           phases: fetch {self.fetch_seconds:.1f}s "
+            f"(of which matching {self.match_seconds:.1f}s, "
+            f"timestamp lookups {self.ts_seconds:.1f}s over {self.ts_lookups}), "
+            f"spent-check {self.spent_seconds:.1f}s, "
+            f"persist {self.persist_seconds:.1f}s, "
+            f"other {self.wall_seconds - self.fetch_seconds - self.spent_seconds - self.persist_seconds:.1f}s"
         )
 
 
@@ -663,7 +708,15 @@ async def scan_block(
         )
         for o in owned:
             if not o.timestamp:
+                # One mempool round trip per detected output whose timestamp the
+                # oracle did not supply. Counted separately because it is inside
+                # the fetch phase but has nothing to do with the oracle, and on a
+                # rescan of a range full of your own payments there can be a lot
+                # of them.
+                _t = time.perf_counter()
                 o.timestamp = await get_block_ts(o.txid.hex(), network)
+                client.stats.ts_lookups += 1
+                client.stats.ts_seconds += time.perf_counter() - _t
         return owned
 
     # labels is empty. create_labels() makes that impossible today, so this is
@@ -940,6 +993,7 @@ async def _scan_wallet(
         )
         owned_utxos_lookup = {f"{r['txid']}:{r['vout']}": r for r in owned_rows}
 
+        _t = time.perf_counter()
         batch_results = await asyncio.gather(
             *[
                 scan_block(
@@ -954,9 +1008,13 @@ async def _scan_wallet(
             ],
             return_exceptions=True,
         )
+        oracle.stats.fetch_seconds += time.perf_counter() - _t
 
+        _t = time.perf_counter()
         await mark_spent_utxos_batch(batch, oracle, wallet_id, owned_utxos_lookup, wallet.network)
+        oracle.stats.spent_seconds += time.perf_counter() - _t
 
+        _t = time.perf_counter()
         for h, result in zip(batch, batch_results):
             if isinstance(result, Exception):
                 logger.error(f"Block {h} error: {result}")
@@ -1006,6 +1064,7 @@ async def _scan_wallet(
             amount=total_found_amount,
         )
         await set_last_scan_height(wallet_id, last_scanned_height)
+        oracle.stats.persist_seconds += time.perf_counter() - _t
 
         # Yield to the event loop between batches so other requests (wallet
         # loads, navigation) get serviced promptly during a long scan.
@@ -1079,10 +1138,16 @@ async def get_block_ts(txid: str, network: str = DEFAULT_CONFIG_NETWORK) -> int:
     backend = await get_backend_config(network)
     base = (backend.mempool_url or "https://mempool.space").rstrip("/")
     try:
-        async with httpx.AsyncClient(timeout=10.0) as c:
-            r = await c.get(f"{base}/api/tx/{txid}")
-            if r.status_code == 200:
-                return int(r.json().get("status", {}).get("block_time") or 0)
+        # Shared, pooled, keep-alive — the same fix the oracle client got, for
+        # the same reason: this used to build a client and open a connection per
+        # call, and it is called once per detected output.
+        #
+        # A SEPARATE client from the oracle's on purpose: this one verifies TLS
+        # certificates and the oracle's, by long-standing default, does not.
+        # Routing it through the shared oracle client would quietly downgrade it.
+        r = await get_mempool_client().get(f"{base}/api/tx/{txid}")
+        if r.status_code == 200:
+            return int(r.json().get("status", {}).get("block_time") or 0)
     except Exception:
         pass
     return 0
