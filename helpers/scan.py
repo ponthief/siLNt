@@ -1208,10 +1208,52 @@ _MATCHER_NAMES = {
 # holds locks in other threads is a real hazard even though the children here
 # only call pure functions; it also multiplies the memory a scan needs. Someone
 # turning this on should be choosing to, and should leave a core for LNbits
-# itself. SILNT_SCAN_MATCH_PROCESSES=3 on a 4-core box is the shape to want.
-_MATCH_PROCESSES = _env_int("SILNT_SCAN_MATCH_PROCESSES", 1, 1, 32)
+# itself. On a 16-core box SILNT_SCAN_MATCH_PROCESSES=12 is the shape to want.
+#
+# Read per scan rather than once at import. An import-time read is only correct
+# if the variable was already in the environment of the process that imported
+# this module, which is exactly the assumption that fails when LNbits is started
+# by systemd or docker and the variable was exported in somebody's shell. That
+# failure is then invisible, because the default is also the old behaviour.
+# Reading it here costs nothing and makes the switch take effect whenever the
+# process environment actually carries it.
 _match_pool = None
+_match_pool_workers = 0
 _match_pool_lock = threading.Lock()
+
+
+def _match_process_count() -> int:
+    return _env_int("SILNT_SCAN_MATCH_PROCESSES", 1, 1, 32)
+
+
+def report_match_parallelism() -> int:
+    """Say what the switch resolved to, at the start of every scan.
+
+    Announced whether or not it is on. Three times now a switch on this path
+    has been read, silently found to be at its default, and left a scan looking
+    mysteriously slow -- the oracle's range support, the forward matcher, and
+    then this. The rule that came out of those: anything that changes what a
+    scan costs says what it read, in the log, every time.
+    """
+    workers = _match_process_count()
+    cores = os.cpu_count() or 1
+    if workers > 1:
+        logger.info(
+            f"matching across {workers} processes "
+            f"(SILNT_SCAN_MATCH_PROCESSES={workers}, {cores} cores)"
+        )
+    else:
+        raw = os.getenv("SILNT_SCAN_MATCH_PROCESSES")
+        how = "unset" if raw is None else f"set to {raw!r}"
+        suggest = max(1, min(32, cores - 4 if cores > 8 else cores - 1))
+        logger.info(
+            f"matching on a single worker (SILNT_SCAN_MATCH_PROCESSES is {how}; "
+            f"this box has {cores} cores). Matching is the whole cost of a scan "
+            f"and one worker uses one core; SILNT_SCAN_MATCH_PROCESSES={suggest} "
+            "would use more. It must be set in the environment of the process "
+            "running LNbits, not just in a shell."
+        )
+    return workers
 
 
 def _get_match_pool():
@@ -1222,20 +1264,24 @@ def _get_match_pool():
     scan.py -- which cannot be imported outside LNbits at all, since it does
     `from ..crud import db` at module scope. spawn and forkserver would both
     re-import it and fail.
+
+    Rebuilt if the worker count changed since it was made, so the switch does
+    not need a restart to take effect once the environment carries it.
     """
-    global _match_pool
-    if _MATCH_PROCESSES <= 1:
+    global _match_pool, _match_pool_workers
+    workers = _match_process_count()
+    if workers <= 1:
         return None
     with _match_pool_lock:
+        if _match_pool is not None and _match_pool_workers != workers:
+            _match_pool.shutdown(wait=False)
+            _match_pool = None
         if _match_pool is None:
-            logger.info(
-                f"matching across {_MATCH_PROCESSES} processes "
-                "(SILNT_SCAN_MATCH_PROCESSES)"
-            )
             _match_pool = concurrent.futures.ProcessPoolExecutor(
-                max_workers=_MATCH_PROCESSES,
+                max_workers=workers,
                 mp_context=multiprocessing.get_context("fork"),
             )
+            _match_pool_workers = workers
     return _match_pool
 
 
@@ -1280,8 +1326,8 @@ async def _match_in_thread(client, fn, *args):
     decides whether anything is worth optimising here at all.
     """
     client.stats.matcher = _MATCHER_NAMES.get(fn.__name__, fn.__name__)
-    client.stats.match_workers = _MATCH_PROCESSES
     executor = _get_match_pool() or _matcher
+    client.stats.match_workers = _match_pool_workers if executor is not _matcher else 1
     loop = asyncio.get_event_loop()
     started = time.perf_counter()
     try:
@@ -1871,6 +1917,7 @@ async def _scan_wallet(
     # forward matcher's cost is linear in that count — so it belongs in the
     # timing line, not just in the matcher's own head.
     oracle.stats.labels = len(labels)
+    report_match_parallelism()
     addr_label_map: dict[int, str] = {
         a.label_index: a.label
         for a in saved_addresses

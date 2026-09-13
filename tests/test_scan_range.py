@@ -849,13 +849,58 @@ async def test_starvation_is_detected_when_another_thread_burns_cpu():
 
 
 @pytest.mark.asyncio
-async def test_single_worker_is_the_default():
+async def test_single_worker_is_the_default(monkeypatch):
     """Matching across processes forks a live LNbits. It must be opt-in."""
-    assert scan._MATCH_PROCESSES == 1, (
+    monkeypatch.delenv("SILNT_SCAN_MATCH_PROCESSES", raising=False)
+    assert scan._match_process_count() == 1, (
         "process matching defaulted on; it forks the server and multiplies the "
         "memory a scan needs, so it has to be a choice"
     )
     assert scan._get_match_pool() is None
+
+
+def test_worker_count_is_read_per_scan_not_at_import(monkeypatch):
+    """The bug this exists for: the variable read once, at import.
+
+    That is only correct if it was already in the environment of the process
+    that imported this module — which is exactly what fails when LNbits is
+    started by systemd or docker and the variable was exported in a shell. The
+    default is also the old behaviour, so the failure is invisible.
+    """
+    monkeypatch.delenv("SILNT_SCAN_MATCH_PROCESSES", raising=False)
+    assert scan._match_process_count() == 1
+
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "6")
+    assert scan._match_process_count() == 6, (
+        "setting the variable after import had no effect, which is how a scan "
+        "keeps running on one core with nothing in the log to say why"
+    )
+
+
+def test_single_worker_is_announced_with_the_reason(monkeypatch, caplog):
+    """Silence is what cost three debugging rounds. It has to say what it read."""
+    said: list[str] = []
+    monkeypatch.setattr(scan.logger, "info", lambda m, *a, **k: said.append(str(m)))
+
+    monkeypatch.delenv("SILNT_SCAN_MATCH_PROCESSES", raising=False)
+    assert scan.report_match_parallelism() == 1
+    assert said and "unset" in said[0], said
+    assert "SILNT_SCAN_MATCH_PROCESSES" in said[0], said
+
+    said.clear()
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "4")
+    assert scan.report_match_parallelism() == 4
+    assert said and "4 processes" in said[0], said
+
+
+def test_a_bad_value_is_reported_as_set_not_as_unset(monkeypatch):
+    """'set to garbage' and 'never set' are different problems."""
+    said: list[str] = []
+    monkeypatch.setattr(scan.logger, "info", lambda m, *a, **k: said.append(str(m)))
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "three")
+
+    assert scan.report_match_parallelism() == 1
+    assert "set to 'three'" in said[0], said
 
 
 def test_phases_points_at_the_idle_cores_when_matching_is_compute_bound():
@@ -902,28 +947,37 @@ async def test_matching_across_processes_finds_the_same_payment(monkeypatch):
 
     serial = await _match_once(tweak_hex, utxo)
 
-    monkeypatch.setattr(scan, "_MATCH_PROCESSES", 2)
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "2")
     monkeypatch.setattr(scan, "_match_pool", None)
+    workers_seen: list[int] = []
     try:
-        parallel = await _match_once(tweak_hex, utxo)
+        parallel, workers = await _match_once(tweak_hex, utxo, want_workers=True)
+        workers_seen.append(workers)
     finally:
         pool = scan._match_pool
         if pool is not None:
             pool.shutdown(wait=True)
         monkeypatch.setattr(scan, "_match_pool", None)
+        monkeypatch.setattr(scan, "_match_pool_workers", 0)
 
     assert scan._owned_fingerprint(parallel) == scan._owned_fingerprint(serial), (
         "matching across processes did not find what the single worker found"
     )
     assert len(parallel) == 1 and parallel[0].amount == 4_200
+    assert workers_seen == [2], (
+        f"the pool ran but the stats reported {workers_seen} workers, so the "
+        "phase line would still advise turning on what is already on"
+    )
 
 
-async def _match_once(tweak_hex, utxo):
+async def _match_once(tweak_hex, utxo, want_workers=False):
     client = RecordingClient(all_range_routes([100], tweak_hex, utxo))
     data = await scan.fetch_range_batch([100], client)
     results = await scan.match_range_batch(
         data, client, SCAN_SECRET, SPEND_PUB, [], "signet"
     )
+    if want_workers:
+        return results[0], client.stats.match_workers
     return results[0]
 
 
