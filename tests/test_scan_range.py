@@ -10,6 +10,7 @@ to everything downstream, and the difference is somebody's money.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 
 import httpx
@@ -597,3 +598,1081 @@ async def test_compute_index_probe_happens_once_per_client():
 
     assert first == 1, f"probed {first} times in the first batch"
     assert second == 1, f"probed again on the second batch (total {second})"
+
+
+# --- the phase line has to say which path ran -------------------------------
+
+
+def test_phases_names_the_per_block_path_and_does_not_claim_free_matching():
+    """A scan that fell back must not read as a scan with fast matching.
+
+    The reported symptom that made this necessary: `match 0.0s` on a scan that
+    had silently dropped to the per-block path. The zero was accurate — the
+    counter is only touched on the range path — but read as "matching cost
+    nothing", which is the opposite of the truth.
+    """
+    stats = scan.OracleStats()
+    stats.blocks = 3292
+    stats.wall_seconds = 414.1
+    stats.fetch_seconds = 391.1
+    stats.match_seconds = 3970.8  # summed over a single-threaded executor
+    stats.spent_seconds = 20.6
+    stats.persist_seconds = 1.5
+    stats.used_range = False
+
+    line = stats.phases()
+
+    assert "PER-BLOCK" in line, line
+    assert "not separable" in line, line
+    assert (
+        "match 0.0s" not in line
+    ), f"still claims matching was free on the per-block path: {line}"
+    # The EC figure exceeds the wall clock; it must be labelled, not presented
+    # as a duration.
+    assert "summed across waiters" in line, line
+    assert "queued" in line, line
+
+
+def test_phases_names_the_range_path():
+    stats = scan.OracleStats()
+    stats.blocks = 119
+    stats.wall_seconds = 23.0
+    stats.fetch_seconds = 2.0
+    stats.match_batch_seconds = 19.0
+    stats.match_seconds = 18.5
+    stats.used_range = True
+    stats.used_compute_index = True
+
+    line = stats.phases()
+    assert "range+compute-index" in line, line
+    assert "fetch-wait 2.0s" in line, line
+    assert "match 19.0s" in line, line
+    assert "queued" not in line, line
+
+
+def test_phases_distinguishes_range_with_and_without_compute_index():
+    stats = scan.OracleStats()
+    stats.wall_seconds = 10.0
+    stats.used_range = True
+    stats.used_compute_index = False
+    assert "range+tweaks" in stats.phases()
+
+
+def test_as_dict_reports_the_path():
+    stats = scan.OracleStats()
+    stats.used_range = True
+    stats.used_compute_index = True
+    d = stats.as_dict()
+    assert d["used_range"] is True
+    assert d["used_compute_index"] is True
+
+
+# --- the phase line has to say which MATCHER ran ----------------------------
+#
+# used_compute_index says the index was FETCHED. SILNT_SCAN_FORWARD_MATCH
+# changes the matcher without changing a single request, so a scan with the
+# switch left on printed a phase line identical to one without it while costing
+# several times as much. The matcher is the expensive choice; it has to be in
+# the line.
+
+
+def test_phases_names_the_matcher_and_the_label_count():
+    stats = scan.OracleStats()
+    stats.blocks = 7362
+    stats.wall_seconds = 898.0
+    stats.fetch_seconds = 2.9
+    stats.match_batch_seconds = 886.4
+    stats.match_seconds = 884.4
+    stats.tweaks = 1_494_809
+    stats.used_range = True
+    stats.used_compute_index = True
+    stats.matcher = "reverse"
+    stats.labels = 4
+
+    line = stats.phases()
+    assert "matcher reverse" in line, line
+    assert "4 labels" in line, line
+    # 886.4s over 1,494,809 tweaks is 593us each — the number that says whether
+    # the matching is behaving, and it should not have to be divided by hand.
+    assert "593us/tweak" in line, line
+
+
+def test_phases_distinguishes_the_two_matchers_on_the_same_path():
+    """The bug this exists for: identical fetch path, different matcher."""
+    def line_for(matcher):
+        stats = scan.OracleStats()
+        stats.wall_seconds = 100.0
+        stats.used_range = True
+        stats.used_compute_index = True
+        stats.matcher = matcher
+        stats.labels = 8
+        return stats.phases()
+
+    forward = line_for("forward (forced by SILNT_SCAN_FORWARD_MATCH)")
+    reverse = line_for("reverse")
+
+    assert "range+compute-index" in forward and "range+compute-index" in reverse
+    assert forward != reverse, (
+        "the two matchers print the same phase line, which is exactly the "
+        "ambiguity this is meant to remove"
+    )
+    assert "SILNT_SCAN_FORWARD_MATCH" in forward, forward
+
+
+def test_phases_admits_when_the_matcher_is_unknown():
+    """A scan that matched nothing should not name a matcher it never ran."""
+    stats = scan.OracleStats()
+    stats.wall_seconds = 1.0
+    stats.used_range = True
+    assert "matcher unknown" in stats.phases()
+
+
+# --- was the matcher computing, or waiting for the GIL? ---------------------
+
+
+def test_phases_calls_a_busy_matcher_compute_bound():
+    stats = scan.OracleStats()
+    stats.wall_seconds = 100.0
+    stats.used_range = True
+    stats.matcher = "reverse"
+    stats.match_thread_wall_seconds = 100.0
+    stats.match_cpu_seconds = 97.0
+
+    line = stats.phases()
+    assert "compute-bound" in line, line
+    assert "STARVED" not in line, line
+
+
+def test_phases_reports_a_starved_matcher_as_starved_with_the_factor():
+    """The case this exists for: the prefetch parsing beside the matcher.
+
+    fetch_seconds reads near zero because the await is satisfied instantly, so
+    without this the matcher takes the blame for CPU the fetch spent.
+    """
+    stats = scan.OracleStats()
+    stats.wall_seconds = 898.0
+    stats.used_range = True
+    stats.used_compute_index = True
+    stats.matcher = "reverse"
+    stats.match_thread_wall_seconds = 886.0
+    stats.match_cpu_seconds = 220.0  # a quarter of its own wall clock
+
+    line = stats.phases()
+    assert "STARVED" in line, line
+    assert "4.0x slower" in line, line
+    assert "25% busy" in line, line
+
+
+def test_phases_omits_the_verdict_when_nothing_was_matched():
+    """No matching means no measurement; do not print 0% busy as a verdict."""
+    stats = scan.OracleStats()
+    stats.wall_seconds = 1.0
+    stats.used_range = True
+    line = stats.phases()
+    assert "busy" not in line, line
+
+
+@pytest.mark.asyncio
+async def test_matcher_cpu_time_is_actually_recorded():
+    """The counters must come from a real run, not stay at their defaults."""
+    tweak_hex, output_hex = payment_to_us(b"\x88" * 32)
+    utxo = {
+        "txid": "ab" * 32, "vout": 0, "amount": 4_200,
+        "pubkey": output_hex, "timestamp": 1_700_000_000,
+    }
+    client = RecordingClient(all_range_routes([100], tweak_hex, utxo))
+    data = await scan.fetch_range_batch([100], client)
+    await scan.match_range_batch(data, client, SCAN_SECRET, SPEND_PUB, [], "signet")
+
+    assert client.stats.match_thread_wall_seconds > 0, "in-thread wall not measured"
+    assert client.stats.match_cpu_seconds > 0, "matcher CPU time not measured"
+    # CPU cannot exceed the wall clock of the same single-threaded calls.
+    assert (
+        client.stats.match_cpu_seconds
+        <= client.stats.match_thread_wall_seconds + 1e-3
+    ), (client.stats.match_cpu_seconds, client.stats.match_thread_wall_seconds)
+
+
+@pytest.mark.asyncio
+async def test_starvation_is_detected_when_another_thread_burns_cpu():
+    """End to end: the instrument must actually see contention, not just
+    have a field for it.
+
+    A thread spinning on pure-Python work holds the GIL in the same way the
+    prefetch's json.loads does, so the matcher's CPU time falls behind its wall
+    time. If this assertion ever fails, the measurement is not measuring
+    anything and the phase line's verdict is decoration.
+    """
+    import threading
+
+    # Deliberately small: the point is whether the ratio MOVES, and a spinning
+    # thread makes the loaded run many times slower than the quiet one, so a
+    # large block here costs seconds of suite time to prove the same thing.
+    tweak_hex, _ = payment_to_us(b"\x88" * 32)
+    utxos = [
+        {"txid": f"{i:064x}", "vout": 0, "amount": 1,
+         "pubkey": PublicKey.from_secret(bytes([1] + [0] * 30 + [i + 1]))
+                   .format(compressed=True)[1:].hex(),
+         "timestamp": 0}
+        for i in range(24)
+    ]
+    index = [{"txid": u["txid"], "tweak": tweak_hex} for u in utxos]
+
+    def measure(with_load: bool):
+        stop = threading.Event()
+        t = None
+        if with_load:
+            def spin():
+                x = 0
+                while not stop.is_set():
+                    x = (x * 31 + 7) % 1_000_003
+            t = threading.Thread(target=spin, daemon=True)
+            t.start()
+        try:
+            _, cpu, wall = scan._timed_match(
+                scan.sync_block_reverse,
+                index, utxos, SCAN_SECRET, SPEND_PUB, [],
+            )
+        finally:
+            stop.set()
+            if t:
+                t.join(timeout=5)
+        return cpu / wall
+
+    quiet = measure(False)
+    loaded = measure(True)
+
+    assert quiet > 0.8, f"idle matcher measured as only {quiet:.0%} busy"
+    assert loaded < quiet, (
+        f"contention invisible: {loaded:.0%} busy under load vs "
+        f"{quiet:.0%} idle — the starvation verdict would never fire"
+    )
+
+
+@pytest.mark.asyncio
+async def test_blocks_in_a_batch_are_dispatched_concurrently(monkeypatch):
+    """The bug this exists for: 12 workers, one task at a time.
+
+    match_range_batch used to await each block before starting the next. That
+    is correct, and against the single matcher thread it costs nothing, because
+    there is one worker either way. With a pool it means eleven of twelve
+    workers sit idle and a 12-process scan takes exactly as long as a
+    1-process one — which is what happened, with no error and no warning.
+
+    Asserted on dispatch rather than on wall-clock speedup, so it holds for any
+    executor and does not turn into a timing-flaky test.
+    """
+    import concurrent.futures as cf
+    import threading
+
+    live = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def slow_matcher(entries, utxos, scan_key, spend_pub, labels):
+        nonlocal live, peak
+        with lock:
+            live += 1
+            peak = max(peak, live)
+        time.sleep(0.02)
+        with lock:
+            live -= 1
+        return []
+
+    pool = cf.ThreadPoolExecutor(max_workers=4)
+    monkeypatch.setattr(scan, "_matcher", pool)
+    monkeypatch.setattr(scan, "sync_block_reverse", slow_matcher)
+
+    heights = list(range(100, 112))
+    tweak_hex, output_hex = payment_to_us(b"\x88" * 32)
+    utxo = {
+        "txid": "ab" * 32, "vout": 0, "amount": 1,
+        "pubkey": output_hex, "timestamp": 1,
+    }
+    client = RecordingClient(all_range_routes(heights, tweak_hex, utxo))
+    try:
+        data = await scan.fetch_range_batch(heights, client)
+        results = await scan.match_range_batch(
+            data, client, SCAN_SECRET, SPEND_PUB, [], "signet"
+        )
+    finally:
+        pool.shutdown(wait=True)
+
+    assert len(results) == len(heights)
+    assert peak > 1, (
+        "blocks were matched one at a time; every worker beyond the first is "
+        "idle and adding workers cannot make a scan faster"
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_results_stay_aligned_with_their_heights(monkeypatch):
+    """Dispatching concurrently must not reorder or drop anything.
+
+    The caller pairs results with heights positionally, so a reordering here
+    would credit one block's payments to another — silently.
+    """
+    heights = list(range(200, 210))
+    tweak_hex, output_hex = payment_to_us(b"\x77" * 32)
+    utxo = {
+        "txid": "cd" * 32, "vout": 0, "amount": 9,
+        "pubkey": output_hex, "timestamp": 1,
+    }
+    routes = all_range_routes(heights, tweak_hex, utxo)
+    client = RecordingClient(routes)
+
+    data = await scan.fetch_range_batch(heights, client)
+    # Drop a height from the index so one result must be BlockNotIndexedError,
+    # in its own position and nobody else's.
+    missing = heights[4]
+    data.compute_index.pop(missing, None)
+
+    results = await scan.match_range_batch(
+        data, client, SCAN_SECRET, SPEND_PUB, [], "signet"
+    )
+
+    assert len(results) == len(heights)
+    for i, h in enumerate(heights):
+        if h == missing:
+            assert isinstance(results[i], scan.BlockNotIndexedError), results[i]
+        else:
+            assert not isinstance(results[i], Exception), (h, results[i])
+
+
+# --- matcher processes must not outlive the server --------------------------
+#
+# Ctrl-C on LNbits left twelve matcher processes running, each holding a copy
+# of the server's memory. Ctrl-C signals the whole foreground process GROUP, and
+# a fork inherits the parent's signal handlers, so the children woke up inside
+# uvicorn's SIGINT handler — which sets a shutdown flag on a server object that
+# does not exist in a child. They swallowed the interrupt and kept going. The
+# pool was also never shut down at all: no teardown after a scan, no atexit.
+
+
+def _child_signal_report(_ignored):
+    import signal as s
+    return {
+        "sigint": s.getsignal(s.SIGINT) is s.SIG_DFL,
+        "sigterm": s.getsignal(s.SIGTERM) is s.SIG_DFL,
+        "pid": os.getpid(),
+    }
+
+
+def test_forked_matchers_do_not_inherit_the_servers_signal_handlers(monkeypatch):
+    """Goes through _get_match_pool, not through a pool the test builds itself.
+
+    Testing _match_worker_init directly would pass even if nothing ever called
+    it — which is the shape of the bug: the function is only worth anything if
+    the pool is actually wired to run it.
+    """
+    import signal as s
+
+    def server_handler(signum, frame):     # stands in for uvicorn's
+        pass
+
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "1")
+    monkeypatch.setattr(scan, "_match_pool", None)
+    monkeypatch.setattr(scan, "_match_pool_workers", 0)
+    # _get_match_pool declines at 1 worker, so ask for 2 and use either child.
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "2")
+
+    previous = s.getsignal(s.SIGINT)
+    s.signal(s.SIGINT, server_handler)
+    try:
+        pool = scan._get_match_pool()
+        assert pool is not None
+        try:
+            report = pool.submit(_child_signal_report, None).result(timeout=30)
+        finally:
+            scan.shutdown_match_pool()
+    finally:
+        s.signal(s.SIGINT, previous)
+
+    assert report["sigint"], (
+        "the child inherited the server's SIGINT handler; Ctrl-C signals the "
+        "whole process group and the child would swallow it and keep running"
+    )
+    assert report["sigterm"], "the child inherited the server's SIGTERM handler"
+
+
+def test_shutdown_match_pool_leaves_no_children_behind(monkeypatch):
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "3")
+    monkeypatch.setattr(scan, "_match_pool", None)
+    monkeypatch.setattr(scan, "_match_pool_workers", 0)
+
+    pool = scan._get_match_pool()
+    assert pool is not None
+    # Force the workers to actually exist rather than be created on demand.
+    assert pool.submit(os.getpid).result(timeout=30) != os.getpid()
+    pids = [p.pid for p in pool._processes.values()]
+    assert len(pids) == 3, pids
+
+    scan.shutdown_match_pool()
+
+    assert scan._match_pool is None
+    assert scan._match_pool_workers == 0
+    deadline = time.time() + 10
+    alive = pids
+    while time.time() < deadline:
+        alive = [p for p in pids if _pid_alive(p)]
+        if not alive:
+            break
+        time.sleep(0.05)
+    assert not alive, f"matcher processes survived shutdown: {alive}"
+
+
+def _ignore_sigterm_and_spin(_ignored):
+    import signal as s
+    s.signal(s.SIGTERM, s.SIG_IGN)
+    time.sleep(300)
+
+
+def test_shutdown_kills_a_worker_that_ignores_being_asked(monkeypatch):
+    """The reported failure: 'matcher processes would not die: [902814]'.
+
+    The first teardown shared one five-second budget across twelve children,
+    sequentially, so the last of them got a zero-second join and one second to
+    be observed dead after SIGKILL — on a box whose cores were all still busy.
+    This runs workers that refuse SIGTERM and asserts they are gone anyway,
+    with no error logged.
+    """
+    import concurrent.futures as cf
+    import multiprocessing
+
+    errors: list[str] = []
+    monkeypatch.setattr(scan.logger, "error", lambda m, *a, **k: errors.append(str(m)))
+
+    pool = cf.ProcessPoolExecutor(
+        max_workers=3,
+        mp_context=multiprocessing.get_context("fork"),
+        initializer=scan._match_worker_init,
+    )
+    for _ in range(3):
+        pool.submit(_ignore_sigterm_and_spin, None)
+    time.sleep(1.0)                       # let every worker actually start
+    pids = [p.pid for p in pool._processes.values()]
+    assert len(pids) == 3, pids
+
+    monkeypatch.setattr(scan, "_match_pool", pool)
+    monkeypatch.setattr(scan, "_match_pool_workers", 3)
+    # Short waits: these workers never exit on their own, so the production
+    # patience would only be spent proving that. SIGKILL is prompt.
+    scan.shutdown_match_pool(timeout=0.5, grace=2.0)
+
+    alive = [p for p in pids if _pid_alive(p)]
+    assert not alive, f"workers survived shutdown: {alive}"
+    assert not errors, f"shutdown reported failure but the workers are gone: {errors}"
+
+
+class SlowToDieProc:
+    """A child that takes a few polls to actually go away after SIGKILL.
+
+    The real failure needed twelve workers on a box whose cores were all busy,
+    which is not something a test can arrange reliably. What it can do is model
+    the property that failed: a child does not die the instant it is signalled,
+    and the teardown has to keep looking. With a shared budget spent by earlier
+    children, later ones were checked once and written off.
+    """
+
+    def __init__(self, pid, polls_after_kill=6):
+        self.pid = pid
+        self._polls_after_kill = polls_after_kill
+        self._killed = False
+        self.signals: list[str] = []
+
+    def join(self, _timeout=None):
+        if self._killed:
+            self._polls_after_kill -= 1
+
+    def is_alive(self):
+        return not (self._killed and self._polls_after_kill <= 0)
+
+    def terminate(self):
+        self.signals.append("terminate")      # ignored, as SIG_IGN would be
+
+    def kill(self):
+        self.signals.append("kill")
+        self._killed = True
+
+
+class FakePool:
+    def __init__(self, procs):
+        self._processes = {p.pid: p for p in procs}
+        self.shutdown_calls = 0
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        self.shutdown_calls += 1
+
+
+def test_shutdown_keeps_waiting_for_children_that_die_slowly(monkeypatch):
+    """Deterministic version of 'matcher processes would not die: [902814]'.
+
+    Twelve children, none of which exit on request and each needing several
+    polls after SIGKILL. The old teardown shared one budget across them
+    sequentially and checked the last ones once; this asserts every child is
+    escalated and waited out, with nothing reported as undead.
+    """
+    errors: list[str] = []
+    monkeypatch.setattr(scan.logger, "error", lambda m, *a, **k: errors.append(str(m)))
+    monkeypatch.setattr(scan.logger, "warning", lambda m, *a, **k: None)
+
+    procs = [SlowToDieProc(9000 + i) for i in range(12)]
+    monkeypatch.setattr(scan, "_match_pool", FakePool(procs))
+    monkeypatch.setattr(scan, "_match_pool_workers", 12)
+
+    scan.shutdown_match_pool(timeout=0.2, grace=2.0)
+
+    assert not errors, errors
+    still = [p.pid for p in procs if p.is_alive()]
+    assert not still, f"gave up on {still}"
+    for p in procs:
+        assert "kill" in p.signals, (
+            f"pid {p.pid} was never escalated to SIGKILL; the budget ran out "
+            "before the teardown reached it"
+        )
+
+
+def test_shutdown_reports_the_pids_it_could_not_kill(monkeypatch):
+    """When it truly cannot win, it must say which pids and how to clear them."""
+    errors: list[str] = []
+    monkeypatch.setattr(scan.logger, "error", lambda m, *a, **k: errors.append(str(m)))
+    monkeypatch.setattr(scan.logger, "warning", lambda m, *a, **k: None)
+
+    immortal = [SlowToDieProc(4242, polls_after_kill=10**9)]
+    monkeypatch.setattr(scan, "_match_pool", FakePool(immortal))
+    monkeypatch.setattr(scan, "_match_pool_workers", 1)
+
+    scan.shutdown_match_pool(timeout=0.05, grace=0.05)
+
+    assert errors, "an undead worker was not reported at all"
+    assert "4242" in errors[0], errors[0]
+    assert "kill -9 4242" in errors[0], (
+        "the operator is told there is a problem but not how to fix it"
+    )
+
+
+def test_shutdown_match_pool_is_safe_when_there_is_no_pool(monkeypatch):
+    monkeypatch.setattr(scan, "_match_pool", None)
+    scan.shutdown_match_pool()          # must not raise
+    scan.shutdown_match_pool()
+
+
+def test_shutdown_is_registered_for_interpreter_exit():
+    """Belt and braces for the paths a scan's own teardown cannot reach."""
+    assert scan.shutdown_match_pool in scan._ATEXIT_REGISTERED
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    # A zombie is not running; reap it if it is ours.
+    try:
+        gone, _ = os.waitpid(pid, os.WNOHANG)
+        if gone == pid:
+            return False
+    except ChildProcessError:
+        pass
+    except OSError:
+        pass
+    return True
+
+
+@pytest.mark.asyncio
+async def test_a_finished_scan_leaves_no_matcher_processes(monkeypatch):
+    """The teardown has to be on the scan's own exit path, not just atexit.
+
+    A server that runs for weeks and scans daily would otherwise accumulate a
+    pool per scan, or hold twelve idle copies of LNbits between them.
+    """
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "2")
+    monkeypatch.setattr(scan, "_match_pool", None)
+    monkeypatch.setattr(scan, "_match_pool_workers", 0)
+
+    pool = scan._get_match_pool()
+    assert pool.submit(os.getpid).result(timeout=30) != os.getpid()
+    pids = [p.pid for p in pool._processes.values()]
+
+    async def boom(**_kwargs):
+        raise RuntimeError("oracle unreachable")
+
+    monkeypatch.setattr(scan, "_scan_wallet", boom)
+    monkeypatch.setattr(scan, "mark_scan_inactive", lambda _w: None)
+
+    with pytest.raises(RuntimeError):
+        await scan.scan_wallet("w1", "00" * 32)
+
+    assert scan._match_pool is None, (
+        "a scan that raised left its matcher pool running"
+    )
+    deadline = time.time() + 10
+    alive = pids
+    while time.time() < deadline:
+        alive = [p for p in pids if _pid_alive(p)]
+        if not alive:
+            break
+        time.sleep(0.05)
+    assert not alive, f"matcher processes outlived the scan: {alive}"
+
+
+@pytest.mark.asyncio
+async def test_single_worker_is_the_default(monkeypatch):
+    """Matching across processes forks a live LNbits. It must be opt-in."""
+    monkeypatch.delenv("SILNT_SCAN_MATCH_PROCESSES", raising=False)
+    assert scan._match_process_count() == 1, (
+        "process matching defaulted on; it forks the server and multiplies the "
+        "memory a scan needs, so it has to be a choice"
+    )
+    assert scan._get_match_pool() is None
+
+
+# --- .env has to work, because that is where LNbits settings live -----------
+#
+# LNbits reads .env through pydantic-settings, which parses the file into its
+# own Settings object and never exports to os.environ. A SILNT_* key in .env is
+# therefore read by nobody: pydantic ignores fields it does not know about, and
+# os.getenv never sees it. SILNT_SCAN_MATCH_PROCESSES=12 was set in .env, LNbits
+# was restarted, and the scan still ran on one worker calling the variable
+# unset — which was true, and useless.
+
+
+def test_setting_is_read_from_the_dotenv_file(monkeypatch, tmp_path):
+    env = tmp_path / ".env"
+    env.write_text(
+        "# LNbits config\n"
+        "LNBITS_ADMIN_UI=true\n"
+        "SILNT_SCAN_MATCH_PROCESSES=12\n"
+    )
+    monkeypatch.setenv("LNBITS_ENV_FILE", str(env))
+    monkeypatch.delenv("SILNT_SCAN_MATCH_PROCESSES", raising=False)
+
+    assert scan._setting("SILNT_SCAN_MATCH_PROCESSES") == "12"
+    assert scan._match_process_count() == 12
+
+
+def test_environment_beats_the_dotenv_file(monkeypatch, tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("SILNT_SCAN_MATCH_PROCESSES=12\n")
+    monkeypatch.setenv("LNBITS_ENV_FILE", str(env))
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "3")
+
+    assert scan._match_process_count() == 3, (
+        "the file overrode the environment; an operator cannot then override "
+        "the file for a single run"
+    )
+
+
+def test_dotenv_values_may_be_quoted(monkeypatch, tmp_path):
+    env = tmp_path / ".env"
+    env.write_text('SILNT_SCAN_MATCH_PROCESSES="8"\n')
+    monkeypatch.setenv("LNBITS_ENV_FILE", str(env))
+    monkeypatch.delenv("SILNT_SCAN_MATCH_PROCESSES", raising=False)
+    assert scan._match_process_count() == 8
+
+
+def test_dotenv_flags_work_too(monkeypatch, tmp_path):
+    """Every switch had this defect, not only the new one."""
+    env = tmp_path / ".env"
+    env.write_text("SILNT_SCAN_FORWARD_MATCH=1\n")
+    monkeypatch.setenv("LNBITS_ENV_FILE", str(env))
+    monkeypatch.delenv("SILNT_SCAN_FORWARD_MATCH", raising=False)
+    assert scan._flag("SILNT_SCAN_FORWARD_MATCH") is True
+
+
+def test_only_silnt_keys_are_taken_from_the_dotenv_file(monkeypatch, tmp_path):
+    """This is a config lookup, not a dotenv loader.
+
+    .env holds database URLs and API keys. Reading one key we own is fine;
+    reading anything else — or exporting the file into os.environ, where some
+    other component might log it — is not ours to do.
+    """
+    env = tmp_path / ".env"
+    env.write_text(
+        "LNBITS_DATABASE_URL=postgres://user:hunter2@db/lnbits\n"
+        "NOSTR_PRIVATE_KEY=deadbeef\n"
+        "SILNT_SCAN_MATCH_PROCESSES=4\n"
+    )
+    monkeypatch.setenv("LNBITS_ENV_FILE", str(env))
+
+    assert scan._setting("SILNT_SCAN_MATCH_PROCESSES") == "4"
+    assert scan._setting("LNBITS_DATABASE_URL") is None
+    assert scan._setting("NOSTR_PRIVATE_KEY") is None
+    assert "NOSTR_PRIVATE_KEY" not in os.environ
+    assert "LNBITS_DATABASE_URL" not in os.environ
+
+
+def test_a_missing_dotenv_file_is_not_an_error(monkeypatch, tmp_path):
+    monkeypatch.setenv("LNBITS_ENV_FILE", str(tmp_path / "nope.env"))
+    monkeypatch.delenv("SILNT_SCAN_MATCH_PROCESSES", raising=False)
+    assert scan._setting("SILNT_SCAN_MATCH_PROCESSES") is None
+    assert scan._match_process_count() == 1
+
+
+def test_dotenv_is_reread_so_an_edit_does_not_need_a_restart(monkeypatch, tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("SILNT_SCAN_MATCH_PROCESSES=2\n")
+    monkeypatch.setenv("LNBITS_ENV_FILE", str(env))
+    monkeypatch.delenv("SILNT_SCAN_MATCH_PROCESSES", raising=False)
+    assert scan._match_process_count() == 2
+
+    env.write_text("SILNT_SCAN_MATCH_PROCESSES=6\n")
+    assert scan._match_process_count() == 6, "the file was cached at first read"
+
+
+def test_worker_count_is_read_per_scan_not_at_import(monkeypatch):
+    """The bug this exists for: the variable read once, at import.
+
+    That is only correct if it was already in the environment of the process
+    that imported this module — which is exactly what fails when LNbits is
+    started by systemd or docker and the variable was exported in a shell. The
+    default is also the old behaviour, so the failure is invisible.
+    """
+    monkeypatch.delenv("SILNT_SCAN_MATCH_PROCESSES", raising=False)
+    assert scan._match_process_count() == 1
+
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "6")
+    assert scan._match_process_count() == 6, (
+        "setting the variable after import had no effect, which is how a scan "
+        "keeps running on one core with nothing in the log to say why"
+    )
+
+
+def test_single_worker_still_says_what_it_read(monkeypatch):
+    """Quieter must not become silent about what the switch resolved to.
+
+    Silence is what cost three debugging rounds. This is now a phrase in the
+    start-of-scan line rather than a line of its own, but the content has to
+    survive the consolidation.
+    """
+    monkeypatch.delenv("SILNT_SCAN_MATCH_PROCESSES", raising=False)
+    said = scan.describe_match_parallelism()
+    assert "1 worker" in said, said
+    assert "unset" in said, said
+    assert "SILNT_SCAN_MATCH_PROCESSES" in said, said
+
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "4")
+    said = scan.describe_match_parallelism()
+    assert "4 processes" in said, said
+
+
+def test_a_bad_value_is_reported_as_set_not_as_unset(monkeypatch):
+    """'set to garbage' and 'never set' are different problems."""
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "three")
+    said = scan.describe_match_parallelism()
+    assert "set to 'three'" in said, said
+
+
+def test_choosing_one_worker_is_not_nagged_about(monkeypatch):
+    """An explicit 1 is a decision, not a misconfiguration.
+
+    Running in-process forks nothing, which is the safe choice. Someone who has
+    made it should not be told on every scan that their setting is unusable and
+    that they should raise it.
+    """
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "1")
+    said = scan.describe_match_parallelism()
+
+    assert "in-process" in said, said
+    assert "not a usable" not in said, said
+    assert "would use more" not in said, (
+        f"nags on every scan at a setting the operator chose deliberately: {said}"
+    )
+    assert scan._get_match_pool() is None, "an explicit 1 still forked a pool"
+
+
+def test_where_it_looked_survives_the_shorter_line(monkeypatch, tmp_path):
+    """Naming the .env file is why the 12-worker setting was finally found.
+
+    Reporting it as merely "unset" sent someone to set it again in a file that
+    was already being read, so the path has to stay in the message.
+    """
+    env = tmp_path / ".env"
+    env.write_text("LNBITS_ADMIN_UI=true\n")
+    monkeypatch.setenv("LNBITS_ENV_FILE", str(env))
+    monkeypatch.delenv("SILNT_SCAN_MATCH_PROCESSES", raising=False)
+
+    said = scan.describe_match_parallelism()
+    assert str(env) in said, said
+
+
+def test_scan_start_line_carries_the_plan(monkeypatch):
+    """One line for how the scan will run, not one per decision made.
+
+    Four lines used to say overlapping things at the start of every scan. This
+    pins the pieces that have to survive being merged into one.
+    """
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "12")
+    plan = scan.describe_match_parallelism()
+    assert "12 processes" in plan
+    assert "cores" in plan
+
+
+def test_phases_points_at_the_idle_cores_when_matching_is_compute_bound():
+    stats = scan.OracleStats()
+    stats.wall_seconds = 93.3
+    stats.used_range = True
+    stats.matcher = "reverse"
+    stats.match_workers = 1
+    stats.match_thread_wall_seconds = 90.3
+    stats.match_cpu_seconds = 80.4
+
+    line = stats.phases()
+    assert "compute-bound" in line, line
+    assert "SILNT_SCAN_MATCH_PROCESSES" in line, line
+
+
+def test_phases_stops_advertising_processes_once_they_are_in_use():
+    stats = scan.OracleStats()
+    stats.wall_seconds = 30.0
+    stats.used_range = True
+    stats.matcher = "reverse"
+    stats.match_workers = 3
+    stats.match_batch_seconds = 30.0
+    stats.match_thread_wall_seconds = 80.0   # summed across workers
+    stats.match_cpu_seconds = 76.0
+
+    line = stats.phases()
+    assert "across 3 processes" in line, line
+    assert "SILNT_SCAN_MATCH_PROCESSES" not in line, line
+    assert "2.7x parallelism" in line, line
+    assert "IDLE" not in line, line
+
+
+def test_phases_calls_out_workers_that_were_configured_but_not_used():
+    """The exact shape of the batch-loop bug: 12 configured, 1 delivered.
+
+    Summed in-thread wall coming to LESS than the match phase can only mean the
+    blocks ran one after another. Without this the line reports 12 processes
+    and 100% busy, both true, and reads like a healthy parallel scan.
+    """
+    stats = scan.OracleStats()
+    stats.wall_seconds = 894.5
+    stats.used_range = True
+    stats.used_compute_index = True
+    stats.matcher = "reverse"
+    stats.match_workers = 12
+    stats.match_batch_seconds = 882.6
+    stats.match_thread_wall_seconds = 828.7
+    stats.match_cpu_seconds = 826.9
+
+    line = stats.phases()
+    assert "0.9x parallelism" in line, line
+    assert "WORKERS MOSTLY IDLE" in line, line
+
+
+@pytest.mark.asyncio
+async def test_matching_across_processes_finds_the_same_payment(monkeypatch):
+    """A faster matcher that loses outputs is worse than a slow one.
+
+    Runs the real pool rather than a mock: pickling the matcher and its
+    arguments across a fork is the part that can silently break, and a mock
+    would prove nothing about it.
+    """
+    tweak_hex, output_hex = payment_to_us(b"\x88" * 32)
+    utxo = {
+        "txid": "ab" * 32, "vout": 0, "amount": 4_200,
+        "pubkey": output_hex, "timestamp": 1_700_000_000,
+    }
+
+    serial = await _match_once(tweak_hex, utxo)
+
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "2")
+    monkeypatch.setattr(scan, "_match_pool", None)
+    workers_seen: list[int] = []
+    try:
+        parallel, workers = await _match_once(tweak_hex, utxo, want_workers=True)
+        workers_seen.append(workers)
+    finally:
+        pool = scan._match_pool
+        if pool is not None:
+            pool.shutdown(wait=True)
+        monkeypatch.setattr(scan, "_match_pool", None)
+        monkeypatch.setattr(scan, "_match_pool_workers", 0)
+
+    assert scan._owned_fingerprint(parallel) == scan._owned_fingerprint(serial), (
+        "matching across processes did not find what the single worker found"
+    )
+    assert len(parallel) == 1 and parallel[0].amount == 4_200
+    assert workers_seen == [2], (
+        f"the pool ran but the stats reported {workers_seen} workers, so the "
+        "phase line would still advise turning on what is already on"
+    )
+
+
+async def _match_once(tweak_hex, utxo, want_workers=False):
+    client = RecordingClient(all_range_routes([100], tweak_hex, utxo))
+    data = await scan.fetch_range_batch([100], client)
+    results = await scan.match_range_batch(
+        data, client, SCAN_SECRET, SPEND_PUB, [], "signet"
+    )
+    if want_workers:
+        return results[0], client.stats.match_workers
+    return results[0]
+
+
+@pytest.mark.asyncio
+async def test_reverse_path_records_itself_as_the_matcher():
+    tweak_hex, output_hex = payment_to_us(b"\x88" * 32)
+    utxo = {
+        "txid": "ab" * 32, "vout": 0, "amount": 4_200,
+        "pubkey": output_hex, "timestamp": 1_700_000_000,
+    }
+    client = RecordingClient(all_range_routes([100], tweak_hex, utxo))
+    data = await scan.fetch_range_batch([100], client)
+    await scan.match_range_batch(data, client, SCAN_SECRET, SPEND_PUB, [], "signet")
+
+    assert client.stats.matcher == "reverse", client.stats.matcher
+    assert "matcher reverse" in client.stats.phases()
+
+
+@pytest.mark.asyncio
+async def test_forcing_forward_is_visible_in_the_stats_and_warned_about(
+    monkeypatch, caplog
+):
+    """Turning the kill switch on must be loud and must show up in the timing.
+
+    It is meant to be set for one scan to answer "is the reverse matcher losing
+    outputs" and then unset. Left on, it silently multiplies every later scan's
+    matching cost by roughly 0.63 + 0.28 per label.
+    """
+    tweak_hex, output_hex = payment_to_us(b"\x88" * 32)
+    utxo = {
+        "txid": "ab" * 32, "vout": 0, "amount": 4_200,
+        "pubkey": output_hex, "timestamp": 1_700_000_000,
+    }
+    client = RecordingClient(all_range_routes([100], tweak_hex, utxo))
+    data = await scan.fetch_range_batch([100], client)
+
+    warnings: list[str] = []
+    monkeypatch.setattr(scan, "_FORWARD_MATCH_ONLY", True)
+    monkeypatch.setattr(scan, "_warned_forward_forced", False)
+    monkeypatch.setattr(
+        scan.logger, "warning", lambda msg, *a, **kw: warnings.append(str(msg))
+    )
+
+    results = await scan.match_range_batch(
+        data, client, SCAN_SECRET, SPEND_PUB, [], "signet"
+    )
+
+    # Forcing the matcher must not change what is found.
+    assert len(results[0]) == 1, "forcing the forward matcher lost the payment"
+    assert results[0][0].amount == 4_200
+
+    assert client.stats.matcher.startswith("forward"), client.stats.matcher
+    assert "SILNT_SCAN_FORWARD_MATCH" in client.stats.phases()
+    assert warnings, "the switch changed the cost of the scan without saying so"
+    assert "SILNT_SCAN_FORWARD_MATCH" in warnings[0], warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_forward_forced_warning_fires_once_not_per_batch(monkeypatch):
+    tweak_hex, output_hex = payment_to_us(b"\x88" * 32)
+    utxo = {
+        "txid": "ab" * 32, "vout": 0, "amount": 4_200,
+        "pubkey": output_hex, "timestamp": 1_700_000_000,
+    }
+    warnings: list[str] = []
+    monkeypatch.setattr(scan, "_FORWARD_MATCH_ONLY", True)
+    monkeypatch.setattr(scan, "_warned_forward_forced", False)
+    monkeypatch.setattr(
+        scan.logger, "warning", lambda msg, *a, **kw: warnings.append(str(msg))
+    )
+
+    for _ in range(3):
+        client = RecordingClient(all_range_routes([100], tweak_hex, utxo))
+        data = await scan.fetch_range_batch([100], client)
+        await scan.match_range_batch(
+            data, client, SCAN_SECRET, SPEND_PUB, [], "signet"
+        )
+
+    assert len(warnings) == 1, f"warned {len(warnings)} times across three batches"
+
+
+# --- the fallback must never be silent --------------------------------------
+
+
+class _Recorder:
+    """Captures the module's loguru calls, which conftest otherwise stubs out."""
+
+    def __init__(self):
+        self.warnings = []
+        self.infos = []
+
+    def warning(self, msg, *a, **k):
+        self.warnings.append(msg % a if a else msg)
+
+    def info(self, msg, *a, **k):
+        self.infos.append(msg % a if a else msg)
+
+    def __getattr__(self, _n):
+        return lambda *a, **k: None
+
+
+@pytest.mark.asyncio
+async def test_missing_field_warns_rather_than_falling_back_silently(monkeypatch):
+    """The case that cost two debugging rounds.
+
+    /info answers, but the binary predates the endpoints so the field is
+    absent. This used to set the limit to 0 and log nothing at all — the only
+    symptom being a request count three times higher, several lines away.
+    """
+    rec = _Recorder()
+    monkeypatch.setattr(scan, "logger", rec)
+    client = RecordingClient({"/info": {"height": 500, "network": "signet"}})
+
+    assert await client.get_range_limit() == 0
+    assert rec.warnings, "fell back with no warning at all"
+    joined = " ".join(rec.warnings)
+    assert "max_range_blocks" in joined
+    assert "Rebuild and restart" in joined, joined
+
+
+@pytest.mark.asyncio
+async def test_unreachable_info_warns(monkeypatch):
+    rec = _Recorder()
+    monkeypatch.setattr(scan, "logger", rec)
+    client = RecordingClient({"/info": httpx.ConnectError("refused")})
+
+    assert await client.get_range_limit() == 0
+    assert any("/info failed" in w for w in rec.warnings), rec.warnings
+
+
+@pytest.mark.asyncio
+async def test_explicit_zero_warns(monkeypatch):
+    rec = _Recorder()
+    monkeypatch.setattr(scan, "logger", rec)
+    client = RecordingClient({"/info": {"height": 5, "max_range_blocks": 0}})
+
+    assert await client.get_range_limit() == 0
+    assert any("disabled" in w for w in rec.warnings), rec.warnings
+
+
+@pytest.mark.asyncio
+async def test_non_numeric_value_warns(monkeypatch):
+    rec = _Recorder()
+    monkeypatch.setattr(scan, "logger", rec)
+    client = RecordingClient({"/info": {"max_range_blocks": "lots"}})
+
+    assert await client.get_range_limit() == 0
+    assert any("not a number" in w for w in rec.warnings), rec.warnings
+
+
+@pytest.mark.asyncio
+async def test_working_range_support_says_nothing_of_its_own(monkeypatch):
+    """Quiet when it works, loud when it does not.
+
+    The limit is reported in _scan_wallet's one start-of-scan line, so saying
+    it again here was a second line carrying the same number. Every FAILING
+    outcome above still warns — that asymmetry is the point, and the tests
+    above it are what hold the failing side in place.
+    """
+    rec = _Recorder()
+    monkeypatch.setattr(scan, "logger", rec)
+    client = RecordingClient({"/info": {"height": 5, "max_range_blocks": 100}})
+
+    assert await client.get_range_limit() == 100
+    assert not rec.warnings, rec.warnings
+    assert not rec.infos, f"the working path logged a line of its own: {rec.infos}"

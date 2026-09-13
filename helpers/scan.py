@@ -3,7 +3,7 @@ scan.py — Silent Payments blockchain scanner for the silnt LNbits extension.
 """
 
 from __future__ import annotations
-import asyncio, concurrent.futures, hashlib, os, struct, time
+import asyncio, atexit, concurrent.futures, ctypes, hashlib, multiprocessing, os, pathlib, signal, struct, threading, time
 from dataclasses import dataclass
 from typing import Optional
 import coincurve, httpx
@@ -324,7 +324,9 @@ def sync_block(tweaks, utxos, scan_key, spend_pub_key, labels):
     return owned
 
 
-def _tx_has_candidate(opk: bytes, out_keys: list[bytes], label_x: set) -> bool:
+def _tx_has_candidate(
+    opk_point, opk_xonly: bytes, out_keys: list[bytes], label_x: set
+) -> bool:
     """Could any of this transaction's outputs belong to us?
 
     The reverse of what sync_block does, and the reason this is cheaper.
@@ -338,30 +340,137 @@ def _tx_has_candidate(opk: bytes, out_keys: list[bytes], label_x: set) -> bool:
 
     Given the tweak's own transaction, the test inverts: subtract the plain
     candidate from each of that transaction's outputs and see whether the
-    difference is a label. One curve operation per output, and the label
-    comparison is a set lookup.
+    difference is a label.
 
-    Both sign combinations are required. The scanner only ever sees an output
-    x-only, so it reconstructs P_0 with even parity forced; where the true P_0
-    is odd, b33 is -P_0 and only the other sign yields the label. Testing one
-    sign silently misses about 40% of labeled payments — which is exactly the
-    defect in sync_block_from_compute_index below.
+    Points are passed in parsed, and stay parsed. Parsing a compressed point
+    costs a modular square root — 5 us, against 2.8 us for the addition it
+    feeds — so a helper that takes and returns compressed bytes spends more
+    time decoding its arguments than doing arithmetic. Measured over the whole
+    matcher, the serialise/parse round-trips were 39% of the time and the
+    Python interpreter itself under 3%.
+
+    Both signs of the output must be tried, and one parse covers both.
+    Writing E for the even-parity point with the candidate's x-coordinate and
+    O for the even-parity point with the output's, the two tests are
+    x(O - E) and x((-O) - E) = x(O + E). So the pair {O - E, O + E} is what
+    matters, and it is reached with one parse of O plus two additions rather
+    than two parses.
+
+    That the caller may hand us the true P_0 rather than E does not change the
+    pair: starting from -E swaps which addition yields which member, and both
+    are tested. Comparison is x-only, which is what makes the sign irrelevant.
+
+    Testing one sign only would silently miss about 40% of labeled payments —
+    which is exactly the defect in sync_block_from_compute_index below.
     """
-    if opk in out_keys:
+    if opk_xonly in out_keys:
         return True
     if not label_x:
         return False
 
-    neg_opk33 = negate_public_key(b"\x02" + opk)
+    try:
+        neg_opk_point = PublicKey(
+            negate_public_key(opk_point.format(compressed=True))
+        )
+    except Exception:
+        return False
+
     for out in out_keys:
-        for parity in (b"\x02", b"\x03"):
+        try:
+            out_point = PublicKey(b"\x02" + out)
+        except Exception:
+            # Not a valid x-coordinate, so neither sign is either.
+            continue
+        for other in (neg_opk_point, opk_point):
             try:
-                diff = add_public_keys(parity + out, neg_opk33)
+                combined = out_point.combine([other]).format(compressed=True)
             except Exception:
                 continue
-            if diff[1:] in label_x:
+            if combined[1:] in label_x:
                 return True
     return False
+
+
+def _owned_fingerprint(owned) -> set:
+    """Everything about a detected output that must agree between matchers."""
+    return {
+        (
+            o.txid.hex(),
+            o.vout,
+            o.amount,
+            o.pub_key.hex(),
+            o.priv_key_tweak.hex(),
+            o.label.m if o.label else None,
+        )
+        for o in owned
+    }
+
+
+def _tweaks_from_compute_index(compute_index) -> list[bytes]:
+    """The tweak set, as /range/tweaks would have returned it.
+
+    The oracle writes a compute-index row and a tweak row under the same
+    condition, so the two carry the same transactions — asserted on the oracle
+    side by TestComputeIndexCoversEveryTweak.
+    """
+    tweaks = []
+    for entry in compute_index:
+        tweak_hex = entry.get("tweak", "")
+        if not tweak_hex:
+            continue
+        try:
+            tweaks.append(bytes.fromhex(tweak_hex))
+        except ValueError:
+            continue
+    return tweaks
+
+
+def sync_block_forward_from_index(
+    compute_index, utxos, scan_key, spend_pub_key, labels
+):
+    """Forward matching, driven by the compute index's tweaks.
+
+    For SILNT_SCAN_FORWARD_MATCH: the kill switch should change which matcher
+    runs, not which requests the scan makes, so that turning it on isolates the
+    matcher and nothing else.
+    """
+    return sync_block(
+        _tweaks_from_compute_index(compute_index),
+        utxos, scan_key, spend_pub_key, labels,
+    )
+
+
+def sync_block_verified(compute_index, utxos, scan_key, spend_pub_key, labels):
+    """Run both matchers over the same block and report any disagreement.
+
+    Returns the FORWARD result. sync_block is the path with years of use behind
+    it, so where the two differ it is the one to trust until proven otherwise.
+
+    The tweaks handed to the forward matcher are taken from the compute index
+    itself, so both matchers see exactly the same transactions and a
+    disagreement can only come from the matching, not from one of them having
+    been given different data.
+    """
+    forward = sync_block(
+        _tweaks_from_compute_index(compute_index),
+        utxos, scan_key, spend_pub_key, labels,
+    )
+    reverse = sync_block_reverse(
+        compute_index, utxos, scan_key, spend_pub_key, labels
+    )
+
+    fwd, rev = _owned_fingerprint(forward), _owned_fingerprint(reverse)
+    if fwd != rev:
+        only_forward = fwd - rev
+        only_reverse = rev - fwd
+        logger.error(
+            "MATCHER DISAGREEMENT over %d transactions: forward found %d, "
+            "reverse found %d. Missed by reverse: %s. Extra in reverse: %s. "
+            "Using the forward result.",
+            len(compute_index), len(fwd), len(rev),
+            sorted(only_forward), sorted(only_reverse),
+        )
+    return forward
 
 
 def sync_block_reverse(compute_index, utxos, scan_key, spend_pub_key, labels):
@@ -387,6 +496,14 @@ def sync_block_reverse(compute_index, utxos, scan_key, spend_pub_key, labels):
 
     label_x = {label.pub_key[1:] for label in labels}
 
+    # Parsed once for the whole block rather than once per transaction. It is
+    # the same key every time, and decoding it costs a modular square root.
+    try:
+        spend_point = PublicKey(spend_pub_key)
+    except Exception as e:
+        logger.warning(f"bad spend pubkey: {e}")
+        return []
+
     owned: list[OwnedUTXO] = []
     for entry in compute_index:
         txid_hex = entry.get("txid", "")
@@ -399,14 +516,22 @@ def sync_block_reverse(compute_index, utxos, scan_key, spend_pub_key, labels):
 
         try:
             tweak = bytes.fromhex(tweak_hex)
-            shared_secret = create_shared_secret(tweak, scan_key)
-            opk, _ = create_output_pub_key_and_tweak(shared_secret, spend_pub_key, 0)
+            # create_shared_secret / create_output_pub_key_and_tweak inlined so
+            # the candidate point can stay parsed on the way into the filter,
+            # and so the spend key above is not re-parsed per transaction. The
+            # arithmetic is identical to theirs.
+            shared_secret = (
+                PublicKey(tweak).multiply(scan_key).format(compressed=True)
+            )
+            t_k = _tagged_hash("BIP0352/SharedSecret", shared_secret + _ser_u32(0))
+            opk_point = spend_point.combine([PublicKey.from_secret(t_k)])
+            opk_xonly = opk_point.format(compressed=True)[1:]
         except Exception as e:
             logger.warning(f"compute_index txid={txid_hex}: {e}")
             continue
 
         out_keys = [bytes.fromhex(u["pubkey"]) for u in rel_utxos]
-        if not _tx_has_candidate(opk, out_keys, label_x):
+        if not _tx_has_candidate(opk_point, opk_xonly, out_keys, label_x):
             continue
 
         # Candidate: hand it to the same extraction sync_block uses. The shared
@@ -536,19 +661,136 @@ _http: Optional[httpx.AsyncClient] = None
 # connection can serve whatever tweaks and UTXOs they like, which shows a user
 # the wrong balance and reveals which blocks they are interested in. It cannot
 # steal keys — scanning never sees a spend key — but it is not nothing.
+
+def _dotenv_path() -> Optional[pathlib.Path]:
+    """The .env file LNbits was started with, if there is one.
+
+    LNbits reads .env through pydantic-settings, which parses the file into its
+    own Settings object and does NOT export the values to os.environ. So a
+    SILNT_* switch written into .env -- the obvious place to put it, and where
+    every other LNbits setting goes -- is read by nobody: pydantic ignores keys
+    it has no field for, and os.getenv never sees them.
+
+    That is not a hypothetical. SILNT_SCAN_MATCH_PROCESSES=12 was set in .env,
+    LNbits was restarted, and the scan still ran on one worker reporting the
+    variable unset, because it was: in the file, not in the environment.
+    """
+    explicit = os.getenv("LNBITS_ENV_FILE")
+    if explicit:
+        p = pathlib.Path(explicit)
+        return p if p.is_file() else None
+    here = pathlib.Path(__file__).resolve()
+    for base in (pathlib.Path.cwd(), *here.parents[:6]):
+        candidate = base / ".env"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _setting(name: str) -> Optional[str]:
+    """A SILNT_* switch, from the environment or from LNbits' .env file.
+
+    The environment wins, so an operator can still override the file for one
+    run. Only SILNT_ keys are taken from the file: this is a config lookup, not
+    a dotenv loader, and it has no business reading anybody's database URL or
+    API keys, let alone pushing them into os.environ where something else might
+    log them.
+
+    Re-read per call rather than cached. It is a handful of lines of text a few
+    times per scan, and caching it would mean editing .env needed a restart to
+    take effect -- which is most of the problem this exists to solve.
+    """
+    from_env = os.getenv(name)
+    if from_env is not None:
+        return from_env
+    if not name.startswith("SILNT_"):
+        return None
+    path = _dotenv_path()
+    if path is None:
+        return None
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() != name:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        return value
+    return None
+
+
+def _flag(name: str) -> bool:
+    return (_setting(name) or "").strip().lower() in ("1", "true", "yes")
+
+
 # Overridable so a deployment with a properly certificated oracle can turn it
 # on without a code change.
-_VERIFY_TLS = os.getenv("SILNT_ORACLE_VERIFY_TLS", "").lower() in ("1", "true", "yes")
+_VERIFY_TLS = _flag("SILNT_ORACLE_VERIFY_TLS")
 
 # Opt-in, because the path it enables has never run. See the note in scan_block.
-_USE_COMPUTE_INDEX = os.getenv("SILNT_SCAN_COMPUTE_INDEX", "").lower() in (
-    "1", "true", "yes",
-)
+_USE_COMPUTE_INDEX = _flag("SILNT_SCAN_COMPUTE_INDEX")
+
+# Force the forward matcher even where the oracle offers the compute index.
+#
+# A kill switch for sync_block_reverse. sync_block is the older, slower,
+# longer-exercised path, and if a balance ever looks wrong this is the first
+# thing to try: it answers "is the new matcher losing outputs" without
+# rebuilding or downgrading anything.
+_FORWARD_MATCH_ONLY = _flag("SILNT_SCAN_FORWARD_MATCH")
+
+# Run BOTH matchers on every block and report where they disagree.
+#
+# Costs roughly double the matching, so it is not for normal running. It is for
+# answering, against real chain data rather than a test corpus, whether the two
+# paths actually agree — which is the only question that matters when a wallet
+# reports less than it should. Disagreements are logged loudly and the FORWARD
+# result is used, because it is the one with the longer history.
+_VERIFY_MATCH = _flag("SILNT_SCAN_VERIFY_MATCH")
+
+_warned_forward_forced = False
+
+
+def _warn_forward_forced(n_labels: int) -> None:
+    """Say so when the kill switch is the reason a scan is slow.
+
+    SILNT_SCAN_FORWARD_MATCH is meant to be turned on for one scan to answer
+    "is the new matcher losing outputs", and then turned off. Left on, it costs
+    the whole difference between the two matchers on every scan afterwards —
+    silently, because it does not change which requests are made, so the phase
+    line still reads "range+compute-index" and everything looks as intended.
+
+    Forward does two curve additions per label per tweak, so the damage grows
+    with the wallet's address count. Measured per tweak on a 4-core box, three
+    outputs per transaction, forward is linear in the label count and reverse
+    is flat (249/143 at 4 labels, 436/145 at 8, 893/145 at 20, 2792/143 at 68),
+    which fits ratio = 0.63 + 0.28 x labels to within a few percent across that
+    whole range. Once per process, with the number, rather than leaving it to
+    be inferred from a scan that is mysteriously slow.
+    """
+    global _warned_forward_forced
+    if _warned_forward_forced:
+        return
+    _warned_forward_forced = True
+    logger.warning(
+        "SILNT_SCAN_FORWARD_MATCH is set, so scanning is using the FORWARD "
+        "matcher even though the oracle serves the compute index. Forward "
+        "costs two curve additions per label per tweak and this wallet has "
+        f"{n_labels} labels, so expect roughly "
+        f"{max(1.0, 0.63 + 0.28 * n_labels):.1f}x the matching time of the "
+        "reverse matcher. Unset SILNT_SCAN_FORWARD_MATCH to use it."
+    )
 
 
 def _env_int(name: str, default: int, lo: int, hi: int) -> int:
     try:
-        return max(lo, min(hi, int(os.getenv(name, "") or default)))
+        return max(lo, min(hi, int(_setting(name) or default)))
     except ValueError:
         return default
 
@@ -629,6 +871,40 @@ class OracleStats:
     # If both are large, they are running in sequence and something broke the
     # pipeline.
     match_batch_seconds: float = 0.0
+    # Which path actually ran. Without this the phase line is ambiguous in the
+    # one way that matters: a scan silently falling back to per-block looks
+    # like a scan whose matching was free.
+    used_range: bool = False
+    used_compute_index: bool = False
+    # Which MATCHER ran, and over how many labels.
+    #
+    # used_compute_index says the compute index was FETCHED, not that the
+    # reverse matcher used it: SILNT_SCAN_FORWARD_MATCH forces the forward
+    # matcher while leaving the fetch path untouched, by design, so the two
+    # printed the same phase line while differing by the whole cost of the
+    # scan. Forward does two curve additions per label per tweak, so it is
+    # linear in the label count and reverse is flat:
+    #
+    #   labels    forward      reverse      (4-core box, 3 outputs per tx)
+    #        4   249 us/tw    143 us/tw
+    #        8   436 us/tw    145 us/tw
+    #       20   893 us/tw    145 us/tw
+    #       68  2792 us/tw    143 us/tw
+    #
+    # and _scan_wallet builds one label per saved address, so the label count
+    # is a property of the wallet and not a constant. Reporting the matcher
+    # without the label count would leave the forward numbers unreadable.
+    matcher: str = ""
+    labels: int = 0
+    # Measured INSIDE the matcher thread. match_cpu_seconds is that thread's own
+    # CPU time, which does not advance while the GIL is held elsewhere;
+    # match_thread_wall_seconds is the wall clock over the same calls. The gap
+    # between them is time the matcher spent waiting for the interpreter rather
+    # than computing -- see _timed_match.
+    match_cpu_seconds: float = 0.0
+    match_thread_wall_seconds: float = 0.0
+    # How many workers the matching ran across (1 = the single thread).
+    match_workers: int = 1
 
     def as_dict(self) -> dict:
         return {
@@ -644,6 +920,13 @@ class OracleStats:
             "timestamp_seconds": round(self.ts_seconds, 2),
             "fetch_seconds": round(self.fetch_seconds, 2),
             "match_batch_seconds": round(self.match_batch_seconds, 2),
+            "used_range": self.used_range,
+            "used_compute_index": self.used_compute_index,
+            "matcher": self.matcher,
+            "labels": self.labels,
+            "match_cpu_seconds": round(self.match_cpu_seconds, 2),
+            "match_thread_wall_seconds": round(self.match_thread_wall_seconds, 2),
+            "match_workers": self.match_workers,
             "spent_seconds": round(self.spent_seconds, 2),
             "persist_seconds": round(self.persist_seconds, 2),
             "unaccounted_seconds": round(
@@ -680,10 +963,86 @@ class OracleStats:
             - self.fetch_seconds - self.match_batch_seconds
             - self.spent_seconds - self.persist_seconds
         )
+
+        if self.used_range:
+            path = "range+compute-index" if self.used_compute_index else "range+tweaks"
+            # On the range path fetch and match are separate phases and each is
+            # measured on its own, so the two numbers mean what they say.
+            work = (
+                f"fetch-wait {self.fetch_seconds:.1f}s | "
+                f"match {self.match_batch_seconds:.1f}s"
+            )
+        else:
+            path = "PER-BLOCK (range endpoints not in use)"
+            # Here fetch_seconds wraps the whole gather, which does the fetching
+            # AND the matching, so splitting them would be a fiction. Say so
+            # rather than printing a match phase of zero and letting it read as
+            # "matching was free".
+            work = f"fetch+match {self.fetch_seconds:.1f}s (not separable on this path)"
+
+        # match_seconds times the await on a single-threaded executor, so with
+        # many blocks in flight it sums queueing as well as work and can exceed
+        # the wall clock several times over. It is a relative signal, not a
+        # duration.
+        ec_note = ""
+        if self.match_seconds > self.wall_seconds and self.wall_seconds:
+            ec_note = f", {self.match_seconds / self.wall_seconds:.0f}x wall — queued"
+
+        # The matcher and the label count, because they are what the match
+        # phase costs. "range+compute-index" says the index was fetched; it
+        # does not say the reverse matcher used it.
+        who = self.matcher or "unknown"
+        per_tweak = ""
+        if self.tweaks and self.match_batch_seconds:
+            per_tweak = f", {self.match_batch_seconds / self.tweaks * 1e6:.0f}us/tweak"
+        matcher_note = f" | matcher {who} over {self.labels} labels{per_tweak}"
+
+        # Was the matcher computing, or waiting for the GIL? Stated as a
+        # verdict rather than as two numbers to subtract, because the two cases
+        # have opposite fixes.
+        if self.match_thread_wall_seconds > 0:
+            busy = self.match_cpu_seconds / self.match_thread_wall_seconds
+            verdict = (
+                "compute-bound" if busy >= 0.8
+                else f"STARVED by other threads, {1 / max(busy, 1e-9):.1f}x slower"
+            )
+            where = (
+                "in-thread" if self.match_workers <= 1
+                else f"across {self.match_workers} processes"
+            )
+            # What the workers ACTUALLY delivered, not what was configured.
+            #
+            # The in-thread figures are summed across workers, so with real
+            # concurrency they come to roughly (workers x the match phase).
+            # When 12 workers were configured but every block was awaited
+            # before the next was dispatched, this read 0.9x and the scan took
+            # as long as a single worker -- with nothing else in the log to
+            # show for it. Printed whenever more than one worker is asked for,
+            # because "configured" and "achieved" being different is the whole
+            # failure.
+            if self.match_workers > 1 and self.match_batch_seconds > 0:
+                got = self.match_thread_wall_seconds / self.match_batch_seconds
+                where += (
+                    f", {got:.1f}x parallelism"
+                    + ("" if got >= self.match_workers * 0.5
+                       else " — WORKERS MOSTLY IDLE")
+                )
+            matcher_note += (
+                f" | matcher CPU {self.match_cpu_seconds:.1f}s of "
+                f"{self.match_thread_wall_seconds:.1f}s {where} "
+                f"({busy * 100:.0f}% busy, {verdict})"
+            )
+            # A compute-bound matcher on one worker is leaving cores idle. Say
+            # what to do about it, once, in the line that shows the symptom.
+            if self.match_workers <= 1 and busy >= 0.8:
+                matcher_note += (
+                    " — single worker; SILNT_SCAN_MATCH_PROCESSES=<cores-1> "
+                    "parallelises this"
+                )
+
         return (
-            f"fetch-wait {self.fetch_seconds:.1f}s | "
-            f"match {self.match_batch_seconds:.1f}s "
-            f"(EC {self.match_seconds:.1f}s, "
+            f"path {path}{matcher_note} | {work} "
+            f"(EC {self.match_seconds:.1f}s summed across waiters{ec_note}; "
             f"timestamp lookups {self.ts_seconds:.1f}s over {self.ts_lookups}) | "
             f"spent-check {self.spent_seconds:.1f}s | "
             f"persist {self.persist_seconds:.1f}s | "
@@ -734,16 +1093,58 @@ class BlindBitOracleClient:
         once per client and remembered, since it cannot change under us within
         a scan.
         """
-        if self._range_limit is None:
-            try:
-                info = (await self._get("/info")).json()
-                self._range_limit = max(0, int(info.get("max_range_blocks") or 0))
-            except Exception as e:
-                logger.info(
-                    f"oracle at {self.base_url} did not report range support "
-                    f"({e}); scanning block by block"
-                )
-                self._range_limit = 0
+        if self._range_limit is not None:
+            return self._range_limit
+
+        # Every outcome says something, including the one that used to say
+        # nothing. An oracle whose /info answers but omits max_range_blocks is
+        # an oracle running a binary older than the endpoints — the commonest
+        # cause by far, since merging the change is not the same as rebuilding
+        # and restarting it — and that case previously fell back in total
+        # silence. The only symptom was a request count three times higher than
+        # it should be, several log lines away.
+        try:
+            resp = await self._get("/info")
+            info = resp.json()
+        except Exception as e:
+            logger.warning(
+                f"oracle at {self.base_url}: /info failed ({e}); "
+                f"scanning block by block, which is ~3x the requests"
+            )
+            self._range_limit = 0
+            return self._range_limit
+
+        raw = info.get("max_range_blocks")
+        if raw is None:
+            logger.warning(
+                f"oracle at {self.base_url} answered /info but reported no "
+                f"max_range_blocks, so it predates the /range endpoints. "
+                f"Scanning block by block, which is ~3x the requests. "
+                f"Rebuild and restart the oracle to use them. "
+                f"(/info returned: {sorted(info)})"
+            )
+            self._range_limit = 0
+            return self._range_limit
+
+        try:
+            self._range_limit = max(0, int(raw))
+        except (TypeError, ValueError):
+            logger.warning(
+                f"oracle at {self.base_url} reported max_range_blocks={raw!r}, "
+                f"which is not a number; scanning block by block"
+            )
+            self._range_limit = 0
+            return self._range_limit
+
+        if self._range_limit == 0:
+            logger.warning(
+                f"oracle at {self.base_url} reports max_range_blocks=0, so the "
+                f"range endpoints are disabled there; scanning block by block"
+            )
+        # The success case says nothing on its own: _scan_wallet reports the
+        # limit it got in its one start-of-scan line, and two lines carrying
+        # the same number is how a scan log becomes something people skim past.
+        # Every FAILING outcome above still warns — that asymmetry is the point.
         return self._range_limit
 
     async def _get_range(self, path: str, start: int, end: int) -> dict[int, list]:
@@ -856,6 +1257,278 @@ _matcher = concurrent.futures.ThreadPoolExecutor(
 )
 
 
+# Short names for the log line. Recorded here rather than at each call site so
+# a matcher added later cannot be left out of the reporting.
+_MATCHER_NAMES = {
+    "sync_block": "forward",
+    "sync_block_forward_from_index": "forward (forced by SILNT_SCAN_FORWARD_MATCH)",
+    "sync_block_reverse": "reverse",
+    "sync_block_verified": "both (SILNT_SCAN_VERIFY_MATCH)",
+    "sync_block_from_compute_index": "compute-index (single-sign)",
+}
+
+
+# Matching across processes, for boxes with cores to spare.
+#
+# The matcher is compute-bound on ONE core and the GIL is the only reason it
+# cannot use the others -- threads were measured making it worse, not better
+# (see _matcher above). Processes do not share a GIL. They do not share memory
+# either, so every block's utxos and compute-index entries are pickled across;
+# measured on a 4-core box at the shape of a real mainnet scan (161 tweaks and
+# ~2.3 outputs per tweaked tx, 25-block batches, 1.4 MB pickled per batch), that
+# transfer is paid for several times over:
+#
+#   serial (one thread)   129.1 us/tweak
+#   process pool x2        69.5 us/tweak   1.86x
+#   process pool x3        51.0 us/tweak   2.53x
+#   process pool x4        37.9 us/tweak   3.40x
+#
+# Off by default. It forks a live LNbits process, and forking a process that
+# holds locks in other threads is a real hazard even though the children here
+# only call pure functions; it also multiplies the memory a scan needs. Someone
+# turning this on should be choosing to, and should leave a core for LNbits
+# itself. On a 16-core box SILNT_SCAN_MATCH_PROCESSES=12 is the shape to want.
+#
+# Read per scan rather than once at import. An import-time read is only correct
+# if the variable was already in the environment of the process that imported
+# this module, which is exactly the assumption that fails when LNbits is started
+# by systemd or docker and the variable was exported in somebody's shell. That
+# failure is then invisible, because the default is also the old behaviour.
+# Reading it here costs nothing and makes the switch take effect whenever the
+# process environment actually carries it.
+_match_pool = None
+_match_pool_workers = 0
+_match_pool_lock = threading.Lock()
+
+
+def _match_worker_init():
+    """Make a forked matcher child safe to kill. Runs once per child.
+
+    Two inherited things conspire to outlive the server, and both have to go:
+
+    Ctrl-C sends SIGINT to the whole foreground process GROUP, children
+    included. A fork inherits the parent's signal handlers, so these children
+    woke up in uvicorn's SIGINT handler, which sets a shutdown flag on a server
+    object that does not exist in a child. They therefore swallowed the
+    interrupt and kept running -- twelve of them, holding a copy of LNbits'
+    memory each, after the server was gone. Restoring the default disposition
+    means an interrupt kills them like any other process.
+
+    And SIGKILL or a crash of the parent sends nothing at all, so PR_SET_PDEATHSIG
+    asks the kernel to kill this child when its parent dies. Linux-only and
+    best effort; the atexit and per-scan shutdown below cover the ordinary
+    paths, and this covers the ones no handler can.
+    """
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, signal.SIG_DFL)
+        except (ValueError, OSError):
+            pass
+    try:
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGKILL)
+    except Exception:
+        pass
+    # The parent may already have died between the fork and here, in which case
+    # PR_SET_PDEATHSIG has nothing left to fire.
+    if os.getppid() == 1:
+        os._exit(0)
+
+
+def _still_running(proc) -> bool:
+    """Is this child actually still executing? Reaps it if it is not.
+
+    Process.is_alive() reports True for a child that has exited but not been
+    waited on, so it has to be preceded by a join that can reap. A child the
+    executor's own machinery already reaped raises instead, which is also "not
+    running".
+    """
+    try:
+        proc.join(0)
+        return proc.is_alive()
+    except Exception:
+        return False
+
+
+def _wait_for_exit(procs, seconds: float) -> list:
+    """Poll until these children are gone, or the time is up. Returns the rest."""
+    deadline = time.monotonic() + seconds
+    remaining = list(procs)
+    while remaining and time.monotonic() < deadline:
+        remaining = [p for p in remaining if _still_running(p)]
+        if remaining:
+            time.sleep(0.05)
+    return [p for p in remaining if _still_running(p)]
+
+
+def shutdown_match_pool(timeout: float = 10.0, grace: float = 5.0) -> None:
+    """Stop the matcher processes and make sure they are actually gone.
+
+    Called at the end of every scan and again at interpreter exit. Waiting on
+    shutdown() alone is not enough: it can block on a worker mid-block, and a
+    worker that ignored its signals would never be joined at all. So we ask,
+    then wait, then insist.
+
+    Signals go to every survivor at once and then we wait ONCE, rather than
+    escalating one child at a time against a shared deadline. The first version
+    did the latter and reported a process that "would not die": twelve children
+    sharing a five second budget meant the last of them got a zero-second join
+    and one second to be observed dead after a SIGKILL -- on a box whose cores
+    were all still busy. It had been killed; nobody waited long enough to see
+    it go.
+    """
+    global _match_pool, _match_pool_workers
+    with _match_pool_lock:
+        pool, _match_pool, _match_pool_workers = _match_pool, None, 0
+    if pool is None:
+        return
+    children = list(getattr(pool, "_processes", {}).values())
+    try:
+        pool.shutdown(wait=False, cancel_futures=True)
+    except Exception:
+        pass
+
+    alive = _wait_for_exit(children, timeout)
+    for phase, signal_it in (("terminate", "terminate"), ("kill", "kill")):
+        if not alive:
+            break
+        for proc in alive:
+            try:
+                getattr(proc, signal_it)()
+            except Exception:
+                pass
+        # SIGKILL is delivered asynchronously and the machine has just had every
+        # core saturated, so give it real time to be scheduled and reaped.
+        alive = _wait_for_exit(alive, grace)
+        if alive:
+            logger.warning(
+                f"matcher processes still up after {phase}: "
+                f"{[p.pid for p in alive]}"
+            )
+
+    if alive:
+        pids = [p.pid for p in alive]
+        logger.error(
+            f"matcher processes would not die: {pids}. They hold a copy of this "
+            f"process's memory and will not exit on their own; kill them with "
+            f"`kill -9 {' '.join(str(p) for p in pids)}`."
+        )
+
+
+# atexit keeps no readable registry, so record it here too: a test can then
+# assert the registration exists without reaching into CPython internals.
+_ATEXIT_REGISTERED: list = []
+atexit.register(shutdown_match_pool)
+_ATEXIT_REGISTERED.append(shutdown_match_pool)
+
+
+def _match_process_count() -> int:
+    return _env_int("SILNT_SCAN_MATCH_PROCESSES", 1, 1, 32)
+
+
+def describe_match_parallelism() -> str:
+    """How this scan will match, as a phrase for the start-of-scan line.
+
+    Returned rather than logged, so it joins the one line that says how the
+    scan will run instead of being a line of its own. It still says what the
+    switch resolved to either way: three switches on this path have now been
+    read, silently found at their default, and left a scan looking mysteriously
+    slow, so "quieter" must not become "silent about what it read".
+
+    Where it was NOT found is part of that. SILNT_SCAN_MATCH_PROCESSES=12 was
+    once set in .env and reported merely as "unset", which sent someone to set
+    it again in a file already being read.
+    """
+    workers = _match_process_count()
+    cores = os.cpu_count() or 1
+    if workers > 1:
+        src = "env" if os.getenv("SILNT_SCAN_MATCH_PROCESSES") else _dotenv_path()
+        return f"matching across {workers} processes (from {src}, {cores} cores)"
+
+    raw = _setting("SILNT_SCAN_MATCH_PROCESSES")
+
+    # An explicit 1 is a decision, not a misconfiguration. Running the matcher
+    # in-process is the safe choice -- it forks nothing -- and someone who has
+    # chosen it should not be told on every single scan that their setting is
+    # unusable and that they should raise it. Say what is running and stop.
+    if (raw or "").strip() == "1":
+        return f"matching in-process on 1 worker (no forked processes)"
+
+    env_file = _dotenv_path()
+    if raw is None:
+        where = f"not in env nor {env_file}" if env_file else "not in env, no .env found"
+        how = f"unset, {where}"
+    else:
+        how = f"set to {raw!r}, not a usable worker count"
+    suggest = max(1, min(32, cores - 4 if cores > 8 else cores - 1))
+    return (
+        f"matching on 1 worker of {cores} cores "
+        f"(SILNT_SCAN_MATCH_PROCESSES {how}; ={suggest} would use more)"
+    )
+
+
+def _get_match_pool():
+    """The process pool, created on first use rather than at import.
+
+    Built with the fork context deliberately: the children inherit this module
+    already imported, so the matcher unpickles by name without re-importing
+    scan.py -- which cannot be imported outside LNbits at all, since it does
+    `from ..crud import db` at module scope. spawn and forkserver would both
+    re-import it and fail.
+
+    Rebuilt if the worker count changed since it was made, so the switch does
+    not need a restart to take effect once the environment carries it.
+    """
+    global _match_pool, _match_pool_workers
+    workers = _match_process_count()
+    if workers <= 1:
+        return None
+    with _match_pool_lock:
+        if _match_pool is not None and _match_pool_workers != workers:
+            _match_pool.shutdown(wait=False)
+            _match_pool = None
+        if _match_pool is None:
+            _match_pool = concurrent.futures.ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=multiprocessing.get_context("fork"),
+                initializer=_match_worker_init,
+            )
+            _match_pool_workers = workers
+    return _match_pool
+
+
+def _timed_match(fn, *args):
+    """Run the matcher and record how much of its wall time was actually CPU.
+
+    This distinguishes the two reasons matching can be slow, which no other
+    number here can tell apart.
+
+    The scan pipelines: the next batch is fetched while the current one is
+    matched. Fetching is not free CPU -- httpx gunzips the body and json.loads
+    builds a dict per UTXO, on the order of 800 MB of JSON over a long scan --
+    and all of it runs on the event loop thread while the matcher runs on this
+    one. Both hold the GIL, so they do not overlap, they interleave. Measured on
+    a 4-core box with a realistic batch payload parsing beside it, the matcher
+    went from 147.6 to 401.6 us/tweak: 2.7x slower without doing any more work.
+
+    When that happens fetch_seconds still reads near zero, because the await is
+    satisfied instantly -- the work already happened -- so the cost lands on the
+    match phase and the matcher takes the blame for the prefetch's CPU.
+
+    time.thread_time() is this thread's own CPU time, so it does not advance
+    while the GIL is held elsewhere. Comparing it against wall time separates
+    "the matching is expensive" from "the matching is being starved", and those
+    have opposite fixes: a cheaper matcher against a cheaper parse or a
+    separate process.
+
+    The timings are RETURNED rather than added to a stats object, because the
+    same function has to work in a child process, where a mutated stats object
+    would be a copy nobody ever reads.
+    """
+    cpu0, wall0 = time.thread_time(), time.perf_counter()
+    result = fn(*args)
+    return result, time.thread_time() - cpu0, time.perf_counter() - wall0
+
+
 async def _match_in_thread(client, fn, *args):
     """Run the synchronous EC matching off the event loop, and time it.
 
@@ -863,10 +1536,20 @@ async def _match_in_thread(client, fn, *args):
     slow because of the oracle or because of the matching, and that answer
     decides whether anything is worth optimising here at all.
     """
+    client.stats.matcher = _MATCHER_NAMES.get(fn.__name__, fn.__name__)
+    executor = _get_match_pool() or _matcher
+    client.stats.match_workers = _match_pool_workers if executor is not _matcher else 1
     loop = asyncio.get_event_loop()
     started = time.perf_counter()
     try:
-        return await loop.run_in_executor(_matcher, fn, *args)
+        result, cpu, wall = await loop.run_in_executor(
+            executor, _timed_match, fn, *args
+        )
+        # Across several workers these sum over all of them, so the ratio stays
+        # a "was the work actually running" figure rather than a duration.
+        client.stats.match_cpu_seconds += cpu
+        client.stats.match_thread_wall_seconds += wall
+        return result
     finally:
         client.stats.match_seconds += time.perf_counter() - started
 
@@ -1104,23 +1787,36 @@ async def match_range_batch(
 
     # The compute index pairs tweaks with txids, so the cheaper reverse matcher
     # applies. Without it, the forward matcher. Both return the same UTXOs —
-    # tests/test_reverse_matching.py holds them to that.
-    use_reverse = data.compute_index is not None
-    index = data.compute_index if use_reverse else data.tweaks
-    matcher = sync_block_reverse if use_reverse else sync_block
+    # tests/test_reverse_matching.py holds them to that, and
+    # SILNT_SCAN_VERIFY_MATCH checks it against real chain data.
+    client.stats.used_range = True
+    client.stats.used_compute_index = data.compute_index is not None
 
-    results: list = []
-    for height in data.heights:
+    if data.compute_index is not None and _FORWARD_MATCH_ONLY:
+        _warn_forward_forced(len(labels))
+
+    use_reverse = data.compute_index is not None and not _FORWARD_MATCH_ONLY
+    if use_reverse and _VERIFY_MATCH:
+        index, matcher = data.compute_index, sync_block_verified
+    elif use_reverse:
+        index, matcher = data.compute_index, sync_block_reverse
+    elif data.compute_index is not None:
+        # Forced onto the forward matcher, but the fetch brought the compute
+        # index. Its tweaks are the same set, so use them rather than spending
+        # another request on /range/tweaks.
+        index, matcher = data.compute_index, sync_block_forward_from_index
+    else:
+        index, matcher = data.tweaks, sync_block
+
+    async def match_one(height):
         if index is None or height not in index:
             # Absent, not empty. See BlockNotIndexedError.
-            results.append(BlockNotIndexedError(height))
-            continue
+            return BlockNotIndexedError(height)
 
         entries = index[height]
         utxos = data.utxos.get(height) or []
         if not entries or not utxos:
-            results.append([])
-            continue
+            return []
 
         try:
             owned = await _match_in_thread(
@@ -1128,11 +1824,28 @@ async def match_range_batch(
                 entries, utxos, scan_secret_bytes, spend_pub_bytes, labels,
             )
             await _resolve_timestamps(owned, client, network)
-            results.append(owned)
+            return owned
         except Exception as e:
-            results.append(e)
+            return e
 
-    return results
+    # Every block in the batch goes to the executor at once.
+    #
+    # This loop used to await each block before starting the next, which is
+    # correct but hands the executor one task at a time. Against the single
+    # matcher thread that costs nothing -- there is one worker either way -- so
+    # it went unnoticed until there were twelve, at which point eleven of them
+    # sat idle and a 12-process scan took exactly as long as a 1-process scan.
+    #
+    # The symptom to recognise, since both numbers are in the phase line: the
+    # in-thread wall time is SUMMED across workers, so with real concurrency it
+    # should be some multiple of the match phase. Reading LESS than the match
+    # phase means the work was serialised no matter how many workers were
+    # configured.
+    #
+    # gather preserves order, so results stay aligned with data.heights, and
+    # each block still returns its own exception rather than cancelling the
+    # batch.
+    return list(await asyncio.gather(*(match_one(h) for h in data.heights)))
 
 
 async def scan_blocks_range(
@@ -1253,7 +1966,8 @@ async def mark_spent_utxos_batch(
                 status = await get_outspend_status(mempool_base, row["txid"], row["vout"])
                 if status is None:
                     # Unknown — leave as unconfirmed_spent, retry next scan.
-                    logger.info(
+                    # Per outpoint, and it retries on the next scan anyway.
+                    logger.debug(
                         f"{row['txid']}:{row['vout']} short-hash matched at block "
                         f"{height}; outspend unknown — left unconfirmed_spent"
                     )
@@ -1272,7 +1986,9 @@ async def mark_spent_utxos_batch(
                     # block in the same batch may be the one that really spends
                     # it.
                     settled.add((row["txid"], row["vout"]))
-                    logger.info(
+                    # Per spent outpoint, so it scales with the scan. The
+                    # count is in the spent-check phase of the timing line.
+                    logger.debug(
                         f"Confirmed {row['txid']}:{row['vout']} spent (outspend) "
                         f"at block {height}"
                     )
@@ -1371,6 +2087,13 @@ async def scan_wallet(
     happens in here — an oracle timeout, a DB error, the wallet being deleted
     mid-scan — the wallet must not be left looking busy forever. Every caller
     got this wrong at least once, so the guarantee belongs at the source.
+
+    It owns the matcher processes for the same reason. They exist only for the
+    duration of a scan, so they are torn down when one ends rather than left
+    running between scans: a pool kept alive is twelve copies of LNbits' memory
+    sitting idle, and twelve more things to go wrong at shutdown. Forking is
+    cheap — milliseconds against a scan measured in minutes — so there is
+    nothing to gain by keeping them.
     """
     try:
         return await _scan_wallet(
@@ -1383,6 +2106,7 @@ async def scan_wallet(
         )
     finally:
         mark_scan_inactive(wallet_id)
+        shutdown_match_pool()
 
 
 async def _scan_wallet(
@@ -1419,12 +2143,16 @@ async def _scan_wallet(
     scan_started = time.perf_counter()
     start = max(from_height if from_height is not None else wallet.last_height, 1)
     end = to_height if to_height is not None else await oracle.get_chain_tip()
-    logger.info(f"Scanning wallet {wallet_id} blocks {start}–{end}")
 
     saved_addresses = await get_wallet_addresses(wallet_id)
     labels = create_labels(
         scan_secret_bytes, indices=[a.label_index for a in saved_addresses]
     )
+    # One label per saved address on top of the four BIP-352 ones, and the
+    # forward matcher's cost is linear in that count — so it belongs in the
+    # timing line, not just in the matcher's own head.
+    oracle.stats.labels = len(labels)
+    match_plan = describe_match_parallelism()
     addr_label_map: dict[int, str] = {
         a.label_index: a.label
         for a in saved_addresses
@@ -1473,10 +2201,24 @@ async def _scan_wallet(
         # Bigger batches only save requests, and at 3 per batch there is little
         # left to save.
         BATCH_SIZE = min(range_limit, _env_int("SILNT_SCAN_RANGE_BATCH", 25, 1, 1000))
-        logger.info(
-            f"oracle supports block ranges (max {range_limit}); "
-            f"scanning in batches of {BATCH_SIZE}"
-        )
+        scan_plan = f"ranges in batches of {BATCH_SIZE} (oracle max {range_limit})"
+    else:
+        scan_plan = f"BLOCK BY BLOCK in batches of {BATCH_SIZE} (no range endpoints)"
+
+    # One line for how this scan will run, rather than one per thing that was
+    # decided. It carries what the range, matcher and worker lines each used to
+    # say separately, because four lines saying overlapping things is how a
+    # scan log turns into something people stop reading -- and the whole reason
+    # any of this is logged is that a scan once fell back silently and cost two
+    # days to notice.
+    #
+    # The failure paths are untouched and still warn on their own: an oracle
+    # that cannot be reached, a range limit that will not parse, the forward
+    # matcher forced on. Quiet when it is working, loud when it is not.
+    logger.info(
+        f"Scanning wallet {wallet_id} blocks {start}–{end} "
+        f"({end - start + 1} blocks) | {scan_plan} | {match_plan}"
+    )
 
     def batch_at(batch_start: int) -> list[int]:
         return list(
@@ -1634,7 +2376,11 @@ async def _scan_wallet(
                     new_count, new_amount = await insert_utxos_for_wallet(wallet_id, result)
                     total_found += new_count
                     total_found_amount += new_amount
-                    logger.info(
+                    # Per block, so it scales with the scan: a rescan of a busy
+                    # wallet buries the lines that matter under hundreds of
+                    # these. The totals are in "Scan done" either way, and
+                    # anyone chasing a specific block wants DEBUG anyway.
+                    logger.debug(
                         f"Block {h}: {len(result)} detected, {new_count} new"
                     )
                 except Exception as ins_err:
@@ -1686,10 +2432,10 @@ async def _scan_wallet(
     )
     balance = sum(r["amount"] for r in unspent)
     await update_balance(wallet_id, balance)
-    try:        
-        newly_flagged = await evaluate_dust_for_wallet(wallet_id)
-        if newly_flagged > 0:
-            logger.info(f"Wallet {wallet_id}: flagged {newly_flagged} new dust UTXO(s)")
+    try:
+        # evaluate_dust_for_wallet already logs this exact sentence, so saying
+        # it again here printed it twice per scan.
+        await evaluate_dust_for_wallet(wallet_id)
     except Exception as e:
         logger.warning(f"Dust evaluation failed for {wallet_id}: {e}")
     logger.info(
