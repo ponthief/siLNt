@@ -3,7 +3,7 @@ scan.py — Silent Payments blockchain scanner for the silnt LNbits extension.
 """
 
 from __future__ import annotations
-import asyncio, concurrent.futures, hashlib, multiprocessing, os, pathlib, struct, threading, time
+import asyncio, atexit, concurrent.futures, ctypes, hashlib, multiprocessing, os, pathlib, signal, struct, threading, time
 from dataclasses import dataclass
 from typing import Optional
 import coincurve, httpx
@@ -1302,6 +1302,81 @@ _match_pool_workers = 0
 _match_pool_lock = threading.Lock()
 
 
+def _match_worker_init():
+    """Make a forked matcher child safe to kill. Runs once per child.
+
+    Two inherited things conspire to outlive the server, and both have to go:
+
+    Ctrl-C sends SIGINT to the whole foreground process GROUP, children
+    included. A fork inherits the parent's signal handlers, so these children
+    woke up in uvicorn's SIGINT handler, which sets a shutdown flag on a server
+    object that does not exist in a child. They therefore swallowed the
+    interrupt and kept running -- twelve of them, holding a copy of LNbits'
+    memory each, after the server was gone. Restoring the default disposition
+    means an interrupt kills them like any other process.
+
+    And SIGKILL or a crash of the parent sends nothing at all, so PR_SET_PDEATHSIG
+    asks the kernel to kill this child when its parent dies. Linux-only and
+    best effort; the atexit and per-scan shutdown below cover the ordinary
+    paths, and this covers the ones no handler can.
+    """
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, signal.SIG_DFL)
+        except (ValueError, OSError):
+            pass
+    try:
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGKILL)
+    except Exception:
+        pass
+    # The parent may already have died between the fork and here, in which case
+    # PR_SET_PDEATHSIG has nothing left to fire.
+    if os.getppid() == 1:
+        os._exit(0)
+
+
+def shutdown_match_pool(timeout: float = 5.0) -> None:
+    """Stop the matcher processes and make sure they are actually gone.
+
+    Called at the end of every scan and again at interpreter exit. Waiting on
+    shutdown() alone is not enough: it can block on a worker mid-block, and a
+    worker that ignored its signals would never be joined at all. So we ask,
+    then wait, then insist.
+    """
+    global _match_pool, _match_pool_workers
+    with _match_pool_lock:
+        pool, _match_pool, _match_pool_workers = _match_pool, None, 0
+    if pool is None:
+        return
+    children = list(getattr(pool, "_processes", {}).values())
+    try:
+        pool.shutdown(wait=False, cancel_futures=True)
+    except Exception:
+        pass
+    deadline = time.monotonic() + timeout
+    for proc in children:
+        try:
+            proc.join(max(0.0, deadline - time.monotonic()))
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(1.0)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(1.0)
+        except Exception:
+            pass
+    alive = [p.pid for p in children if p.is_alive()]
+    if alive:
+        logger.error(f"matcher processes would not die: {alive}")
+
+
+# atexit keeps no readable registry, so record it here too: a test can then
+# assert the registration exists without reaching into CPython internals.
+_ATEXIT_REGISTERED: list = []
+atexit.register(shutdown_match_pool)
+_ATEXIT_REGISTERED.append(shutdown_match_pool)
+
+
 def _match_process_count() -> int:
     return _env_int("SILNT_SCAN_MATCH_PROCESSES", 1, 1, 32)
 
@@ -1369,6 +1444,7 @@ def _get_match_pool():
             _match_pool = concurrent.futures.ProcessPoolExecutor(
                 max_workers=workers,
                 mp_context=multiprocessing.get_context("fork"),
+                initializer=_match_worker_init,
             )
             _match_pool_workers = workers
     return _match_pool
@@ -1962,6 +2038,13 @@ async def scan_wallet(
     happens in here — an oracle timeout, a DB error, the wallet being deleted
     mid-scan — the wallet must not be left looking busy forever. Every caller
     got this wrong at least once, so the guarantee belongs at the source.
+
+    It owns the matcher processes for the same reason. They exist only for the
+    duration of a scan, so they are torn down when one ends rather than left
+    running between scans: a pool kept alive is twelve copies of LNbits' memory
+    sitting idle, and twelve more things to go wrong at shutdown. Forking is
+    cheap — milliseconds against a scan measured in minutes — so there is
+    nothing to gain by keeping them.
     """
     try:
         return await _scan_wallet(
@@ -1974,6 +2057,7 @@ async def scan_wallet(
         )
     finally:
         mark_scan_inactive(wallet_id)
+        shutdown_match_pool()
 
 
 async def _scan_wallet(

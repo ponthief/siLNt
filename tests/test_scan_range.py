@@ -939,6 +939,155 @@ async def test_batch_results_stay_aligned_with_their_heights(monkeypatch):
             assert not isinstance(results[i], Exception), (h, results[i])
 
 
+# --- matcher processes must not outlive the server --------------------------
+#
+# Ctrl-C on LNbits left twelve matcher processes running, each holding a copy
+# of the server's memory. Ctrl-C signals the whole foreground process GROUP, and
+# a fork inherits the parent's signal handlers, so the children woke up inside
+# uvicorn's SIGINT handler — which sets a shutdown flag on a server object that
+# does not exist in a child. They swallowed the interrupt and kept going. The
+# pool was also never shut down at all: no teardown after a scan, no atexit.
+
+
+def _child_signal_report(_ignored):
+    import signal as s
+    return {
+        "sigint": s.getsignal(s.SIGINT) is s.SIG_DFL,
+        "sigterm": s.getsignal(s.SIGTERM) is s.SIG_DFL,
+        "pid": os.getpid(),
+    }
+
+
+def test_forked_matchers_do_not_inherit_the_servers_signal_handlers(monkeypatch):
+    """Goes through _get_match_pool, not through a pool the test builds itself.
+
+    Testing _match_worker_init directly would pass even if nothing ever called
+    it — which is the shape of the bug: the function is only worth anything if
+    the pool is actually wired to run it.
+    """
+    import signal as s
+
+    def server_handler(signum, frame):     # stands in for uvicorn's
+        pass
+
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "1")
+    monkeypatch.setattr(scan, "_match_pool", None)
+    monkeypatch.setattr(scan, "_match_pool_workers", 0)
+    # _get_match_pool declines at 1 worker, so ask for 2 and use either child.
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "2")
+
+    previous = s.getsignal(s.SIGINT)
+    s.signal(s.SIGINT, server_handler)
+    try:
+        pool = scan._get_match_pool()
+        assert pool is not None
+        try:
+            report = pool.submit(_child_signal_report, None).result(timeout=30)
+        finally:
+            scan.shutdown_match_pool()
+    finally:
+        s.signal(s.SIGINT, previous)
+
+    assert report["sigint"], (
+        "the child inherited the server's SIGINT handler; Ctrl-C signals the "
+        "whole process group and the child would swallow it and keep running"
+    )
+    assert report["sigterm"], "the child inherited the server's SIGTERM handler"
+
+
+def test_shutdown_match_pool_leaves_no_children_behind(monkeypatch):
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "3")
+    monkeypatch.setattr(scan, "_match_pool", None)
+    monkeypatch.setattr(scan, "_match_pool_workers", 0)
+
+    pool = scan._get_match_pool()
+    assert pool is not None
+    # Force the workers to actually exist rather than be created on demand.
+    assert pool.submit(os.getpid).result(timeout=30) != os.getpid()
+    pids = [p.pid for p in pool._processes.values()]
+    assert len(pids) == 3, pids
+
+    scan.shutdown_match_pool()
+
+    assert scan._match_pool is None
+    assert scan._match_pool_workers == 0
+    deadline = time.time() + 10
+    alive = pids
+    while time.time() < deadline:
+        alive = [p for p in pids if _pid_alive(p)]
+        if not alive:
+            break
+        time.sleep(0.05)
+    assert not alive, f"matcher processes survived shutdown: {alive}"
+
+
+def test_shutdown_match_pool_is_safe_when_there_is_no_pool(monkeypatch):
+    monkeypatch.setattr(scan, "_match_pool", None)
+    scan.shutdown_match_pool()          # must not raise
+    scan.shutdown_match_pool()
+
+
+def test_shutdown_is_registered_for_interpreter_exit():
+    """Belt and braces for the paths a scan's own teardown cannot reach."""
+    assert scan.shutdown_match_pool in scan._ATEXIT_REGISTERED
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    # A zombie is not running; reap it if it is ours.
+    try:
+        gone, _ = os.waitpid(pid, os.WNOHANG)
+        if gone == pid:
+            return False
+    except ChildProcessError:
+        pass
+    except OSError:
+        pass
+    return True
+
+
+@pytest.mark.asyncio
+async def test_a_finished_scan_leaves_no_matcher_processes(monkeypatch):
+    """The teardown has to be on the scan's own exit path, not just atexit.
+
+    A server that runs for weeks and scans daily would otherwise accumulate a
+    pool per scan, or hold twelve idle copies of LNbits between them.
+    """
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "2")
+    monkeypatch.setattr(scan, "_match_pool", None)
+    monkeypatch.setattr(scan, "_match_pool_workers", 0)
+
+    pool = scan._get_match_pool()
+    assert pool.submit(os.getpid).result(timeout=30) != os.getpid()
+    pids = [p.pid for p in pool._processes.values()]
+
+    async def boom(**_kwargs):
+        raise RuntimeError("oracle unreachable")
+
+    monkeypatch.setattr(scan, "_scan_wallet", boom)
+    monkeypatch.setattr(scan, "mark_scan_inactive", lambda _w: None)
+
+    with pytest.raises(RuntimeError):
+        await scan.scan_wallet("w1", "00" * 32)
+
+    assert scan._match_pool is None, (
+        "a scan that raised left its matcher pool running"
+    )
+    deadline = time.time() + 10
+    alive = pids
+    while time.time() < deadline:
+        alive = [p for p in pids if _pid_alive(p)]
+        if not alive:
+            break
+        time.sleep(0.05)
+    assert not alive, f"matcher processes outlived the scan: {alive}"
+
+
 @pytest.mark.asyncio
 async def test_single_worker_is_the_default(monkeypatch):
     """Matching across processes forks a live LNbits. It must be opt-in."""
