@@ -3,7 +3,7 @@ scan.py — Silent Payments blockchain scanner for the silnt LNbits extension.
 """
 
 from __future__ import annotations
-import asyncio, concurrent.futures, hashlib, os, struct, time
+import asyncio, concurrent.futures, hashlib, multiprocessing, os, struct, threading, time
 from dataclasses import dataclass
 from typing import Optional
 import coincurve, httpx
@@ -840,6 +840,8 @@ class OracleStats:
     # than computing -- see _timed_match.
     match_cpu_seconds: float = 0.0
     match_thread_wall_seconds: float = 0.0
+    # How many workers the matching ran across (1 = the single thread).
+    match_workers: int = 1
 
     def as_dict(self) -> dict:
         return {
@@ -861,6 +863,7 @@ class OracleStats:
             "labels": self.labels,
             "match_cpu_seconds": round(self.match_cpu_seconds, 2),
             "match_thread_wall_seconds": round(self.match_thread_wall_seconds, 2),
+            "match_workers": self.match_workers,
             "spent_seconds": round(self.spent_seconds, 2),
             "persist_seconds": round(self.persist_seconds, 2),
             "unaccounted_seconds": round(
@@ -940,11 +943,22 @@ class OracleStats:
                 "compute-bound" if busy >= 0.8
                 else f"STARVED by other threads, {1 / max(busy, 1e-9):.1f}x slower"
             )
+            where = (
+                "in-thread" if self.match_workers <= 1
+                else f"across {self.match_workers} processes"
+            )
             matcher_note += (
                 f" | matcher CPU {self.match_cpu_seconds:.1f}s of "
-                f"{self.match_thread_wall_seconds:.1f}s in-thread "
+                f"{self.match_thread_wall_seconds:.1f}s {where} "
                 f"({busy * 100:.0f}% busy, {verdict})"
             )
+            # A compute-bound matcher on one worker is leaving cores idle. Say
+            # what to do about it, once, in the line that shows the symptom.
+            if self.match_workers <= 1 and busy >= 0.8:
+                matcher_note += (
+                    " — single worker; SILNT_SCAN_MATCH_PROCESSES=<cores-1> "
+                    "parallelises this"
+                )
 
         return (
             f"path {path}{matcher_note} | {work} "
@@ -1175,7 +1189,57 @@ _MATCHER_NAMES = {
 }
 
 
-def _timed_match(stats, fn, *args):
+# Matching across processes, for boxes with cores to spare.
+#
+# The matcher is compute-bound on ONE core and the GIL is the only reason it
+# cannot use the others -- threads were measured making it worse, not better
+# (see _matcher above). Processes do not share a GIL. They do not share memory
+# either, so every block's utxos and compute-index entries are pickled across;
+# measured on a 4-core box at the shape of a real mainnet scan (161 tweaks and
+# ~2.3 outputs per tweaked tx, 25-block batches, 1.4 MB pickled per batch), that
+# transfer is paid for several times over:
+#
+#   serial (one thread)   129.1 us/tweak
+#   process pool x2        69.5 us/tweak   1.86x
+#   process pool x3        51.0 us/tweak   2.53x
+#   process pool x4        37.9 us/tweak   3.40x
+#
+# Off by default. It forks a live LNbits process, and forking a process that
+# holds locks in other threads is a real hazard even though the children here
+# only call pure functions; it also multiplies the memory a scan needs. Someone
+# turning this on should be choosing to, and should leave a core for LNbits
+# itself. SILNT_SCAN_MATCH_PROCESSES=3 on a 4-core box is the shape to want.
+_MATCH_PROCESSES = _env_int("SILNT_SCAN_MATCH_PROCESSES", 1, 1, 32)
+_match_pool = None
+_match_pool_lock = threading.Lock()
+
+
+def _get_match_pool():
+    """The process pool, created on first use rather than at import.
+
+    Built with the fork context deliberately: the children inherit this module
+    already imported, so the matcher unpickles by name without re-importing
+    scan.py -- which cannot be imported outside LNbits at all, since it does
+    `from ..crud import db` at module scope. spawn and forkserver would both
+    re-import it and fail.
+    """
+    global _match_pool
+    if _MATCH_PROCESSES <= 1:
+        return None
+    with _match_pool_lock:
+        if _match_pool is None:
+            logger.info(
+                f"matching across {_MATCH_PROCESSES} processes "
+                "(SILNT_SCAN_MATCH_PROCESSES)"
+            )
+            _match_pool = concurrent.futures.ProcessPoolExecutor(
+                max_workers=_MATCH_PROCESSES,
+                mp_context=multiprocessing.get_context("fork"),
+            )
+    return _match_pool
+
+
+def _timed_match(fn, *args):
     """Run the matcher and record how much of its wall time was actually CPU.
 
     This distinguishes the two reasons matching can be slow, which no other
@@ -1198,13 +1262,14 @@ def _timed_match(stats, fn, *args):
     "the matching is expensive" from "the matching is being starved", and those
     have opposite fixes: a cheaper matcher against a cheaper parse or a
     separate process.
+
+    The timings are RETURNED rather than added to a stats object, because the
+    same function has to work in a child process, where a mutated stats object
+    would be a copy nobody ever reads.
     """
     cpu0, wall0 = time.thread_time(), time.perf_counter()
-    try:
-        return fn(*args)
-    finally:
-        stats.match_cpu_seconds += time.thread_time() - cpu0
-        stats.match_thread_wall_seconds += time.perf_counter() - wall0
+    result = fn(*args)
+    return result, time.thread_time() - cpu0, time.perf_counter() - wall0
 
 
 async def _match_in_thread(client, fn, *args):
@@ -1215,12 +1280,19 @@ async def _match_in_thread(client, fn, *args):
     decides whether anything is worth optimising here at all.
     """
     client.stats.matcher = _MATCHER_NAMES.get(fn.__name__, fn.__name__)
+    client.stats.match_workers = _MATCH_PROCESSES
+    executor = _get_match_pool() or _matcher
     loop = asyncio.get_event_loop()
     started = time.perf_counter()
     try:
-        return await loop.run_in_executor(
-            _matcher, _timed_match, client.stats, fn, *args
+        result, cpu, wall = await loop.run_in_executor(
+            executor, _timed_match, fn, *args
         )
+        # Across several workers these sum over all of them, so the ratio stays
+        # a "was the work actually running" figure rather than a duration.
+        client.stats.match_cpu_seconds += cpu
+        client.stats.match_thread_wall_seconds += wall
+        return result
     finally:
         client.stats.match_seconds += time.perf_counter() - started
 

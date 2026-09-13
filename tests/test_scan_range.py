@@ -818,7 +818,6 @@ async def test_starvation_is_detected_when_another_thread_burns_cpu():
     index = [{"txid": u["txid"], "tweak": tweak_hex} for u in utxos]
 
     def measure(with_load: bool):
-        stats = scan.OracleStats()
         stop = threading.Event()
         t = None
         if with_load:
@@ -829,15 +828,15 @@ async def test_starvation_is_detected_when_another_thread_burns_cpu():
             t = threading.Thread(target=spin, daemon=True)
             t.start()
         try:
-            scan._timed_match(
-                stats, scan.sync_block_reverse,
+            _, cpu, wall = scan._timed_match(
+                scan.sync_block_reverse,
                 index, utxos, SCAN_SECRET, SPEND_PUB, [],
             )
         finally:
             stop.set()
             if t:
                 t.join(timeout=5)
-        return stats.match_cpu_seconds / stats.match_thread_wall_seconds
+        return cpu / wall
 
     quiet = measure(False)
     loaded = measure(True)
@@ -847,6 +846,85 @@ async def test_starvation_is_detected_when_another_thread_burns_cpu():
         f"contention invisible: {loaded:.0%} busy under load vs "
         f"{quiet:.0%} idle — the starvation verdict would never fire"
     )
+
+
+@pytest.mark.asyncio
+async def test_single_worker_is_the_default():
+    """Matching across processes forks a live LNbits. It must be opt-in."""
+    assert scan._MATCH_PROCESSES == 1, (
+        "process matching defaulted on; it forks the server and multiplies the "
+        "memory a scan needs, so it has to be a choice"
+    )
+    assert scan._get_match_pool() is None
+
+
+def test_phases_points_at_the_idle_cores_when_matching_is_compute_bound():
+    stats = scan.OracleStats()
+    stats.wall_seconds = 93.3
+    stats.used_range = True
+    stats.matcher = "reverse"
+    stats.match_workers = 1
+    stats.match_thread_wall_seconds = 90.3
+    stats.match_cpu_seconds = 80.4
+
+    line = stats.phases()
+    assert "compute-bound" in line, line
+    assert "SILNT_SCAN_MATCH_PROCESSES" in line, line
+
+
+def test_phases_stops_advertising_processes_once_they_are_in_use():
+    stats = scan.OracleStats()
+    stats.wall_seconds = 30.0
+    stats.used_range = True
+    stats.matcher = "reverse"
+    stats.match_workers = 3
+    stats.match_thread_wall_seconds = 80.0   # summed across workers
+    stats.match_cpu_seconds = 76.0
+
+    line = stats.phases()
+    assert "across 3 processes" in line, line
+    assert "SILNT_SCAN_MATCH_PROCESSES" not in line, line
+
+
+@pytest.mark.asyncio
+async def test_matching_across_processes_finds_the_same_payment(monkeypatch):
+    """A faster matcher that loses outputs is worse than a slow one.
+
+    Runs the real pool rather than a mock: pickling the matcher and its
+    arguments across a fork is the part that can silently break, and a mock
+    would prove nothing about it.
+    """
+    tweak_hex, output_hex = payment_to_us(b"\x88" * 32)
+    utxo = {
+        "txid": "ab" * 32, "vout": 0, "amount": 4_200,
+        "pubkey": output_hex, "timestamp": 1_700_000_000,
+    }
+
+    serial = await _match_once(tweak_hex, utxo)
+
+    monkeypatch.setattr(scan, "_MATCH_PROCESSES", 2)
+    monkeypatch.setattr(scan, "_match_pool", None)
+    try:
+        parallel = await _match_once(tweak_hex, utxo)
+    finally:
+        pool = scan._match_pool
+        if pool is not None:
+            pool.shutdown(wait=True)
+        monkeypatch.setattr(scan, "_match_pool", None)
+
+    assert scan._owned_fingerprint(parallel) == scan._owned_fingerprint(serial), (
+        "matching across processes did not find what the single worker found"
+    )
+    assert len(parallel) == 1 and parallel[0].amount == 4_200
+
+
+async def _match_once(tweak_hex, utxo):
+    client = RecordingClient(all_range_routes([100], tweak_hex, utxo))
+    data = await scan.fetch_range_batch([100], client)
+    results = await scan.match_range_batch(
+        data, client, SCAN_SECRET, SPEND_PUB, [], "signet"
+    )
+    return results[0]
 
 
 @pytest.mark.asyncio
