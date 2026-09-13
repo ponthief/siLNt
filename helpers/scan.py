@@ -3,7 +3,7 @@ scan.py — Silent Payments blockchain scanner for the silnt LNbits extension.
 """
 
 from __future__ import annotations
-import asyncio, concurrent.futures, hashlib, multiprocessing, os, struct, threading, time
+import asyncio, concurrent.futures, hashlib, multiprocessing, os, pathlib, struct, threading, time
 from dataclasses import dataclass
 from typing import Optional
 import coincurve, httpx
@@ -661,14 +661,81 @@ _http: Optional[httpx.AsyncClient] = None
 # connection can serve whatever tweaks and UTXOs they like, which shows a user
 # the wrong balance and reveals which blocks they are interested in. It cannot
 # steal keys — scanning never sees a spend key — but it is not nothing.
+
+def _dotenv_path() -> Optional[pathlib.Path]:
+    """The .env file LNbits was started with, if there is one.
+
+    LNbits reads .env through pydantic-settings, which parses the file into its
+    own Settings object and does NOT export the values to os.environ. So a
+    SILNT_* switch written into .env -- the obvious place to put it, and where
+    every other LNbits setting goes -- is read by nobody: pydantic ignores keys
+    it has no field for, and os.getenv never sees them.
+
+    That is not a hypothetical. SILNT_SCAN_MATCH_PROCESSES=12 was set in .env,
+    LNbits was restarted, and the scan still ran on one worker reporting the
+    variable unset, because it was: in the file, not in the environment.
+    """
+    explicit = os.getenv("LNBITS_ENV_FILE")
+    if explicit:
+        p = pathlib.Path(explicit)
+        return p if p.is_file() else None
+    here = pathlib.Path(__file__).resolve()
+    for base in (pathlib.Path.cwd(), *here.parents[:6]):
+        candidate = base / ".env"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _setting(name: str) -> Optional[str]:
+    """A SILNT_* switch, from the environment or from LNbits' .env file.
+
+    The environment wins, so an operator can still override the file for one
+    run. Only SILNT_ keys are taken from the file: this is a config lookup, not
+    a dotenv loader, and it has no business reading anybody's database URL or
+    API keys, let alone pushing them into os.environ where something else might
+    log them.
+
+    Re-read per call rather than cached. It is a handful of lines of text a few
+    times per scan, and caching it would mean editing .env needed a restart to
+    take effect -- which is most of the problem this exists to solve.
+    """
+    from_env = os.getenv(name)
+    if from_env is not None:
+        return from_env
+    if not name.startswith("SILNT_"):
+        return None
+    path = _dotenv_path()
+    if path is None:
+        return None
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() != name:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        return value
+    return None
+
+
+def _flag(name: str) -> bool:
+    return (_setting(name) or "").strip().lower() in ("1", "true", "yes")
+
+
 # Overridable so a deployment with a properly certificated oracle can turn it
 # on without a code change.
-_VERIFY_TLS = os.getenv("SILNT_ORACLE_VERIFY_TLS", "").lower() in ("1", "true", "yes")
+_VERIFY_TLS = _flag("SILNT_ORACLE_VERIFY_TLS")
 
 # Opt-in, because the path it enables has never run. See the note in scan_block.
-_USE_COMPUTE_INDEX = os.getenv("SILNT_SCAN_COMPUTE_INDEX", "").lower() in (
-    "1", "true", "yes",
-)
+_USE_COMPUTE_INDEX = _flag("SILNT_SCAN_COMPUTE_INDEX")
 
 # Force the forward matcher even where the oracle offers the compute index.
 #
@@ -676,9 +743,7 @@ _USE_COMPUTE_INDEX = os.getenv("SILNT_SCAN_COMPUTE_INDEX", "").lower() in (
 # longer-exercised path, and if a balance ever looks wrong this is the first
 # thing to try: it answers "is the new matcher losing outputs" without
 # rebuilding or downgrading anything.
-_FORWARD_MATCH_ONLY = os.getenv("SILNT_SCAN_FORWARD_MATCH", "").lower() in (
-    "1", "true", "yes",
-)
+_FORWARD_MATCH_ONLY = _flag("SILNT_SCAN_FORWARD_MATCH")
 
 # Run BOTH matchers on every block and report where they disagree.
 #
@@ -687,9 +752,7 @@ _FORWARD_MATCH_ONLY = os.getenv("SILNT_SCAN_FORWARD_MATCH", "").lower() in (
 # paths actually agree — which is the only question that matters when a wallet
 # reports less than it should. Disagreements are logged loudly and the FORWARD
 # result is used, because it is the one with the longer history.
-_VERIFY_MATCH = os.getenv("SILNT_SCAN_VERIFY_MATCH", "").lower() in (
-    "1", "true", "yes",
-)
+_VERIFY_MATCH = _flag("SILNT_SCAN_VERIFY_MATCH")
 
 _warned_forward_forced = False
 
@@ -727,7 +790,7 @@ def _warn_forward_forced(n_labels: int) -> None:
 
 def _env_int(name: str, default: int, lo: int, hi: int) -> int:
     try:
-        return max(lo, min(hi, int(os.getenv(name, "") or default)))
+        return max(lo, min(hi, int(_setting(name) or default)))
     except ValueError:
         return default
 
@@ -1238,20 +1301,29 @@ def report_match_parallelism() -> int:
     workers = _match_process_count()
     cores = os.cpu_count() or 1
     if workers > 1:
+        src = "environment" if os.getenv("SILNT_SCAN_MATCH_PROCESSES") \
+            else f"{_dotenv_path()}"
         logger.info(
             f"matching across {workers} processes "
-            f"(SILNT_SCAN_MATCH_PROCESSES={workers}, {cores} cores)"
+            f"(SILNT_SCAN_MATCH_PROCESSES={workers} from {src}, {cores} cores)"
         )
     else:
-        raw = os.getenv("SILNT_SCAN_MATCH_PROCESSES")
-        how = "unset" if raw is None else f"set to {raw!r}"
+        raw = _setting("SILNT_SCAN_MATCH_PROCESSES")
+        env_file = _dotenv_path()
+        if raw is None:
+            # Say where it looked. "unset" on its own sent someone to set it in
+            # a place that was already being read.
+            where = f"not in the environment nor in {env_file}" if env_file \
+                else "not in the environment, and no .env file was found"
+            how = f"unset ({where})"
+        else:
+            how = f"set to {raw!r}, which is not a usable worker count"
         suggest = max(1, min(32, cores - 4 if cores > 8 else cores - 1))
         logger.info(
             f"matching on a single worker (SILNT_SCAN_MATCH_PROCESSES is {how}; "
             f"this box has {cores} cores). Matching is the whole cost of a scan "
             f"and one worker uses one core; SILNT_SCAN_MATCH_PROCESSES={suggest} "
-            "would use more. It must be set in the environment of the process "
-            "running LNbits, not just in a shell."
+            "would use more."
         )
     return workers
 

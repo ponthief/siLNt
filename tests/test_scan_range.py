@@ -10,6 +10,7 @@ to everything downstream, and the difference is somebody's money.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 
 import httpx
@@ -857,6 +858,99 @@ async def test_single_worker_is_the_default(monkeypatch):
         "memory a scan needs, so it has to be a choice"
     )
     assert scan._get_match_pool() is None
+
+
+# --- .env has to work, because that is where LNbits settings live -----------
+#
+# LNbits reads .env through pydantic-settings, which parses the file into its
+# own Settings object and never exports to os.environ. A SILNT_* key in .env is
+# therefore read by nobody: pydantic ignores fields it does not know about, and
+# os.getenv never sees it. SILNT_SCAN_MATCH_PROCESSES=12 was set in .env, LNbits
+# was restarted, and the scan still ran on one worker calling the variable
+# unset — which was true, and useless.
+
+
+def test_setting_is_read_from_the_dotenv_file(monkeypatch, tmp_path):
+    env = tmp_path / ".env"
+    env.write_text(
+        "# LNbits config\n"
+        "LNBITS_ADMIN_UI=true\n"
+        "SILNT_SCAN_MATCH_PROCESSES=12\n"
+    )
+    monkeypatch.setenv("LNBITS_ENV_FILE", str(env))
+    monkeypatch.delenv("SILNT_SCAN_MATCH_PROCESSES", raising=False)
+
+    assert scan._setting("SILNT_SCAN_MATCH_PROCESSES") == "12"
+    assert scan._match_process_count() == 12
+
+
+def test_environment_beats_the_dotenv_file(monkeypatch, tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("SILNT_SCAN_MATCH_PROCESSES=12\n")
+    monkeypatch.setenv("LNBITS_ENV_FILE", str(env))
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "3")
+
+    assert scan._match_process_count() == 3, (
+        "the file overrode the environment; an operator cannot then override "
+        "the file for a single run"
+    )
+
+
+def test_dotenv_values_may_be_quoted(monkeypatch, tmp_path):
+    env = tmp_path / ".env"
+    env.write_text('SILNT_SCAN_MATCH_PROCESSES="8"\n')
+    monkeypatch.setenv("LNBITS_ENV_FILE", str(env))
+    monkeypatch.delenv("SILNT_SCAN_MATCH_PROCESSES", raising=False)
+    assert scan._match_process_count() == 8
+
+
+def test_dotenv_flags_work_too(monkeypatch, tmp_path):
+    """Every switch had this defect, not only the new one."""
+    env = tmp_path / ".env"
+    env.write_text("SILNT_SCAN_FORWARD_MATCH=1\n")
+    monkeypatch.setenv("LNBITS_ENV_FILE", str(env))
+    monkeypatch.delenv("SILNT_SCAN_FORWARD_MATCH", raising=False)
+    assert scan._flag("SILNT_SCAN_FORWARD_MATCH") is True
+
+
+def test_only_silnt_keys_are_taken_from_the_dotenv_file(monkeypatch, tmp_path):
+    """This is a config lookup, not a dotenv loader.
+
+    .env holds database URLs and API keys. Reading one key we own is fine;
+    reading anything else — or exporting the file into os.environ, where some
+    other component might log it — is not ours to do.
+    """
+    env = tmp_path / ".env"
+    env.write_text(
+        "LNBITS_DATABASE_URL=postgres://user:hunter2@db/lnbits\n"
+        "NOSTR_PRIVATE_KEY=deadbeef\n"
+        "SILNT_SCAN_MATCH_PROCESSES=4\n"
+    )
+    monkeypatch.setenv("LNBITS_ENV_FILE", str(env))
+
+    assert scan._setting("SILNT_SCAN_MATCH_PROCESSES") == "4"
+    assert scan._setting("LNBITS_DATABASE_URL") is None
+    assert scan._setting("NOSTR_PRIVATE_KEY") is None
+    assert "NOSTR_PRIVATE_KEY" not in os.environ
+    assert "LNBITS_DATABASE_URL" not in os.environ
+
+
+def test_a_missing_dotenv_file_is_not_an_error(monkeypatch, tmp_path):
+    monkeypatch.setenv("LNBITS_ENV_FILE", str(tmp_path / "nope.env"))
+    monkeypatch.delenv("SILNT_SCAN_MATCH_PROCESSES", raising=False)
+    assert scan._setting("SILNT_SCAN_MATCH_PROCESSES") is None
+    assert scan._match_process_count() == 1
+
+
+def test_dotenv_is_reread_so_an_edit_does_not_need_a_restart(monkeypatch, tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("SILNT_SCAN_MATCH_PROCESSES=2\n")
+    monkeypatch.setenv("LNBITS_ENV_FILE", str(env))
+    monkeypatch.delenv("SILNT_SCAN_MATCH_PROCESSES", raising=False)
+    assert scan._match_process_count() == 2
+
+    env.write_text("SILNT_SCAN_MATCH_PROCESSES=6\n")
+    assert scan._match_process_count() == 6, "the file was cached at first read"
 
 
 def test_worker_count_is_read_per_scan_not_at_import(monkeypatch):
