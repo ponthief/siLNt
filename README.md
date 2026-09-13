@@ -347,6 +347,13 @@ Real parallelism needs processes, not threads. Worth doing only after the
 per-tweak cost itself comes down — and the way to do that is
 `SILNT_SCAN_COMPUTE_INDEX`, which moves the work to the oracle entirely.
 
+Set these in **LNbits' `.env`** (the same file as `LNBITS_ADMIN_UI` and friends),
+or as real environment variables — either works. They are read with the
+extension's `silnt_env` resolver, which checks the process environment first and
+then parses the `.env` LNbits actually loaded, because some deployments load
+that file into pydantic settings without exporting it to `os.environ`. A
+restart is needed for a change to take effect; they are read once at import.
+
 | Variable | Default | What it does |
 |---|---|---|
 | `SILNT_SCAN_BATCH_SIZE` | `24` | Blocks scanned concurrently. Lower it if the oracle starts returning timeouts or 429s; the ceiling is the HTTP pool's `max_connections` (64). |

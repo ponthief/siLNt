@@ -20,6 +20,7 @@ from ..crud import (
     update_balance,
     ensure_labeled_address_row
 )
+from .appenv import silnt_env
 from .dust_check import evaluate_dust_for_wallet
 from .wallet import generate_labeled_sp_address, get_spend_pub_from_secret
 
@@ -429,7 +430,13 @@ _http: Optional[httpx.AsyncClient] = None
 # steal keys — scanning never sees a spend key — but it is not nothing.
 # Overridable so a deployment with a properly certificated oracle can turn it
 # on without a code change.
-_VERIFY_TLS = os.getenv("SILNT_ORACLE_VERIFY_TLS", "").lower() in ("1", "true", "yes")
+# Read through silnt_env, NOT os.getenv. Some LNbits deployments load .env into
+# pydantic settings without exporting it to os.environ, so a SILNT_* line in the
+# .env would be invisible to os.getenv and the setting would silently do nothing
+# — the failure being that you set it, see no change, and conclude the feature
+# is broken. silnt_env falls back to parsing the .env LNbits actually loaded;
+# it is what the rest of the extension already uses (see device_auth.py).
+_VERIFY_TLS = silnt_env("SILNT_ORACLE_VERIFY_TLS").lower() in ("1", "true", "yes")
 
 # Opt-in, because the path it enables has never run. See the note in scan_block.
 #
@@ -440,14 +447,14 @@ _VERIFY_TLS = os.getenv("SILNT_ORACLE_VERIFY_TLS", "").lower() in ("1", "true", 
 #   1 / true   compute-index only. One oracle request per block instead of
 #              three, which on a local oracle at ~28ms of service time per
 #              request is most of a scan.
-_COMPUTE_INDEX_MODE = os.getenv("SILNT_SCAN_COMPUTE_INDEX", "").strip().lower()
+_COMPUTE_INDEX_MODE = silnt_env("SILNT_SCAN_COMPUTE_INDEX").strip().lower()
 _USE_COMPUTE_INDEX = _COMPUTE_INDEX_MODE in ("1", "true", "yes")
 _VERIFY_COMPUTE_INDEX = _COMPUTE_INDEX_MODE == "verify"
 
 
 def _env_int(name: str, default: int, lo: int, hi: int) -> int:
     try:
-        return max(lo, min(hi, int(os.getenv(name, "") or default)))
+        return max(lo, min(hi, int(silnt_env(name) or default)))
     except ValueError:
         return default
 
