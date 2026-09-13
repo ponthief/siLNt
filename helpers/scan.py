@@ -1141,11 +1141,10 @@ class BlindBitOracleClient:
                 f"oracle at {self.base_url} reports max_range_blocks=0, so the "
                 f"range endpoints are disabled there; scanning block by block"
             )
-        else:
-            logger.info(
-                f"oracle at {self.base_url} serves block ranges "
-                f"(max_range_blocks={self._range_limit})"
-            )
+        # The success case says nothing on its own: _scan_wallet reports the
+        # limit it got in its one start-of-scan line, and two lines carrying
+        # the same number is how a scan log becomes something people skim past.
+        # Every FAILING outcome above still warns — that asymmetry is the point.
         return self._range_limit
 
     async def _get_range(self, path: str, start: int, end: int) -> dict[int, list]:
@@ -1426,43 +1425,45 @@ def _match_process_count() -> int:
     return _env_int("SILNT_SCAN_MATCH_PROCESSES", 1, 1, 32)
 
 
-def report_match_parallelism() -> int:
-    """Say what the switch resolved to, at the start of every scan.
+def describe_match_parallelism() -> str:
+    """How this scan will match, as a phrase for the start-of-scan line.
 
-    Announced whether or not it is on. Three times now a switch on this path
-    has been read, silently found to be at its default, and left a scan looking
-    mysteriously slow -- the oracle's range support, the forward matcher, and
-    then this. The rule that came out of those: anything that changes what a
-    scan costs says what it read, in the log, every time.
+    Returned rather than logged, so it joins the one line that says how the
+    scan will run instead of being a line of its own. It still says what the
+    switch resolved to either way: three switches on this path have now been
+    read, silently found at their default, and left a scan looking mysteriously
+    slow, so "quieter" must not become "silent about what it read".
+
+    Where it was NOT found is part of that. SILNT_SCAN_MATCH_PROCESSES=12 was
+    once set in .env and reported merely as "unset", which sent someone to set
+    it again in a file already being read.
     """
     workers = _match_process_count()
     cores = os.cpu_count() or 1
     if workers > 1:
-        src = "environment" if os.getenv("SILNT_SCAN_MATCH_PROCESSES") \
-            else f"{_dotenv_path()}"
-        logger.info(
-            f"matching across {workers} processes "
-            f"(SILNT_SCAN_MATCH_PROCESSES={workers} from {src}, {cores} cores)"
-        )
+        src = "env" if os.getenv("SILNT_SCAN_MATCH_PROCESSES") else _dotenv_path()
+        return f"matching across {workers} processes (from {src}, {cores} cores)"
+
+    raw = _setting("SILNT_SCAN_MATCH_PROCESSES")
+
+    # An explicit 1 is a decision, not a misconfiguration. Running the matcher
+    # in-process is the safe choice -- it forks nothing -- and someone who has
+    # chosen it should not be told on every single scan that their setting is
+    # unusable and that they should raise it. Say what is running and stop.
+    if (raw or "").strip() == "1":
+        return f"matching in-process on 1 worker (no forked processes)"
+
+    env_file = _dotenv_path()
+    if raw is None:
+        where = f"not in env nor {env_file}" if env_file else "not in env, no .env found"
+        how = f"unset, {where}"
     else:
-        raw = _setting("SILNT_SCAN_MATCH_PROCESSES")
-        env_file = _dotenv_path()
-        if raw is None:
-            # Say where it looked. "unset" on its own sent someone to set it in
-            # a place that was already being read.
-            where = f"not in the environment nor in {env_file}" if env_file \
-                else "not in the environment, and no .env file was found"
-            how = f"unset ({where})"
-        else:
-            how = f"set to {raw!r}, which is not a usable worker count"
-        suggest = max(1, min(32, cores - 4 if cores > 8 else cores - 1))
-        logger.info(
-            f"matching on a single worker (SILNT_SCAN_MATCH_PROCESSES is {how}; "
-            f"this box has {cores} cores). Matching is the whole cost of a scan "
-            f"and one worker uses one core; SILNT_SCAN_MATCH_PROCESSES={suggest} "
-            "would use more."
-        )
-    return workers
+        how = f"set to {raw!r}, not a usable worker count"
+    suggest = max(1, min(32, cores - 4 if cores > 8 else cores - 1))
+    return (
+        f"matching on 1 worker of {cores} cores "
+        f"(SILNT_SCAN_MATCH_PROCESSES {how}; ={suggest} would use more)"
+    )
 
 
 def _get_match_pool():
@@ -1965,7 +1966,8 @@ async def mark_spent_utxos_batch(
                 status = await get_outspend_status(mempool_base, row["txid"], row["vout"])
                 if status is None:
                     # Unknown — leave as unconfirmed_spent, retry next scan.
-                    logger.info(
+                    # Per outpoint, and it retries on the next scan anyway.
+                    logger.debug(
                         f"{row['txid']}:{row['vout']} short-hash matched at block "
                         f"{height}; outspend unknown — left unconfirmed_spent"
                     )
@@ -1984,7 +1986,9 @@ async def mark_spent_utxos_batch(
                     # block in the same batch may be the one that really spends
                     # it.
                     settled.add((row["txid"], row["vout"]))
-                    logger.info(
+                    # Per spent outpoint, so it scales with the scan. The
+                    # count is in the spent-check phase of the timing line.
+                    logger.debug(
                         f"Confirmed {row['txid']}:{row['vout']} spent (outspend) "
                         f"at block {height}"
                     )
@@ -2139,7 +2143,6 @@ async def _scan_wallet(
     scan_started = time.perf_counter()
     start = max(from_height if from_height is not None else wallet.last_height, 1)
     end = to_height if to_height is not None else await oracle.get_chain_tip()
-    logger.info(f"Scanning wallet {wallet_id} blocks {start}–{end}")
 
     saved_addresses = await get_wallet_addresses(wallet_id)
     labels = create_labels(
@@ -2149,7 +2152,7 @@ async def _scan_wallet(
     # forward matcher's cost is linear in that count — so it belongs in the
     # timing line, not just in the matcher's own head.
     oracle.stats.labels = len(labels)
-    report_match_parallelism()
+    match_plan = describe_match_parallelism()
     addr_label_map: dict[int, str] = {
         a.label_index: a.label
         for a in saved_addresses
@@ -2198,10 +2201,24 @@ async def _scan_wallet(
         # Bigger batches only save requests, and at 3 per batch there is little
         # left to save.
         BATCH_SIZE = min(range_limit, _env_int("SILNT_SCAN_RANGE_BATCH", 25, 1, 1000))
-        logger.info(
-            f"oracle supports block ranges (max {range_limit}); "
-            f"scanning in batches of {BATCH_SIZE}"
-        )
+        scan_plan = f"ranges in batches of {BATCH_SIZE} (oracle max {range_limit})"
+    else:
+        scan_plan = f"BLOCK BY BLOCK in batches of {BATCH_SIZE} (no range endpoints)"
+
+    # One line for how this scan will run, rather than one per thing that was
+    # decided. It carries what the range, matcher and worker lines each used to
+    # say separately, because four lines saying overlapping things is how a
+    # scan log turns into something people stop reading -- and the whole reason
+    # any of this is logged is that a scan once fell back silently and cost two
+    # days to notice.
+    #
+    # The failure paths are untouched and still warn on their own: an oracle
+    # that cannot be reached, a range limit that will not parse, the forward
+    # matcher forced on. Quiet when it is working, loud when it is not.
+    logger.info(
+        f"Scanning wallet {wallet_id} blocks {start}–{end} "
+        f"({end - start + 1} blocks) | {scan_plan} | {match_plan}"
+    )
 
     def batch_at(batch_start: int) -> list[int]:
         return list(
@@ -2359,7 +2376,11 @@ async def _scan_wallet(
                     new_count, new_amount = await insert_utxos_for_wallet(wallet_id, result)
                     total_found += new_count
                     total_found_amount += new_amount
-                    logger.info(
+                    # Per block, so it scales with the scan: a rescan of a busy
+                    # wallet buries the lines that matter under hundreds of
+                    # these. The totals are in "Scan done" either way, and
+                    # anyone chasing a specific block wants DEBUG anyway.
+                    logger.debug(
                         f"Block {h}: {len(result)} detected, {new_count} new"
                     )
                 except Exception as ins_err:
@@ -2411,10 +2432,10 @@ async def _scan_wallet(
     )
     balance = sum(r["amount"] for r in unspent)
     await update_balance(wallet_id, balance)
-    try:        
-        newly_flagged = await evaluate_dust_for_wallet(wallet_id)
-        if newly_flagged > 0:
-            logger.info(f"Wallet {wallet_id}: flagged {newly_flagged} new dust UTXO(s)")
+    try:
+        # evaluate_dust_for_wallet already logs this exact sentence, so saying
+        # it again here printed it twice per scan.
+        await evaluate_dust_for_wallet(wallet_id)
     except Exception as e:
         logger.warning(f"Dust evaluation failed for {wallet_id}: {e}")
     logger.info(

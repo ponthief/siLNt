@@ -1340,30 +1340,74 @@ def test_worker_count_is_read_per_scan_not_at_import(monkeypatch):
     )
 
 
-def test_single_worker_is_announced_with_the_reason(monkeypatch, caplog):
-    """Silence is what cost three debugging rounds. It has to say what it read."""
-    said: list[str] = []
-    monkeypatch.setattr(scan.logger, "info", lambda m, *a, **k: said.append(str(m)))
+def test_single_worker_still_says_what_it_read(monkeypatch):
+    """Quieter must not become silent about what the switch resolved to.
 
+    Silence is what cost three debugging rounds. This is now a phrase in the
+    start-of-scan line rather than a line of its own, but the content has to
+    survive the consolidation.
+    """
     monkeypatch.delenv("SILNT_SCAN_MATCH_PROCESSES", raising=False)
-    assert scan.report_match_parallelism() == 1
-    assert said and "unset" in said[0], said
-    assert "SILNT_SCAN_MATCH_PROCESSES" in said[0], said
+    said = scan.describe_match_parallelism()
+    assert "1 worker" in said, said
+    assert "unset" in said, said
+    assert "SILNT_SCAN_MATCH_PROCESSES" in said, said
 
-    said.clear()
     monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "4")
-    assert scan.report_match_parallelism() == 4
-    assert said and "4 processes" in said[0], said
+    said = scan.describe_match_parallelism()
+    assert "4 processes" in said, said
 
 
 def test_a_bad_value_is_reported_as_set_not_as_unset(monkeypatch):
     """'set to garbage' and 'never set' are different problems."""
-    said: list[str] = []
-    monkeypatch.setattr(scan.logger, "info", lambda m, *a, **k: said.append(str(m)))
     monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "three")
+    said = scan.describe_match_parallelism()
+    assert "set to 'three'" in said, said
 
-    assert scan.report_match_parallelism() == 1
-    assert "set to 'three'" in said[0], said
+
+def test_choosing_one_worker_is_not_nagged_about(monkeypatch):
+    """An explicit 1 is a decision, not a misconfiguration.
+
+    Running in-process forks nothing, which is the safe choice. Someone who has
+    made it should not be told on every scan that their setting is unusable and
+    that they should raise it.
+    """
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "1")
+    said = scan.describe_match_parallelism()
+
+    assert "in-process" in said, said
+    assert "not a usable" not in said, said
+    assert "would use more" not in said, (
+        f"nags on every scan at a setting the operator chose deliberately: {said}"
+    )
+    assert scan._get_match_pool() is None, "an explicit 1 still forked a pool"
+
+
+def test_where_it_looked_survives_the_shorter_line(monkeypatch, tmp_path):
+    """Naming the .env file is why the 12-worker setting was finally found.
+
+    Reporting it as merely "unset" sent someone to set it again in a file that
+    was already being read, so the path has to stay in the message.
+    """
+    env = tmp_path / ".env"
+    env.write_text("LNBITS_ADMIN_UI=true\n")
+    monkeypatch.setenv("LNBITS_ENV_FILE", str(env))
+    monkeypatch.delenv("SILNT_SCAN_MATCH_PROCESSES", raising=False)
+
+    said = scan.describe_match_parallelism()
+    assert str(env) in said, said
+
+
+def test_scan_start_line_carries_the_plan(monkeypatch):
+    """One line for how the scan will run, not one per decision made.
+
+    Four lines used to say overlapping things at the start of every scan. This
+    pins the pieces that have to survive being merged into one.
+    """
+    monkeypatch.setenv("SILNT_SCAN_MATCH_PROCESSES", "12")
+    plan = scan.describe_match_parallelism()
+    assert "12 processes" in plan
+    assert "cores" in plan
 
 
 def test_phases_points_at_the_idle_cores_when_matching_is_compute_bound():
@@ -1617,11 +1661,18 @@ async def test_non_numeric_value_warns(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_support_is_announced(monkeypatch):
+async def test_working_range_support_says_nothing_of_its_own(monkeypatch):
+    """Quiet when it works, loud when it does not.
+
+    The limit is reported in _scan_wallet's one start-of-scan line, so saying
+    it again here was a second line carrying the same number. Every FAILING
+    outcome above still warns — that asymmetry is the point, and the tests
+    above it are what hold the failing side in place.
+    """
     rec = _Recorder()
     monkeypatch.setattr(scan, "logger", rec)
     client = RecordingClient({"/info": {"height": 5, "max_range_blocks": 100}})
 
     assert await client.get_range_limit() == 100
-    assert any("serves block ranges" in i for i in rec.infos), rec.infos
     assert not rec.warnings, rec.warnings
+    assert not rec.infos, f"the working path logged a line of its own: {rec.infos}"
