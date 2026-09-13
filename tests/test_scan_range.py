@@ -1021,6 +1021,136 @@ def test_shutdown_match_pool_leaves_no_children_behind(monkeypatch):
     assert not alive, f"matcher processes survived shutdown: {alive}"
 
 
+def _ignore_sigterm_and_spin(_ignored):
+    import signal as s
+    s.signal(s.SIGTERM, s.SIG_IGN)
+    time.sleep(300)
+
+
+def test_shutdown_kills_a_worker_that_ignores_being_asked(monkeypatch):
+    """The reported failure: 'matcher processes would not die: [902814]'.
+
+    The first teardown shared one five-second budget across twelve children,
+    sequentially, so the last of them got a zero-second join and one second to
+    be observed dead after SIGKILL — on a box whose cores were all still busy.
+    This runs workers that refuse SIGTERM and asserts they are gone anyway,
+    with no error logged.
+    """
+    import concurrent.futures as cf
+    import multiprocessing
+
+    errors: list[str] = []
+    monkeypatch.setattr(scan.logger, "error", lambda m, *a, **k: errors.append(str(m)))
+
+    pool = cf.ProcessPoolExecutor(
+        max_workers=3,
+        mp_context=multiprocessing.get_context("fork"),
+        initializer=scan._match_worker_init,
+    )
+    for _ in range(3):
+        pool.submit(_ignore_sigterm_and_spin, None)
+    time.sleep(1.0)                       # let every worker actually start
+    pids = [p.pid for p in pool._processes.values()]
+    assert len(pids) == 3, pids
+
+    monkeypatch.setattr(scan, "_match_pool", pool)
+    monkeypatch.setattr(scan, "_match_pool_workers", 3)
+    # Short waits: these workers never exit on their own, so the production
+    # patience would only be spent proving that. SIGKILL is prompt.
+    scan.shutdown_match_pool(timeout=0.5, grace=2.0)
+
+    alive = [p for p in pids if _pid_alive(p)]
+    assert not alive, f"workers survived shutdown: {alive}"
+    assert not errors, f"shutdown reported failure but the workers are gone: {errors}"
+
+
+class SlowToDieProc:
+    """A child that takes a few polls to actually go away after SIGKILL.
+
+    The real failure needed twelve workers on a box whose cores were all busy,
+    which is not something a test can arrange reliably. What it can do is model
+    the property that failed: a child does not die the instant it is signalled,
+    and the teardown has to keep looking. With a shared budget spent by earlier
+    children, later ones were checked once and written off.
+    """
+
+    def __init__(self, pid, polls_after_kill=6):
+        self.pid = pid
+        self._polls_after_kill = polls_after_kill
+        self._killed = False
+        self.signals: list[str] = []
+
+    def join(self, _timeout=None):
+        if self._killed:
+            self._polls_after_kill -= 1
+
+    def is_alive(self):
+        return not (self._killed and self._polls_after_kill <= 0)
+
+    def terminate(self):
+        self.signals.append("terminate")      # ignored, as SIG_IGN would be
+
+    def kill(self):
+        self.signals.append("kill")
+        self._killed = True
+
+
+class FakePool:
+    def __init__(self, procs):
+        self._processes = {p.pid: p for p in procs}
+        self.shutdown_calls = 0
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        self.shutdown_calls += 1
+
+
+def test_shutdown_keeps_waiting_for_children_that_die_slowly(monkeypatch):
+    """Deterministic version of 'matcher processes would not die: [902814]'.
+
+    Twelve children, none of which exit on request and each needing several
+    polls after SIGKILL. The old teardown shared one budget across them
+    sequentially and checked the last ones once; this asserts every child is
+    escalated and waited out, with nothing reported as undead.
+    """
+    errors: list[str] = []
+    monkeypatch.setattr(scan.logger, "error", lambda m, *a, **k: errors.append(str(m)))
+    monkeypatch.setattr(scan.logger, "warning", lambda m, *a, **k: None)
+
+    procs = [SlowToDieProc(9000 + i) for i in range(12)]
+    monkeypatch.setattr(scan, "_match_pool", FakePool(procs))
+    monkeypatch.setattr(scan, "_match_pool_workers", 12)
+
+    scan.shutdown_match_pool(timeout=0.2, grace=2.0)
+
+    assert not errors, errors
+    still = [p.pid for p in procs if p.is_alive()]
+    assert not still, f"gave up on {still}"
+    for p in procs:
+        assert "kill" in p.signals, (
+            f"pid {p.pid} was never escalated to SIGKILL; the budget ran out "
+            "before the teardown reached it"
+        )
+
+
+def test_shutdown_reports_the_pids_it_could_not_kill(monkeypatch):
+    """When it truly cannot win, it must say which pids and how to clear them."""
+    errors: list[str] = []
+    monkeypatch.setattr(scan.logger, "error", lambda m, *a, **k: errors.append(str(m)))
+    monkeypatch.setattr(scan.logger, "warning", lambda m, *a, **k: None)
+
+    immortal = [SlowToDieProc(4242, polls_after_kill=10**9)]
+    monkeypatch.setattr(scan, "_match_pool", FakePool(immortal))
+    monkeypatch.setattr(scan, "_match_pool_workers", 1)
+
+    scan.shutdown_match_pool(timeout=0.05, grace=0.05)
+
+    assert errors, "an undead worker was not reported at all"
+    assert "4242" in errors[0], errors[0]
+    assert "kill -9 4242" in errors[0], (
+        "the operator is told there is a problem but not how to fix it"
+    )
+
+
 def test_shutdown_match_pool_is_safe_when_there_is_no_pool(monkeypatch):
     monkeypatch.setattr(scan, "_match_pool", None)
     scan.shutdown_match_pool()          # must not raise

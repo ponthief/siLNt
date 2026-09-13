@@ -1335,13 +1335,47 @@ def _match_worker_init():
         os._exit(0)
 
 
-def shutdown_match_pool(timeout: float = 5.0) -> None:
+def _still_running(proc) -> bool:
+    """Is this child actually still executing? Reaps it if it is not.
+
+    Process.is_alive() reports True for a child that has exited but not been
+    waited on, so it has to be preceded by a join that can reap. A child the
+    executor's own machinery already reaped raises instead, which is also "not
+    running".
+    """
+    try:
+        proc.join(0)
+        return proc.is_alive()
+    except Exception:
+        return False
+
+
+def _wait_for_exit(procs, seconds: float) -> list:
+    """Poll until these children are gone, or the time is up. Returns the rest."""
+    deadline = time.monotonic() + seconds
+    remaining = list(procs)
+    while remaining and time.monotonic() < deadline:
+        remaining = [p for p in remaining if _still_running(p)]
+        if remaining:
+            time.sleep(0.05)
+    return [p for p in remaining if _still_running(p)]
+
+
+def shutdown_match_pool(timeout: float = 10.0, grace: float = 5.0) -> None:
     """Stop the matcher processes and make sure they are actually gone.
 
     Called at the end of every scan and again at interpreter exit. Waiting on
     shutdown() alone is not enough: it can block on a worker mid-block, and a
     worker that ignored its signals would never be joined at all. So we ask,
     then wait, then insist.
+
+    Signals go to every survivor at once and then we wait ONCE, rather than
+    escalating one child at a time against a shared deadline. The first version
+    did the latter and reported a process that "would not die": twelve children
+    sharing a five second budget meant the last of them got a zero-second join
+    and one second to be observed dead after a SIGKILL -- on a box whose cores
+    were all still busy. It had been killed; nobody waited long enough to see
+    it go.
     """
     global _match_pool, _match_pool_workers
     with _match_pool_lock:
@@ -1353,21 +1387,32 @@ def shutdown_match_pool(timeout: float = 5.0) -> None:
         pool.shutdown(wait=False, cancel_futures=True)
     except Exception:
         pass
-    deadline = time.monotonic() + timeout
-    for proc in children:
-        try:
-            proc.join(max(0.0, deadline - time.monotonic()))
-            if proc.is_alive():
-                proc.terminate()
-                proc.join(1.0)
-            if proc.is_alive():
-                proc.kill()
-                proc.join(1.0)
-        except Exception:
-            pass
-    alive = [p.pid for p in children if p.is_alive()]
+
+    alive = _wait_for_exit(children, timeout)
+    for phase, signal_it in (("terminate", "terminate"), ("kill", "kill")):
+        if not alive:
+            break
+        for proc in alive:
+            try:
+                getattr(proc, signal_it)()
+            except Exception:
+                pass
+        # SIGKILL is delivered asynchronously and the machine has just had every
+        # core saturated, so give it real time to be scheduled and reaped.
+        alive = _wait_for_exit(alive, grace)
+        if alive:
+            logger.warning(
+                f"matcher processes still up after {phase}: "
+                f"{[p.pid for p in alive]}"
+            )
+
     if alive:
-        logger.error(f"matcher processes would not die: {alive}")
+        pids = [p.pid for p in alive]
+        logger.error(
+            f"matcher processes would not die: {pids}. They hold a copy of this "
+            f"process's memory and will not exit on their own; kill them with "
+            f"`kill -9 {' '.join(str(p) for p in pids)}`."
+        )
 
 
 # atexit keeps no readable registry, so record it here too: a test can then
