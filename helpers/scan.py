@@ -1010,6 +1010,23 @@ class OracleStats:
                 "in-thread" if self.match_workers <= 1
                 else f"across {self.match_workers} processes"
             )
+            # What the workers ACTUALLY delivered, not what was configured.
+            #
+            # The in-thread figures are summed across workers, so with real
+            # concurrency they come to roughly (workers x the match phase).
+            # When 12 workers were configured but every block was awaited
+            # before the next was dispatched, this read 0.9x and the scan took
+            # as long as a single worker -- with nothing else in the log to
+            # show for it. Printed whenever more than one worker is asked for,
+            # because "configured" and "achieved" being different is the whole
+            # failure.
+            if self.match_workers > 1 and self.match_batch_seconds > 0:
+                got = self.match_thread_wall_seconds / self.match_batch_seconds
+                where += (
+                    f", {got:.1f}x parallelism"
+                    + ("" if got >= self.match_workers * 0.5
+                       else " — WORKERS MOSTLY IDLE")
+                )
             matcher_note += (
                 f" | matcher CPU {self.match_cpu_seconds:.1f}s of "
                 f"{self.match_thread_wall_seconds:.1f}s {where} "
@@ -1669,18 +1686,15 @@ async def match_range_batch(
     else:
         index, matcher = data.tweaks, sync_block
 
-    results: list = []
-    for height in data.heights:
+    async def match_one(height):
         if index is None or height not in index:
             # Absent, not empty. See BlockNotIndexedError.
-            results.append(BlockNotIndexedError(height))
-            continue
+            return BlockNotIndexedError(height)
 
         entries = index[height]
         utxos = data.utxos.get(height) or []
         if not entries or not utxos:
-            results.append([])
-            continue
+            return []
 
         try:
             owned = await _match_in_thread(
@@ -1688,11 +1702,28 @@ async def match_range_batch(
                 entries, utxos, scan_secret_bytes, spend_pub_bytes, labels,
             )
             await _resolve_timestamps(owned, client, network)
-            results.append(owned)
+            return owned
         except Exception as e:
-            results.append(e)
+            return e
 
-    return results
+    # Every block in the batch goes to the executor at once.
+    #
+    # This loop used to await each block before starting the next, which is
+    # correct but hands the executor one task at a time. Against the single
+    # matcher thread that costs nothing -- there is one worker either way -- so
+    # it went unnoticed until there were twelve, at which point eleven of them
+    # sat idle and a 12-process scan took exactly as long as a 1-process scan.
+    #
+    # The symptom to recognise, since both numbers are in the phase line: the
+    # in-thread wall time is SUMMED across workers, so with real concurrency it
+    # should be some multiple of the match phase. Reading LESS than the match
+    # phase means the work was serialised no matter how many workers were
+    # configured.
+    #
+    # gather preserves order, so results stay aligned with data.heights, and
+    # each block still returns its own exception rather than cancelling the
+    # batch.
+    return list(await asyncio.gather(*(match_one(h) for h in data.heights)))
 
 
 async def scan_blocks_range(

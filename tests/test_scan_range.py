@@ -850,6 +850,96 @@ async def test_starvation_is_detected_when_another_thread_burns_cpu():
 
 
 @pytest.mark.asyncio
+async def test_blocks_in_a_batch_are_dispatched_concurrently(monkeypatch):
+    """The bug this exists for: 12 workers, one task at a time.
+
+    match_range_batch used to await each block before starting the next. That
+    is correct, and against the single matcher thread it costs nothing, because
+    there is one worker either way. With a pool it means eleven of twelve
+    workers sit idle and a 12-process scan takes exactly as long as a
+    1-process one — which is what happened, with no error and no warning.
+
+    Asserted on dispatch rather than on wall-clock speedup, so it holds for any
+    executor and does not turn into a timing-flaky test.
+    """
+    import concurrent.futures as cf
+    import threading
+
+    live = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def slow_matcher(entries, utxos, scan_key, spend_pub, labels):
+        nonlocal live, peak
+        with lock:
+            live += 1
+            peak = max(peak, live)
+        time.sleep(0.02)
+        with lock:
+            live -= 1
+        return []
+
+    pool = cf.ThreadPoolExecutor(max_workers=4)
+    monkeypatch.setattr(scan, "_matcher", pool)
+    monkeypatch.setattr(scan, "sync_block_reverse", slow_matcher)
+
+    heights = list(range(100, 112))
+    tweak_hex, output_hex = payment_to_us(b"\x88" * 32)
+    utxo = {
+        "txid": "ab" * 32, "vout": 0, "amount": 1,
+        "pubkey": output_hex, "timestamp": 1,
+    }
+    client = RecordingClient(all_range_routes(heights, tweak_hex, utxo))
+    try:
+        data = await scan.fetch_range_batch(heights, client)
+        results = await scan.match_range_batch(
+            data, client, SCAN_SECRET, SPEND_PUB, [], "signet"
+        )
+    finally:
+        pool.shutdown(wait=True)
+
+    assert len(results) == len(heights)
+    assert peak > 1, (
+        "blocks were matched one at a time; every worker beyond the first is "
+        "idle and adding workers cannot make a scan faster"
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_results_stay_aligned_with_their_heights(monkeypatch):
+    """Dispatching concurrently must not reorder or drop anything.
+
+    The caller pairs results with heights positionally, so a reordering here
+    would credit one block's payments to another — silently.
+    """
+    heights = list(range(200, 210))
+    tweak_hex, output_hex = payment_to_us(b"\x77" * 32)
+    utxo = {
+        "txid": "cd" * 32, "vout": 0, "amount": 9,
+        "pubkey": output_hex, "timestamp": 1,
+    }
+    routes = all_range_routes(heights, tweak_hex, utxo)
+    client = RecordingClient(routes)
+
+    data = await scan.fetch_range_batch(heights, client)
+    # Drop a height from the index so one result must be BlockNotIndexedError,
+    # in its own position and nobody else's.
+    missing = heights[4]
+    data.compute_index.pop(missing, None)
+
+    results = await scan.match_range_batch(
+        data, client, SCAN_SECRET, SPEND_PUB, [], "signet"
+    )
+
+    assert len(results) == len(heights)
+    for i, h in enumerate(heights):
+        if h == missing:
+            assert isinstance(results[i], scan.BlockNotIndexedError), results[i]
+        else:
+            assert not isinstance(results[i], Exception), (h, results[i])
+
+
+@pytest.mark.asyncio
 async def test_single_worker_is_the_default(monkeypatch):
     """Matching across processes forks a live LNbits. It must be opt-in."""
     monkeypatch.delenv("SILNT_SCAN_MATCH_PROCESSES", raising=False)
@@ -1017,12 +1107,37 @@ def test_phases_stops_advertising_processes_once_they_are_in_use():
     stats.used_range = True
     stats.matcher = "reverse"
     stats.match_workers = 3
+    stats.match_batch_seconds = 30.0
     stats.match_thread_wall_seconds = 80.0   # summed across workers
     stats.match_cpu_seconds = 76.0
 
     line = stats.phases()
     assert "across 3 processes" in line, line
     assert "SILNT_SCAN_MATCH_PROCESSES" not in line, line
+    assert "2.7x parallelism" in line, line
+    assert "IDLE" not in line, line
+
+
+def test_phases_calls_out_workers_that_were_configured_but_not_used():
+    """The exact shape of the batch-loop bug: 12 configured, 1 delivered.
+
+    Summed in-thread wall coming to LESS than the match phase can only mean the
+    blocks ran one after another. Without this the line reports 12 processes
+    and 100% busy, both true, and reads like a healthy parallel scan.
+    """
+    stats = scan.OracleStats()
+    stats.wall_seconds = 894.5
+    stats.used_range = True
+    stats.used_compute_index = True
+    stats.matcher = "reverse"
+    stats.match_workers = 12
+    stats.match_batch_seconds = 882.6
+    stats.match_thread_wall_seconds = 828.7
+    stats.match_cpu_seconds = 826.9
+
+    line = stats.phases()
+    assert "0.9x parallelism" in line, line
+    assert "WORKERS MOSTLY IDLE" in line, line
 
 
 @pytest.mark.asyncio
