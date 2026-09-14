@@ -3,12 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>How WhiSPa Wallet works — the layers underneath</title>
-<meta name="description" content="The layers under WhiSPa Wallet and the open components it is built on.">
+<title>How WhiSPa Wallet works — registration and the layers underneath</title>
+<meta name="description" content="Why WhiSPa Wallet asks for an email at registration, how to sign up with an anonymous alias, and the open components it is built on.">
 <link rel="icon" type="image/png" href="whispa-mark.png">
 <link rel="apple-touch-icon" href="whispa-icon-180.png">
-<meta property="og:title" content="How WhiSPa Wallet works — the layers underneath">
-<meta property="og:description" content="The layers under WhiSPa Wallet and the open components it is built on.">
+<meta property="og:title" content="How WhiSPa Wallet works — registration and the layers underneath">
+<meta property="og:description" content="Why WhiSPa Wallet asks for an email at registration, how to sign up with an anonymous alias, and the open components it is built on.">
 <meta property="og:image" content="whispa-og.png">
 <meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -34,7 +34,7 @@
         <a href="index.html">Home</a>
         <a href="download.html">Download</a>
         <a href="https://signet.whispawallet.com">Try it <span class="ext">↗</span></a>
-        <a href="experience.html">Experience</a>
+        <a href="features.html">Features</a>
         <a href="privacy.html">Privacy &amp; security</a>
         <a href="how-it-works.html" aria-current="page">How it works</a>
         <div class="menu-sep"></div>
@@ -42,19 +42,85 @@
       </nav>
     </details>
     <a class="brand" href="index.html"><img src="whispa-mark.png" alt=""> WhiSPa</a>
-    <span class="only-btc">₿ Bitcoin only</span>
     <div class="spacer"></div>
+    <span class="only-btc">₿ Bitcoin only</span>
     <a class="btn btn-ghost btn-sm btn-try" href="https://signet.whispawallet.com"><span>Try it<span class="btn-try-long"> in your browser</span></span> <span class="arrow">→</span></a>
     <a class="btn btn-primary btn-sm" href="download.html">Get the app <span class="arrow">→</span></a>
   </div>
 </header>
 
 <div class="wrap page-head">
-  <h1>Layers doing one job</h1>
-  <p class="lead">WhiSPa is the interface. Open components do the work underneath — and none of them ever see the key that spends your bitcoin.</p>
+  <h1>How WhiSPa works</h1>
+  <p class="lead">Why registering asks for an email, how to give one without giving your name, and the open components doing the work underneath — none of which ever see the key that spends your bitcoin.</p>
 </div>
 
+<section class="wrap" id="registration">
+  <div class="sec-head">
+    <div class="sec-tag">Registration</div>
+    <div class="sec-title">Why WhiSPa asks for an email</div>
+    <p class="sec-sub">WhiSPa ships as an LNbits extension, so the wallet has a server-side account behind it. That account needs one contact address, and it is the only personal detail you are ever asked for.</p>
+  </div>
+  <div class="pills">
+    <div class="pill">
+      <div class="name">Proving the address works <span class="b">sign-up</span></div>
+      <div class="role">No account is created until you click the link we send. On a server anyone can reach, that is what stops the instance filling with automated sign-ups.</div>
+    </div>
+    <div class="pill">
+      <div class="name">Getting back in <span class="b">password reset</span></div>
+      <div class="role">Forget your password and the reset link goes to that address. There is no other route back into the account.</div>
+    </div>
+    <div class="pill">
+      <div class="name">Confirming a new device <span class="b">login</span></div>
+      <div class="role">A login from a device the server has not seen before has to be confirmed by email first, so a stolen password on its own isn't enough to get in.</div>
+    </div>
+    <div class="pill">
+      <div class="name">Nothing else <span class="b">no marketing</span></div>
+      <div class="role">No newsletter, no analytics, no sharing with anyone. Those three messages are every email WhiSPa will ever send you.</div>
+    </div>
+  </div>
+
+  <div class="panel-note" style="margin-top:22px">
+    <p><strong>The email has nothing to do with your bitcoin.</strong> Your spend key is derived and kept on your device and never reaches the server, so no one holding your email — us, your mail provider, or somebody who takes the account over — can move your coins. The other half of that matters just as much: <strong>the email cannot recover your bitcoin either.</strong> A reset link gets you back into the account; only your seed backup gets you back to your funds.</p>
+  </div>
+</section>
+
+<section class="wrap" id="anonymous-email">
+  <div class="sec-head">
+    <div class="sec-tag">Recommended</div>
+    <div class="sec-title">Register with an alias, not your real inbox</div>
+    <p class="sec-sub">We don't care which address you use — so use one that isn't tied to your name. An alias forwards to your real inbox, so reset and device-confirmation mail still reaches you, while WhiSPa only ever stores the alias.</p>
+  </div>
+  <div class="stack">
+    <div class="step">
+      <div class="layer">Step 01 · Pick a provider</div>
+      <h4>An aliasing or private-mail service</h4>
+      <p>Free: <strong>SimpleLogin</strong>, <strong>addy.io</strong>, <strong>Firefox Relay</strong> or <strong>DuckDuckGo Email Protection</strong> for masked addresses, or a fresh account at <strong>Proton Mail</strong> or <strong>Tuta</strong>. Paid, if you already have one: Apple Hide My Email, Fastmail Masked Email, 1Password, or Bitwarden Premium.</p>
+    </div>
+    <div class="step">
+      <div class="layer">Step 02 · Generate</div>
+      <h4>One alias used only here</h4>
+      <p>Not an address you have given out anywhere else. A single-purpose alias means this account can't be correlated with your others by email address.</p>
+    </div>
+    <div class="step">
+      <div class="layer">Step 03 · Register</div>
+      <h4>Sign up with the alias</h4>
+      <p>Put it in the email field when you register. Open the mail that arrives and either click the link or type the six-digit code it carries — either one creates the account.</p>
+    </div>
+    <div class="step">
+      <div class="layer">Step 04 · Record it</div>
+      <h4>Store it beside your password</h4>
+      <p>Keep the alias in your password manager next to your WhiSPa username and password. Lose track of which alias you used — or let the alias itself lapse — and you lose the only route back into the account. Your seed still recovers the bitcoin; it does not recover the account.</p>
+    </div>
+  </div>
+  <p class="also">Per-provider walkthrough: <a href="https://docs.megalithic.me/rizful-tips-and-tricks/anonymous-email-setup/" target="_blank" rel="noopener noreferrer">Anonymous email setup <span class="ext">↗</span></a> — written for another service, but the setup is the same wherever you use it.</p>
+</section>
+
 <section class="wrap" id="layers">
+  <div class="sec-head">
+    <div class="sec-tag">Architecture</div>
+    <div class="sec-title">Layers doing one job</div>
+    <p class="sec-sub">WhiSPa is the interface. Open components do the work underneath, each with a single responsibility.</p>
+  </div>
   <div class="stack">
     <div class="step">
       <div class="layer">Layer 01 · Interface</div>
@@ -119,7 +185,7 @@
     <nav>
       <a href="index.html">Home</a>
       <a href="download.html">Download</a>
-      <a href="experience.html">Experience</a>
+      <a href="features.html">Features</a>
       <a href="privacy.html">Privacy &amp; security</a>
       <a href="how-it-works.html">How it works</a>
       <a href="index.html#contact">Contact</a>
