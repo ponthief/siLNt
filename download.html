@@ -3,13 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Download Thrilla — Android and web</title>
-<meta name="description" content="Download the Thrilla Bitcoin wallet: mainnet and Signet Android builds, or the Signet web app. Verify the download, then make your first Silent Payment.">
-<link rel="icon" type="image/png" href="thrilla-icon.png">
-<link rel="apple-touch-icon" href="thrilla-icon.png">
-<meta property="og:title" content="Download Thrilla — Android and web">
-<meta property="og:description" content="Download the Thrilla Bitcoin wallet: mainnet and Signet Android builds, or the Signet web app. Verify the download, then make your first Silent Payment.">
-<meta property="og:image" content="thrilla-icon.png">
+<title>Download WhiSPa Wallet — Android and web</title>
+<meta name="description" content="Download WhiSPa Wallet: mainnet and Signet Android builds, or the Signet web app. Verify the download, then make your first Silent Payment.">
+<link rel="icon" type="image/png" href="whispa-mark.png">
+<link rel="apple-touch-icon" href="whispa-icon-180.png">
+<meta property="og:title" content="Download WhiSPa Wallet — Android and web">
+<meta property="og:description" content="Download WhiSPa Wallet: mainnet and Signet Android builds, or the Signet web app. Verify the download, then make your first Silent Payment.">
+<meta property="og:image" content="whispa-og.png">
 <meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -17,7 +17,7 @@
 <!-- ?v= is a cache buster: styles.css is served with max-age=14400 and cached at
      the CDN edge, so BUMP THIS NUMBER whenever styles.css changes or the new
      styles will not reach visitors for up to four hours. -->
-<link rel="stylesheet" href="styles.css?v=5">
+<link rel="stylesheet" href="styles.css?v=6">
 </head>
 <body>
 
@@ -28,12 +28,12 @@
       <div class="drawer-backdrop"></div>
       <nav class="drawer" aria-label="Site">
         <div class="drawer-head">
-          <span>Thrilla</span>
+          <span>WhiSPa Wallet</span>
           <button type="button" class="drawer-close" aria-label="Close menu">✕</button>
         </div>
         <a href="index.html">Home</a>
         <a href="download.html" aria-current="page">Download</a>
-        <a href="https://signet.thrilla.me">Try it <span class="ext">↗</span></a>
+        <a href="https://signet.whispawallet.com">Try it <span class="ext">↗</span></a>
         <a href="experience.html">Experience</a>
         <a href="privacy.html">Privacy &amp; security</a>
         <a href="how-it-works.html">How it works</a>
@@ -41,7 +41,7 @@
         <a href="index.html#contact">Contact</a>
       </nav>
     </details>
-    <a class="brand" href="index.html"><img src="thrilla-icon.png" alt=""> Thrilla</a>
+    <a class="brand" href="index.html"><img src="whispa-mark.png" alt=""> WhiSPa</a>
     <span class="only-btc">₿ Bitcoin only</span>
     <div class="spacer"></div>
     <a class="btn btn-primary btn-sm" href="download.html">Get the app <span class="arrow">→</span></a>
@@ -57,7 +57,7 @@
   <div class="dl-grid">
     <div class="dl-card main">
       <div class="dl-net">Mainnet · real bitcoin</div>
-      <h3>Thrilla</h3>
+      <h3>WhiSPa Wallet</h3>
       <p>Real funds. You hold the only key that can spend them.</p>
       <!-- /releases/latest/download/<name> resolves to the newest release that
            is NOT a prerelease. The CI builds are published as prereleases, so
@@ -70,7 +70,7 @@
     </div>
     <div class="dl-card test">
       <div class="dl-net">Signet · test network</div>
-      <h3>Thrilla (Signet)</h3>
+      <h3>WhiSPa Wallet (Signet)</h3>
       <p>The same wallet on a test network. Coins are worthless — try everything here first.</p>
       <a class="btn btn-ghost" href="https://github.com/ponthief/thrilla/releases/latest/download/thrilla-signet.apk">Download APK <span class="arrow">↓</span></a>
       <div class="dl-meta">Android 6+ · ~36 MB</div>
@@ -80,7 +80,7 @@
       <div class="dl-net">Browser · Signet</div>
       <h3>Web app</h3>
       <p>No install at all. The same wallet in a tab — keys stay encrypted in that browser, not on the server.</p>
-      <a class="btn btn-ghost" href="https://signet.thrilla.me">Open signet.thrilla.me <span class="arrow">→</span></a>
+      <a class="btn btn-ghost" href="https://signet.whispawallet.com">Open signet.whispawallet.com <span class="arrow">→</span></a>
       <div class="dl-meta">Signet only · nothing to sideload</div>
     </div>
   </div>
@@ -104,13 +104,19 @@
        rotated, this line is the only one to change. -->
   <div class="fp" id="fp">F061 E3E9 56FC F57F 99D2  FE48 81DC EBD9 74E9 CABE</div>
   <p style="font-size:13px;margin-top:8px;font-family:var(--mono);color:var(--dim)">Thrilla &lt;thrilla@bitaurus.net&gt;</p>
+  <!-- The key's user id is deliberately NOT rebranded. It is what gpg actually
+       prints, and a verification page that shows something other than the real
+       output teaches people to accept a mismatch — the exact habit this page
+       exists to prevent. Explained instead, so nobody reads the old name as a
+       sign the download was tampered with. -->
+  <p style="font-size:13px;margin-top:6px;color:var(--dim)">The key is still named after the old project. It was created before the rename, and replacing a signing key is a far bigger event than changing a name, so it stays until there's a reason to rotate it. <strong>The fingerprint above is what you check</strong> — not the name beside it.</p>
 
   <div class="warnbox">
     <p><strong>Confirm this fingerprint somewhere other than this page</strong> — on
       <a href="https://github.com/ponthief/thrilla" target="_blank" rel="noopener noreferrer">GitHub</a>,
       <a href="https://x.com/thrillabtc" target="_blank" rel="noopener noreferrer">X</a> or
       <a href="https://t.me/thrilla_btc" target="_blank" rel="noopener noreferrer">Telegram</a>.
-      Anyone who could serve you a fake APK from thrilla.me could serve a fake key beside it, and the check would pass anyway.</p>
+      Anyone who could serve you a fake APK from whispawallet.com could serve a fake key beside it, and the check would pass anyway.</p>
   </div>
 
   <h3 style="font-size:16px;font-weight:600;margin-top:34px">1 · Get the key and checksums</h3>
@@ -146,7 +152,7 @@ thrilla-mainnet.apk: <b>OK</b></div>
     <p><strong>If either command fails, don't install the APK.</strong> Delete it, download again on a different network, and check once more. If it fails twice, <a href="index.html#contact">tell us</a> before installing anything.</p>
   </div>
 
-  <p class="also" style="margin-top:26px">Separately, Android checks the APK's own signature on every update, so once Thrilla is installed a build signed by a different key can't replace it. That makes the first install the one worth verifying.</p>
+  <p class="also" style="margin-top:26px">Separately, Android checks the APK's own signature on every update, so once WhiSPa is installed a build signed by a different key can't replace it. That makes the first install the one worth verifying.</p>
 
 </section>
 
@@ -185,7 +191,7 @@ thrilla-mainnet.apk: <b>OK</b></div>
 <div class="wrap">
   <footer>
     <div>
-      <div style="color:var(--dim)">Thrilla · self-custodial, Bitcoin-only Silent Payments</div>
+      <div style="color:var(--dim)">WhiSPa Wallet · self-custodial, Bitcoin-only Silent Payments</div>
       <div class="disclaim">The mainnet build holds real bitcoin; Signet coins have no value. Self-custody means you alone are responsible for your keys and backups. Not financial advice.</div>
     </div>
     <nav>

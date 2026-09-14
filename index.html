@@ -3,13 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Thrilla — a Bitcoin-only Silent Payments wallet</title>
-<meta name="description" content="Thrilla is a self-custodial, Bitcoin-only wallet built on Silent Payments: one reusable address, unlinkable payments, and email-style BitMail names.">
-<link rel="icon" type="image/png" href="thrilla-icon.png">
-<link rel="apple-touch-icon" href="thrilla-icon.png">
-<meta property="og:title" content="Thrilla — a Bitcoin-only Silent Payments wallet">
-<meta property="og:description" content="Thrilla is a self-custodial, Bitcoin-only wallet built on Silent Payments: one reusable address, unlinkable payments, and email-style BitMail names.">
-<meta property="og:image" content="thrilla-icon.png">
+<title>WhiSPa Wallet — Bitcoin that doesn't announce itself</title>
+<meta name="description" content="WhiSPa Wallet is a self-custodial, Bitcoin-only wallet built on Silent Payments: publish one address forever, and every payment still lands somewhere nobody can link to you.">
+<link rel="icon" type="image/png" href="whispa-mark.png">
+<link rel="apple-touch-icon" href="whispa-icon-180.png">
+<meta property="og:title" content="WhiSPa Wallet — Bitcoin that doesn't announce itself">
+<meta property="og:description" content="WhiSPa Wallet is a self-custodial, Bitcoin-only wallet built on Silent Payments: publish one address forever, and every payment still lands somewhere nobody can link to you.">
+<meta property="og:image" content="whispa-og.png">
 <meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -17,7 +17,7 @@
 <!-- ?v= is a cache buster: styles.css is served with max-age=14400 and cached at
      the CDN edge, so BUMP THIS NUMBER whenever styles.css changes or the new
      styles will not reach visitors for up to four hours. -->
-<link rel="stylesheet" href="styles.css?v=5">
+<link rel="stylesheet" href="styles.css?v=6">
 </head>
 <body>
 
@@ -28,12 +28,12 @@
       <div class="drawer-backdrop"></div>
       <nav class="drawer" aria-label="Site">
         <div class="drawer-head">
-          <span>Thrilla</span>
+          <span>WhiSPa Wallet</span>
           <button type="button" class="drawer-close" aria-label="Close menu">✕</button>
         </div>
         <a href="index.html" aria-current="page">Home</a>
         <a href="download.html">Download</a>
-        <a href="https://signet.thrilla.me">Try it <span class="ext">↗</span></a>
+        <a href="https://signet.whispawallet.com">Try it <span class="ext">↗</span></a>
         <a href="experience.html">Experience</a>
         <a href="privacy.html">Privacy &amp; security</a>
         <a href="how-it-works.html">How it works</a>
@@ -41,7 +41,7 @@
         <a href="index.html#contact">Contact</a>
       </nav>
     </details>
-    <a class="brand" href="index.html"><img src="thrilla-icon.png" alt=""> Thrilla</a>
+    <a class="brand" href="index.html"><img src="whispa-mark.png" alt=""> WhiSPa</a>
     <span class="only-btc">₿ Bitcoin only</span>
     <div class="spacer"></div>
     <a class="btn btn-primary btn-sm" href="download.html">Get the app <span class="arrow">→</span></a>
@@ -49,10 +49,14 @@
 </header>
 
 <header class="hero wrap">
-  <img class="hero-mascot" src="thrilla-icon.png" alt="Thrilla mascot — a celebrating Bitcoin coin">
+  <picture>
+    <source srcset="whispa-hero.webp" type="image/webp">
+    <img class="hero-mascot" src="whispa-hero.png"
+         alt="WhiSPa Wallet — a hooded figure signalling for quiet, holding a Bitcoin coin">
+  </picture>
   <div class="eyebrow"><span class="dot"></span> <b>Bitcoin only</b> · Self-custodial · Silent Payments</div>
-  <h1>A friends-and-family <em>Bitcoin</em> wallet.</h1>
-  <p class="lead">One reusable <strong>Silent Payment</strong> address you can publish anywhere — every payment still lands on a fresh, unlinkable output on the Bitcoin blockchain. Your spend key stays on the device you use, and never reaches the server.</p>
+  <h1>Bitcoin that doesn't <em>announce itself</em>.</h1>
+  <p class="lead">Publish one <strong>Silent Payment</strong> address — on your site, in your bio, on a poster — and keep it forever. Every payment still lands on a fresh output that nobody can tie to you, or to each other. Your spend key stays on the device you use, and never reaches the server.</p>
 
   <div class="btc-note">
     <strong>Bitcoin, and nothing else.</strong> No altcoins, no tokens, no bridges, no in-app exchange. Your coins are ordinary UTXOs on the Bitcoin blockchain, spendable from your seed with or without this app.
@@ -61,7 +65,7 @@
   <div class="note"><span class="badge">Heads up</span> Start on Signet, where the coins aren't worth anything — then move to mainnet when you're ready.</div>
 
   <div class="demo">
-    <div class="demo-bar"><span class="d"></span><span class="d"></span><span class="d"></span><span>thrilla — receive</span></div>
+    <div class="demo-bar"><span class="d"></span><span class="d"></span><span class="d"></span><span>whispa — receive</span></div>
     <div class="demo-body">
       <div class="demo-cell">
         <div class="k">Silent Payment address</div>
@@ -106,7 +110,7 @@
   <p class="also">Plus: coin control with dust flagging · biometric or PIN lock, and a duress PIN that wipes this device's keys · Lightning and on-chain ↔ Lightning swaps coming.</p>
 
   <div class="panel-note" style="margin-top:26px">
-    <p><strong>Who it's for.</strong> Thrilla is built for a <strong>known circle</strong> sharing one LNbits instance: members pay each other by PayJoin, and everyone shows the outside world a Silent Payment address that's safe to publish. <strong>Your keys are your responsibility</strong> — no one can move your bitcoin, or recover it if you lose your backup.</p>
+    <p><strong>What it's for.</strong> Publishing a Bitcoin address normally means publishing your history — anyone who pays you can read every other payment that address ever received. Silent Payments end that: <strong>one address you can hand out freely</strong>, and each payment arrives somewhere only you can find. Members of the same LNbits instance can go further and pay each other by collaborative PayJoin, breaking the assumption that one transaction has one owner. <strong>Your keys are your responsibility</strong> — no one can move your bitcoin, or recover it if you lose your backup.</p>
   </div>
 </section>
 
@@ -138,17 +142,17 @@
     <div class="dn-text">
       <span class="ct-k">Donate</span>
       <div class="dn-addr" id="donate-addr">dominus@thrilla.me</div>
-      <span class="ct-m">A BitMail name, not an email — paste it into Thrilla, or any wallet that resolves BIP&#8209;353, and it becomes a fresh Silent Payment address.</span>
+      <span class="ct-m">A BitMail name, not an email — paste it into WhiSPa, or any wallet that resolves BIP&#8209;353, and it becomes a fresh Silent Payment address.</span>
     </div>
   </div>
 </section>
 
 <section class="wrap">
   <div class="final">
-    <h2>Get Thrilla</h2>
+    <h2>Get WhiSPa Wallet</h2>
     <p>A reusable Bitcoin address that doesn't cost you your privacy.</p>
     <div class="actions">
-      <a class="btn btn-primary" href="https://signet.thrilla.me">Try it in your browser <span class="arrow">→</span></a>
+      <a class="btn btn-primary" href="https://signet.whispawallet.com">Try it in your browser <span class="arrow">→</span></a>
     </div>
     <p class="also" style="margin-top:18px"><a href="download.html">See the Android builds →</a></p>
   </div>
@@ -157,7 +161,7 @@
 <div class="wrap">
   <footer>
     <div>
-      <div style="color:var(--dim)">Thrilla · self-custodial, Bitcoin-only Silent Payments</div>
+      <div style="color:var(--dim)">WhiSPa Wallet · self-custodial, Bitcoin-only Silent Payments</div>
       <div class="disclaim">The mainnet build holds real bitcoin; Signet coins have no value. Self-custody means you alone are responsible for your keys and backups. Not financial advice.</div>
     </div>
     <nav>

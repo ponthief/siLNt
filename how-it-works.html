@@ -3,13 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>How Thrilla works — the layers underneath</title>
-<meta name="description" content="The layers under the Thrilla Bitcoin wallet and the open components it is built on.">
-<link rel="icon" type="image/png" href="thrilla-icon.png">
-<link rel="apple-touch-icon" href="thrilla-icon.png">
-<meta property="og:title" content="How Thrilla works — the layers underneath">
-<meta property="og:description" content="The layers under the Thrilla Bitcoin wallet and the open components it is built on.">
-<meta property="og:image" content="thrilla-icon.png">
+<title>How WhiSPa Wallet works — the layers underneath</title>
+<meta name="description" content="The layers under WhiSPa Wallet and the open components it is built on.">
+<link rel="icon" type="image/png" href="whispa-mark.png">
+<link rel="apple-touch-icon" href="whispa-icon-180.png">
+<meta property="og:title" content="How WhiSPa Wallet works — the layers underneath">
+<meta property="og:description" content="The layers under WhiSPa Wallet and the open components it is built on.">
+<meta property="og:image" content="whispa-og.png">
 <meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -17,7 +17,7 @@
 <!-- ?v= is a cache buster: styles.css is served with max-age=14400 and cached at
      the CDN edge, so BUMP THIS NUMBER whenever styles.css changes or the new
      styles will not reach visitors for up to four hours. -->
-<link rel="stylesheet" href="styles.css?v=5">
+<link rel="stylesheet" href="styles.css?v=6">
 </head>
 <body>
 
@@ -28,12 +28,12 @@
       <div class="drawer-backdrop"></div>
       <nav class="drawer" aria-label="Site">
         <div class="drawer-head">
-          <span>Thrilla</span>
+          <span>WhiSPa Wallet</span>
           <button type="button" class="drawer-close" aria-label="Close menu">✕</button>
         </div>
         <a href="index.html">Home</a>
         <a href="download.html">Download</a>
-        <a href="https://signet.thrilla.me">Try it <span class="ext">↗</span></a>
+        <a href="https://signet.whispawallet.com">Try it <span class="ext">↗</span></a>
         <a href="experience.html">Experience</a>
         <a href="privacy.html">Privacy &amp; security</a>
         <a href="how-it-works.html" aria-current="page">How it works</a>
@@ -41,7 +41,7 @@
         <a href="index.html#contact">Contact</a>
       </nav>
     </details>
-    <a class="brand" href="index.html"><img src="thrilla-icon.png" alt=""> Thrilla</a>
+    <a class="brand" href="index.html"><img src="whispa-mark.png" alt=""> WhiSPa</a>
     <span class="only-btc">₿ Bitcoin only</span>
     <div class="spacer"></div>
     <a class="btn btn-primary btn-sm" href="download.html">Get the app <span class="arrow">→</span></a>
@@ -50,20 +50,20 @@
 
 <div class="wrap page-head">
   <h1>Layers doing one job</h1>
-  <p class="lead">Thrilla is the interface. Open components do the work underneath — and none of them ever see the key that spends your bitcoin.</p>
+  <p class="lead">WhiSPa is the interface. Open components do the work underneath — and none of them ever see the key that spends your bitcoin.</p>
 </div>
 
 <section class="wrap" id="layers">
   <div class="stack">
     <div class="step">
       <div class="layer">Layer 01 · Interface</div>
-      <h4>Thrilla — the wallet you see</h4>
+      <h4>WhiSPa — the wallet you see</h4>
       <p>Derives keys and signs on your device. The server only broadcasts what you already signed.</p>
     </div>
     <div class="step">
       <div class="layer">Layer 02 · Backend</div>
       <h4>LNbits — accounts &amp; orchestration</h4>
-      <p>Thrilla ships as an LNbits extension, inheriting multi-user accounts, auth, and device confirmation.</p>
+      <p>WhiSPa ships as an LNbits extension, inheriting multi-user accounts, auth, and device confirmation.</p>
     </div>
     <div class="step">
       <div class="layer">Layer 03 · Indexing</div>
@@ -88,7 +88,7 @@
   <div class="pills">
     <div class="pill">
       <div class="name">LNbits <span class="b">accounts + API</span></div>
-      <div class="role">Multi-user, self-hosted Bitcoin backend. Thrilla is an extension on top.</div>
+      <div class="role">Multi-user, self-hosted Bitcoin backend. WhiSPa is an extension on top.</div>
     </div>
     <div class="pill">
       <div class="name">BlindBit <span class="b">SP oracle</span></div>
@@ -112,7 +112,7 @@
 <div class="wrap">
   <footer>
     <div>
-      <div style="color:var(--dim)">Thrilla · self-custodial, Bitcoin-only Silent Payments</div>
+      <div style="color:var(--dim)">WhiSPa Wallet · self-custodial, Bitcoin-only Silent Payments</div>
       <div class="disclaim">The mainnet build holds real bitcoin; Signet coins have no value. Self-custody means you alone are responsible for your keys and backups. Not financial advice.</div>
     </div>
     <nav>
