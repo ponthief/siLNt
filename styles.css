@@ -154,7 +154,7 @@ h1 em { font-style: normal; color: var(--orange); }
 header.hero { padding: 56px 0 60px; border-bottom: 1px solid var(--border); }
 /* Larger than the old mascot: this mark carries the WhiSPa wordmark, and below
    about 130px the lettering stops being readable. */
-.hero-mascot { width: clamp(132px, 15vw, 188px); height: auto; margin-bottom: 20px; animation: bob 6s ease-in-out infinite; }
+.hero-mascot { display: block; width: clamp(132px, 15vw, 188px); height: auto; margin: 0 auto 20px; animation: bob 6s ease-in-out infinite; }
 /* The previous version rocked between -2deg and 2deg, which suited a
    celebrating coin. A figure asking for quiet should not wobble: just a slow
    rise and fall, and none at all for anyone who has asked for less motion. */
@@ -454,7 +454,15 @@ footer nav { display: flex; flex-wrap: wrap; gap: 14px; }
 @media (max-width: 640px) {
   .bar { padding: 10px 18px; gap: 9px; }
   .only-btc { display: none; }
+  /* The drawer already has "Try it", so dropping it from the bar on a phone
+     loses nothing and keeps "Get the app" from being squeezed. */
+  .bar .btn-try { display: none; }
   .wrap { padding-left: 18px; padding-right: 18px; }
   header.hero { padding: 36px 0 44px; }
   section { padding-top: 44px; padding-bottom: 44px; }
 }
+
+/* Secondary action in the top bar. Below 900px the full label is too long to
+   sit beside the primary button, so the tail is hidden and it reads "Try it". */
+.btn-try .btn-try-long { display: inline; }
+@media (max-width: 900px) { .btn-try .btn-try-long { display: none; } }
