@@ -69,7 +69,11 @@ section:last-of-type { border-bottom: 0; }
   font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
   color: var(--orange); background: var(--orange-dim);
   border: 1px solid var(--border-bright); border-radius: 6px; padding: 3px 8px;
+  white-space: nowrap; flex-shrink: 0;
 }
+/* The bar is a fixed set of items in a fixed width, so nothing in it may
+   shrink or wrap — it sheds labels at the breakpoints below instead. */
+.bar .brand, .bar .btn { flex-shrink: 0; white-space: nowrap; }
 .bar .spacer { flex: 1; }
 
 /* <details> gives a click-to-open menu with no JavaScript; the script only
@@ -221,6 +225,15 @@ header.hero { padding: 56px 0 60px; border-bottom: 1px solid var(--border); }
 .dl-card p { font-size: 13.5px; color: var(--dim); }
 .dl-card .btn { justify-content: center; }
 .dl-meta { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+/* "signet.whispawallet.com" is one unbreakable token ~175px wide, which sets
+   the card's min-content and pushed the whole grid past a 320px screen. Below
+   430px the button names the destination in words instead. */
+.dl-host { display: inline; }
+.dl-host-short { display: none; }
+@media (max-width: 430px) {
+  .dl-host { display: none; }
+  .dl-host-short { display: inline; }
+}
 
 .panel-note {
   margin-top: 18px; padding: 18px 20px; font-size: 13.5px; color: var(--dim);
@@ -231,7 +244,10 @@ header.hero { padding: 56px 0 60px; border-bottom: 1px solid var(--border); }
 
 /* ── feature cards ───────────────────────────────────────────────────────── */
 .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-@media (max-width: 860px){ .grid { grid-template-columns: 1fr; } }
+/* Six cards, so step 3 → 2 → 1 rather than dropping straight to one column
+   and making a tablet scroll through all six. */
+@media (max-width: 860px){ .grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px){ .grid { grid-template-columns: 1fr; } }
 .card { border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); padding: 22px; box-shadow: var(--shadow); }
 .card .icon { font-size: 20px; display: block; margin-bottom: 12px; }
 .card h3 { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
@@ -453,7 +469,6 @@ footer nav { display: flex; flex-wrap: wrap; gap: 14px; }
 
 @media (max-width: 640px) {
   .bar { padding: 10px 18px; gap: 9px; }
-  .only-btc { display: none; }
   /* The drawer already has "Try it", so dropping it from the bar on a phone
      loses nothing and keeps "Get the app" from being squeezed. */
   .bar .btn-try { display: none; }
@@ -462,7 +477,52 @@ footer nav { display: flex; flex-wrap: wrap; gap: 14px; }
   section { padding-top: 44px; padding-bottom: 44px; }
 }
 
-/* Secondary action in the top bar. Below 900px the full label is too long to
-   sit beside the primary button, so the tail is hidden and it reads "Try it". */
+/* ── top bar: what the bar sheds, and at what width ───────────────────────────
+   The bar carries a fixed set of items in a fixed width, so as the viewport
+   narrows it drops the least useful ink at each step rather than letting
+   anything wrap or overflow. "₿ Bitcoin only" is the one thing that survives
+   all the way down to the narrowest phone — it is the positioning, so it stays
+   next to the brand and stays visible. Measured in Chromium at 1280 / 900 /
+   768 / 640 / 430 / 390 / 360 / 320px: no overflow at any of them. */
+
+/* 1. ≤900px — "Try it in your browser" no longer fits beside the primary
+      button, so the button reads just "Try it". */
 .btn-try .btn-try-long { display: inline; }
 @media (max-width: 900px) { .btn-try .btn-try-long { display: none; } }
+
+/* 2. ≤640px — "Try it" leaves the bar entirely (see the block above); the
+      badge tightens up to buy room for the primary button. */
+@media (max-width: 640px) {
+  .only-btc { font-size: 9.5px; padding: 3px 7px; letter-spacing: .07em; }
+  .brand { font-size: 15.5px; gap: 8px; }
+  .brand img { width: 25px; height: 25px; }
+}
+
+/* 3. ≤447px — the badge drops the word "Bitcoin" and reads "₿ only", keeping
+      the symbol that carries the meaning. 447 and not 430: measured every 2px,
+      the full label stops fitting beside the wordmark and the primary button
+      at 446px, so shedding at 430 left 432–446 overflowing. */
+@media (max-width: 447px) { .only-btc .obtc-long { display: none; } }
+
+@media (max-width: 430px) {
+  .bar { padding: 10px 14px; gap: 8px; }
+  .bar .btn-sm { padding: 8px 12px; font-size: 13px; }
+}
+
+/* 4. ≤380px — gutters and the primary button tighten. This is what keeps the
+      wordmark alive at 375px (iPhone SE/8) and 360px (common Android): at the
+      previous padding the bar needed 349px and had 334 at 362px wide. */
+@media (max-width: 380px) {
+  .bar { padding: 10px 10px; gap: 6px; }
+  .bar .btn-sm { padding: 7px 10px; font-size: 12.5px; }
+}
+
+/* 5. ≤355px — the brand wordmark goes. The mark alone still identifies the
+      site, and this is what keeps "Get the app" on one line on the narrowest
+      phones still in use. 355 is where the wordmark stops fitting: the bar
+      needs 336px of content and has (viewport − 20px) of room. */
+@media (max-width: 355px) {
+  .brand { font-size: 0; gap: 0; }
+  .brand img { width: 26px; height: 26px; }
+  .bar .btn .arrow { display: none; }
+}

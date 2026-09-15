@@ -17,7 +17,7 @@
 <!-- ?v= is a cache buster: styles.css is served with max-age=14400 and cached at
      the CDN edge, so BUMP THIS NUMBER whenever styles.css changes or the new
      styles will not reach visitors for up to four hours. -->
-<link rel="stylesheet" href="styles.css?v=7">
+<link rel="stylesheet" href="styles.css?v=8">
 </head>
 <body>
 
@@ -42,8 +42,8 @@
       </nav>
     </details>
     <a class="brand" href="index.html"><img src="whispa-mark.png" alt=""> WhiSPa</a>
+    <span class="only-btc"><b>₿</b> <span class="obtc-long">Bitcoin </span>only</span>
     <div class="spacer"></div>
-    <span class="only-btc">₿ Bitcoin only</span>
     <a class="btn btn-ghost btn-sm btn-try" href="https://signet.whispawallet.com"><span>Try it<span class="btn-try-long"> in your browser</span></span> <span class="arrow">→</span></a>
     <a class="btn btn-primary btn-sm" href="download.html">Get the app <span class="arrow">→</span></a>
   </div>
@@ -83,7 +83,7 @@
   <div class="sec-head">
     <div class="sec-tag">Features</div>
     <div class="sec-title">Reusable addresses without the privacy tax</div>
-    <p class="sec-sub">Reuse one ordinary Bitcoin address and leak your history; generate new ones forever and drown in bookkeeping. Silent Payments end that trade-off.</p>
+    <p class="sec-sub">Reuse one ordinary Bitcoin address and leak your history; generate new ones forever and drown in bookkeeping. Silent Payments end that trade-off — and the rest of the wallet is built to keep it that way.</p>
   </div>
   <div class="grid">
     <div class="card">
@@ -93,22 +93,43 @@
       <span class="tag">Reusable &amp; unlinkable</span>
     </div>
     <div class="card">
+      <span class="icon">🧊</span>
+      <h3>Coin control</h3>
+      <p>Every coin listed with its own label, and a freeze switch on each. You choose exactly which ones fund a payment, so two coins never end up in the same transaction unless you put them there.</p>
+      <span class="tag">You pick the inputs</span>
+    </div>
+    <div class="card">
+      <span class="icon">🛡️</span>
+      <h3>Dust-attack defence</h3>
+      <p>Tiny unsolicited coins are how chain surveillance links your wallet together. WhiSPa spots them and freezes them on arrival, so they can't be spent by accident.</p>
+      <span class="tag">Frozen on arrival</span>
+    </div>
+    <div class="card">
       <span class="icon">✉️</span>
       <h3>BitMail</h3>
-      <p>Hand someone <strong>alice@mydomain.net</strong> instead of a 116-character string. Resolves over DNS.</p>
+      <p>Hand someone <strong>alice@mydomain.net</strong> instead of a 116-character string. Resolves over DNS, and the app warns you if the name stops resolving to your wallet.</p>
       <span class="tag">DNS-backed</span>
     </div>
     <div class="card">
       <span class="icon">🤝</span>
       <h3>Collaborative PayJoin</h3>
-      <p>Pay another member with a transaction you both put inputs into, breaking the "one owner per transaction" assumption.</p>
+      <p>Pay another member with a transaction you both put inputs into, breaking the "one owner per transaction" assumption every chain analyst starts from.</p>
       <span class="tag">Within your circle</span>
     </div>
+    <div class="card">
+      <span class="icon">🔒</span>
+      <h3>Locked to your device</h3>
+      <p>Biometric or PIN to open, and a separate duress PIN that wipes this device's keys instead of unlocking. Your spend key never reaches the server.</p>
+      <span class="tag">Duress PIN</span>
+    </div>
   </div>
-  <p class="also">Plus: coin control with dust flagging · biometric or PIN lock, and a duress PIN that wipes this device's keys · Lightning and on-chain ↔ Lightning swaps coming.</p>
 
   <div class="panel-note" style="margin-top:26px">
-    <p><strong>What it's for.</strong> Publishing a Bitcoin address normally means publishing your history — anyone who pays you can read every other payment that address ever received. Silent Payments end that: <strong>one address you can hand out freely</strong>, and each payment arrives somewhere only you can find. Members of the same LNbits instance can go further and pay each other by collaborative PayJoin, breaking the assumption that one transaction has one owner. <strong>Your keys are your responsibility</strong> — no one can move your bitcoin, or recover it if you lose your backup.</p>
+    <p><strong>What a dust attack is, and why the freeze matters.</strong> Someone sends you a few hundred sats you never asked for. It looks like nothing — but the moment you spend it alongside your other coins, you have signed a transaction proving the two belong to the same wallet, and whoever sent the dust has just linked them. It is one of the cheapest deanonymisation tricks there is. WhiSPa compares every incoming coin against a threshold and against your own change, and <strong>anything small that didn't come from you is flagged and frozen automatically</strong> — out of the coin selection until you deliberately unfreeze it. A freeze you set by hand is never overridden.</p>
+  </div>
+
+  <div class="panel-note" style="margin-top:14px">
+    <p><strong>What it's all for.</strong> Publishing a Bitcoin address normally means publishing your history — anyone who pays you can read every other payment that address ever received. Silent Payments end that: <strong>one address you can hand out freely</strong>, and each payment arrives somewhere only you can find. <strong>Your keys are your responsibility</strong> — no one can move your bitcoin, or recover it if you lose your backup.</p>
   </div>
 </section>
 
