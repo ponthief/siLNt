@@ -54,6 +54,17 @@
   <p class="lead">Two clips of the wallet being used end to end, and four screens from it — the BitMail tampering alert, receiving, coin control, and scanning the chain for the payments only your key can find.</p>
 </div>
 
+<!-- ?v= on every media URL below is a cache buster, and it is load-bearing.
+     The host answers an unknown path with index.html at HTTP 200 and
+     cache-control: max-age=14400 — a *cacheable success*. So a browser that
+     asked for one of these files before it finished uploading cached a page of
+     HTML under that URL for four hours and kept showing a broken image long
+     after the file was there. Bump the number whenever a media file is added,
+     renamed, or re-uploaded.
+
+     The videos also use preload="metadata" rather than "none" so the browser
+     draws the first frame itself if a poster fails to load — otherwise a
+     missing poster leaves a black rectangle. -->
 <section class="wrap" id="clips">
   <div class="sec-head">
     <div class="sec-tag">In use</div>
@@ -62,24 +73,24 @@
   </div>
   <div class="clips">
     <figure class="clip">
-      <video controls playsinline preload="none" muted
-             poster="clip-send-poster.jpg"
+      <video controls playsinline preload="metadata" muted
+             poster="clip-send-poster.jpg?v=1"
              width="572" height="1280"
              aria-label="Screen recording: sending a payment from WhiSPa Wallet">
-        <source src="clip-send.mp4" type="video/mp4">
+        <source src="clip-send.mp4?v=1" type="video/mp4">
         Your browser can't play this clip.
-        <a href="clip-send.mp4">Download it instead</a>.
+        <a href="clip-send.mp4?v=1">Download it instead</a>.
       </video>
       <figcaption><strong>Sending.</strong> Pick a contact by BitMail name, set the amount and fee rate, choose exactly which coins to spend, then review.</figcaption>
     </figure>
     <figure class="clip">
-      <video controls playsinline preload="none" muted
-             poster="clip-receive-poster.jpg"
+      <video controls playsinline preload="metadata" muted
+             poster="clip-receive-poster.jpg?v=1"
              width="572" height="1280"
              aria-label="Screen recording: receiving a payment in WhiSPa Wallet">
-        <source src="clip-receive.mp4" type="video/mp4">
+        <source src="clip-receive.mp4?v=1" type="video/mp4">
         Your browser can't play this clip.
-        <a href="clip-receive.mp4">Download it instead</a>.
+        <a href="clip-receive.mp4?v=1">Download it instead</a>.
       </video>
       <figcaption><strong>Receiving.</strong> Scan the chain from the last height you checked, the payment lands, and the transaction opens with its label and explorer link.</figcaption>
     </figure>
@@ -93,19 +104,19 @@
   </div>
   <div class="shots">
     <figure class="shot">
-      <img loading="lazy" src="screen-bitmail-tampering.jpg" alt="A red warning panel reading BitMail tampering detected: the name currently resolves to a different address than your wallet">
+      <img loading="lazy" src="screen-bitmail-tampering.jpg?v=1" alt="A red warning panel reading BitMail tampering detected: the name currently resolves to a different address than your wallet">
       <figcaption>If a BitMail name stops resolving to your wallet, the app says so before you rely on it — and tells your administrator.</figcaption>
     </figure>
     <figure class="shot">
-      <img loading="lazy" src="screen-receive-bitmail.jpg" alt="The Receive screen: a QR code for a reusable Silent Payments address, with a form to claim a BitMail name">
+      <img loading="lazy" src="screen-receive-bitmail.jpg?v=1" alt="The Receive screen: a QR code for a reusable Silent Payments address, with a form to claim a BitMail name">
       <figcaption>Your reusable address as a QR — and a BitMail name to put in front of it.</figcaption>
     </figure>
     <figure class="shot">
-      <img loading="lazy" src="screen-coin-control.jpg" alt="The Coins screen listing unspent coins with amounts, a label action and a freeze button on each">
+      <img loading="lazy" src="screen-coin-control.jpg?v=1" alt="The Coins screen listing unspent coins with amounts, a label action and a freeze button on each">
       <figcaption>Every coin listed, labelled and freezable. Dust is counted on its own line — unsolicited small coins are flagged and frozen on arrival, so they can't be pulled into a payment and link your wallet together.</figcaption>
     </figure>
     <figure class="shot">
-      <img loading="lazy" src="screen-scan.jpg" alt="The Scan screen showing the chain tip, the height scanned to, and a button to scan the remaining blocks">
+      <img loading="lazy" src="screen-scan.jpg?v=1" alt="The Scan screen showing the chain tip, the height scanned to, and a button to scan the remaining blocks">
       <figcaption>Scanning the chain for the payments only your key can find.</figcaption>
     </figure>
   </div>
