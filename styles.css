@@ -526,3 +526,62 @@ footer nav { display: flex; flex-wrap: wrap; gap: 14px; }
   .brand img { width: 26px; height: 26px; }
   .bar .btn .arrow { display: none; }
 }
+
+/* ── the on-chain comparison figures ─────────────────────────────────────────
+   Two inline SVGs showing what clustering has to work with: one reused address
+   versus a Silent Payment address. Inline rather than an image so they scale,
+   cost no request, and take their colours from the palette above — an exported
+   PNG would drift the first time a token changes. */
+.chainfig-pair { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+@media (max-width: 760px) { .chainfig-pair { grid-template-columns: 1fr; } }
+
+.chainfig {
+  margin: 0;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--panel); box-shadow: var(--shadow);
+  padding: 16px 16px 15px;
+}
+.chainfig svg { display: block; width: 100%; height: auto; }
+.chainfig figcaption { margin-top: 12px; font-size: 13px; color: var(--dim); }
+.chainfig figcaption strong { color: var(--ink); font-weight: 600; }
+
+.cf-head {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+  text-transform: uppercase; margin-bottom: 12px;
+  display: inline-flex; align-items: center; gap: 7px;
+}
+.cf-head::before { content: ""; width: 7px; height: 7px; border-radius: 50%; }
+.cf-head-bad { color: var(--red); }
+.cf-head-bad::before { background: var(--red); }
+.cf-head-good { color: var(--green); }
+.cf-head-good::before { background: var(--green); }
+
+/* SVG internals. Fills and strokes are set here, not as presentation
+   attributes, so the two figures cannot fall out of step with each other. */
+.cf-payer rect { fill: var(--bg-2); stroke: var(--border-bright); stroke-width: 1; }
+.cf-label { font-family: var(--sans); font-size: 10px; fill: var(--dim); }
+.cf-wire path { fill: none; stroke: var(--faint); stroke-width: 1.4; }
+.cf-addr { font-family: var(--mono); font-size: 11px; fill: var(--ink); }
+.cf-sub { font-family: var(--sans); font-size: 9px; fill: var(--faint); }
+.cf-sub-bad { fill: var(--red); }
+/* The single reused address is the whole problem, so it is the one thing drawn
+   in the alarm colour. */
+.cf-box-bad { fill: rgba(179,38,30,.07); stroke: var(--red); stroke-width: 1.4; }
+.cf-box-good rect { fill: var(--panel); stroke: var(--border-bright); stroke-width: 1.2; }
+.cf-sp { font-family: var(--mono); font-size: 12px; color: var(--orange); }
+
+/* The observer: a magnifying glass, plus the line of sight it either has or
+   does not. On the left it is one unbroken stroke to the reused address; on the
+   right the strokes are dashed, stop short and are struck through, because
+   there is no shared address for clustering to hold on to. */
+.cf-see path { fill: none; stroke-width: 1.4; }
+.cf-see-bad path { stroke: var(--red); }
+.cf-see-good path { stroke: var(--faint); stroke-dasharray: 3 3; }
+.cf-cut path { fill: none; stroke: var(--green); stroke-width: 1.6; stroke-linecap: round; }
+.cf-lens circle { fill: none; stroke-width: 1.8; }
+.cf-lens path { fill: none; stroke-width: 2.4; stroke-linecap: round; }
+.cf-lens-bad circle, .cf-lens-bad path { stroke: var(--red); }
+.cf-lens-good circle, .cf-lens-good path { stroke: var(--faint); }
+.cf-verdict { font-family: var(--mono); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
+.cf-verdict-bad { fill: var(--red); }
+.cf-verdict-good { fill: var(--green); }

@@ -17,7 +17,7 @@
 <!-- ?v= is a cache buster: styles.css is served with max-age=14400 and cached at
      the CDN edge, so BUMP THIS NUMBER whenever styles.css changes or the new
      styles will not reach visitors for up to four hours. -->
-<link rel="stylesheet" href="styles.css?v=8">
+<link rel="stylesheet" href="styles.css?v=9">
 </head>
 <body>
 
@@ -54,7 +54,7 @@
        alt="WhiSPa Wallet — a hooded figure signalling for quiet, holding a Bitcoin coin">
   <div class="eyebrow"><span class="dot"></span> <b>Bitcoin only</b> · Self-custodial · Silent Payments</div>
   <h1>Your Bitcoin. <em>Your business.</em></h1>
-  <p class="lead">Publish one <strong>Silent Payment</strong> address — on your site, in your bio, on a poster — and keep it forever. Every payment still lands on a fresh output that nobody can tie to you, or to each other. Your spend key stays on the device you use, and never reaches the server.</p>
+  <p class="lead">One <strong>Silent Payment</strong> address. Put it on your site, in your bio, on a poster — and keep it for life. Every payment still lands somewhere brand new, so there is nothing for anyone to join up. Your spend key never leaves your device.</p>
 
   <div class="btc-note">
     <strong>Bitcoin, and nothing else.</strong> No altcoins, no tokens, no bridges, no in-app exchange. Your coins are ordinary UTXOs on the Bitcoin blockchain, spendable from your seed with or without this app.
@@ -82,14 +82,14 @@
 <section class="wrap" id="features">
   <div class="sec-head">
     <div class="sec-tag">Features</div>
-    <div class="sec-title">Reusable addresses without the privacy tax</div>
-    <p class="sec-sub">Reuse one ordinary Bitcoin address and leak your history; generate new ones forever and drown in bookkeeping. Silent Payments end that trade-off — and the rest of the wallet is built to keep it that way.</p>
+    <div class="sec-title">One address. Nothing to join up.</div>
+    <p class="sec-sub">Reuse an ordinary Bitcoin address and you publish your history. Mint a new one every time and you drown in bookkeeping. Silent Payments end that trade-off — and the rest of the wallet is built to keep it ended.</p>
   </div>
   <div class="grid">
     <div class="card">
       <span class="icon">🔇</span>
       <h3>Silent Payments</h3>
-      <p>Publish one address. Each sender derives a different on-chain output, so nothing links your payments — yet only you can spend them.</p>
+      <p>Hand out one address for the rest of your life. Every payer works out a different destination, so the chain shows unrelated outputs — and only your key knows they are all yours.</p>
       <span class="tag">Reusable &amp; unlinkable</span>
     </div>
     <div class="card">
@@ -133,6 +133,125 @@
   </div>
 </section>
 
+<section class="wrap" id="onchain">
+  <div class="sec-head">
+    <div class="sec-tag">On-chain</div>
+    <div class="sec-title">What the watchers actually see</div>
+    <p class="sec-sub">Chain analysis works by clustering: find one address used twice and you have joined two payments, two counterparties, two moments in someone's life. A Silent Payment address is never the thing that lands on the chain, so there is no repeat to find.</p>
+  </div>
+
+  <!-- Hand-drawn inline SVG rather than an image file: it scales to any width,
+       needs no extra request, and inherits the palette below via var(), so it
+       cannot drift out of step with the rest of the site. Marker ids are
+       suffixed per figure — two <svg> in one document must not share them. -->
+  <div class="chainfig-pair">
+    <figure class="chainfig">
+      <div class="cf-head cf-head-bad">A reused address</div>
+      <svg viewBox="0 0 392 190" role="img"
+           aria-label="Three payers all send to the same reused Bitcoin address. The three payments converge on one point, and a magnifying glass labelled 1 cluster reaches it along an unbroken line: chain analysis has the shared address it needs to link everything.">
+        <defs>
+          <marker id="cf-arrow-bad" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0 1 L9 5 L0 9 z" fill="var(--faint)"/>
+          </marker>
+        </defs>
+        <g class="cf-payer">
+          <rect x="4"  y="12"  width="56" height="30" rx="7"/>
+          <rect x="4"  y="74"  width="56" height="30" rx="7"/>
+          <rect x="4"  y="136" width="56" height="30" rx="7"/>
+        </g>
+        <g class="cf-label" text-anchor="middle">
+          <text x="32" y="31">Payer 1</text>
+          <text x="32" y="93">Payer 2</text>
+          <text x="32" y="155">Payer 3</text>
+        </g>
+        <g class="cf-wire" marker-end="url(#cf-arrow-bad)">
+          <path d="M60 27 C 112 27, 128 89, 174 89"/>
+          <path d="M60 89 L 174 89"/>
+          <path d="M60 151 C 112 151, 128 89, 174 89"/>
+        </g>
+        <rect class="cf-box-bad" x="178" y="68" width="118" height="42" rx="8"/>
+        <text class="cf-addr" x="237" y="88" text-anchor="middle">bc1q…7f2</text>
+        <text class="cf-sub cf-sub-bad" x="237" y="101" text-anchor="middle">the same one, every time</text>
+
+        <!-- The observer. One unbroken line: the reused address is the handle
+             clustering needs, and it reaches. -->
+        <path class="cf-see cf-see-bad" d="M296 89 L 327 89" marker-end="url(#cf-arrow-bad)"/>
+        <g class="cf-lens cf-lens-bad">
+          <circle cx="350" cy="80" r="14"/>
+          <path d="M360 90 L 371 101"/>
+        </g>
+        <text class="cf-verdict cf-verdict-bad" x="350" y="122" text-anchor="middle">1 cluster</text>
+        <text class="cf-sub" x="350" y="134" text-anchor="middle">all of it, linked</text>
+      </svg>
+      <figcaption><strong>One point of contact.</strong> Every payment you ever received sits behind a single address. Anyone who pays you once can read the rest.</figcaption>
+    </figure>
+
+    <figure class="chainfig">
+      <div class="cf-head cf-head-good">A Silent Payment address</div>
+      <svg viewBox="0 0 392 190" role="img"
+           aria-label="Three payers each derive a different one-off output from the same published Silent Payment address. Three dashed lines run toward a magnifying glass but each is struck through, and it is labelled no link: chain analysis has no shared address to cluster on.">
+        <defs>
+          <marker id="cf-arrow-good" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0 1 L9 5 L0 9 z" fill="var(--faint)"/>
+          </marker>
+        </defs>
+        <g class="cf-payer">
+          <rect x="4"  y="12"  width="56" height="30" rx="7"/>
+          <rect x="4"  y="74"  width="56" height="30" rx="7"/>
+          <rect x="4"  y="136" width="56" height="30" rx="7"/>
+        </g>
+        <g class="cf-label" text-anchor="middle">
+          <text x="32" y="31">Payer 1</text>
+          <text x="32" y="93">Payer 2</text>
+          <text x="32" y="155">Payer 3</text>
+        </g>
+        <g class="cf-wire" marker-end="url(#cf-arrow-good)">
+          <path d="M60 27 L 164 27"/>
+          <path d="M60 89 L 164 89"/>
+          <path d="M60 151 L 164 151"/>
+        </g>
+        <g class="cf-box-good">
+          <rect x="168" y="12"  width="100" height="30" rx="8"/>
+          <rect x="168" y="74"  width="100" height="30" rx="8"/>
+          <rect x="168" y="136" width="100" height="30" rx="8"/>
+        </g>
+        <g class="cf-addr" text-anchor="middle">
+          <text x="218" y="31">bc1p…a91</text>
+          <text x="218" y="93">bc1p…5c3</text>
+          <text x="218" y="155">bc1p…e08</text>
+        </g>
+
+        <!-- The same observer, given three outputs with nothing in common. The
+             lines toward it are dashed and stop short, each struck through:
+             there is no shared address to cluster on, so the trail ends. -->
+        <g class="cf-see cf-see-good">
+          <path d="M268 27  L 288 27"/>
+          <path d="M268 89  L 288 89"/>
+          <path d="M268 151 L 288 151"/>
+        </g>
+        <g class="cf-cut">
+          <path d="M290 22 L 300 32 M300 22 L 290 32"/>
+          <path d="M290 84 L 300 94 M300 84 L 290 94"/>
+          <path d="M290 146 L 300 156 M300 146 L 290 156"/>
+        </g>
+        <g class="cf-lens cf-lens-good">
+          <circle cx="330" cy="80" r="14"/>
+          <path d="M340 90 L 351 101"/>
+        </g>
+        <text class="cf-verdict cf-verdict-good" x="332" y="122" text-anchor="middle">no link</text>
+        <text class="cf-sub" x="332" y="134" text-anchor="middle">three strangers</text>
+      </svg>
+      <figcaption><strong>Three strangers.</strong> The <span class="cf-sp">sp1q…d9k3</span> you published never appears on the chain — each payer derives a one-off output from it. Nothing connects them but your scan key.</figcaption>
+    </figure>
+  </div>
+
+  <div class="panel-note" style="margin-top:22px">
+    <p><strong>What this does not do.</strong> Bitcoin is still a public ledger, and honesty about that is part of the point. Silent Payments break the link on the <em>receiving</em> side — there is no reused address to cluster on. They do not hide amounts, they do not hide the payer's own coins, and they cannot help you if you then spend two of those outputs in one transaction: doing that publishes the link yourself. That is exactly why <a href="#features">coin control and the dust freeze</a> are in the wallet, and why the Coins screen counts dust on its own line.</p>
+  </div>
+</section>
+
 <section class="wrap" id="contact">
   <div class="sec-head">
     <div class="sec-tag">Contact</div>
@@ -155,7 +274,7 @@
   <div class="donate">
     <div class="dn-text">
       <span class="ct-k">Donate</span>
-      <div class="dn-addr" id="donate-addr">dominus@thrilla.me</div>
+      <div class="dn-addr" id="donate-addr">dominus@whispawallet.com</div>
       <span class="ct-m">A BitMail name, not an email — paste it into WhiSPa, or any wallet that resolves BIP&#8209;353, and it becomes a fresh Silent Payment address.</span>
     </div>
   </div>
