@@ -43,7 +43,10 @@ async def _tamper_sweep_loop():
     while True:
         try:
             res = await run_bitmail_tamper_sweep()
-            if res and res.get("mismatches"):
+            # Also surface repairs, not just mismatches: a repoint rewrites what
+            # every user sees as their own address, so it should never happen
+            # without a line in the log saying it did.
+            if res and (res.get("mismatches") or res.get("repointed")):
                 logger.warning(f"[silnt] tamper sweep: {res}")
         except Exception as exc:
             logger.error(f"[silnt] tamper sweep loop error: {exc}")

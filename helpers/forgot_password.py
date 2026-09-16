@@ -77,13 +77,13 @@ async def request_password_reset(email: str, request: Request) -> dict:
         reset_url = f"{origin}/reset?key={reset_key}"
 
         # ── Compose email ─────────────────────────────────────────────────────
-        subject = "Thrilla — Password reset request"
+        subject = "WhiSPa — Password reset request"
         body = (
             f"Hi {account.username or 'there'},\n\n"
             f"Someone (hopefully you) requested a password reset for your account.\n\n"
             f"Click this link to set a new password:\n{reset_url}\n\n"
             f"If you didn't request this, you can safely ignore this email.\n\n"
-            f"— Thrilla"
+            f"— WhiSPa"
         )
 
         # ── Send ──────────────────────────────────────────────────────────────

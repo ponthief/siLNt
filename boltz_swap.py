@@ -58,7 +58,7 @@ from .swap_crypto import encrypt_refund_key
 
 # ── Config ────────────────────────────────────────────────────────────────────
 # boltz_url is stored in the per-network siLNt backend config (same store as
-# blindbit_url / mempool_url), editable in the Thrilla Admin screen. Read it the
+# blindbit_url / mempool_url), editable in the WhiSPa Admin screen. Read it the
 # same way the scanner reads blindbit_url, keyed by the swap's network.
 #
 #   regtest → http://127.0.0.1:9001   (boltz-backend-nginx)
@@ -137,7 +137,7 @@ async def api_create_swap_in(
         payment = await create_invoice(
             wallet_id=data.wallet_id,
             amount=data.amount,
-            memo=f"Thrilla swap-in {data.amount} sats",
+            memo=f"WhiSPa swap-in {data.amount} sats",
             extra={"tag": "silnt_swap"},
             expiry=60 * 60,  # 1h to fund the on-chain side
         )

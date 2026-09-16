@@ -84,7 +84,7 @@ async def create_bip353_record(
         "name": record_name,
         "content":  '"' + content + '"',
         "ttl": ttl,
-        "comment": "BIP-353 Silent Payment address — managed by Thrilla",
+        "comment": "BIP-353 Silent Payment address — managed by WhiSPa",
     }
 
     async with httpx.AsyncClient(timeout=10.0) as client:

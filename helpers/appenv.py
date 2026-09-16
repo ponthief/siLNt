@@ -96,7 +96,7 @@ def silnt_env(key: str, default: str = "") -> str:
 
 
 def frontend_base_url(request=None) -> str:
-    """Canonical Thrilla web-app base URL for building email links (verify /
+    """Canonical WhiSPa web-app base URL for building email links (verify /
     reset). Prefers the configured SILNT_FRONTEND_URL so links resolve no matter
     how the request arrived: a browser sends an Origin/Referer header, but the
     mobile app's fetch does NOT — so without a configured URL a mobile

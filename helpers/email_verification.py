@@ -228,7 +228,7 @@ async def start_registration(
             HTTPStatus.INTERNAL_SERVER_ERROR, "Could not start registration."
         )
 
-    # Resolve the Thrilla web-app origin. Prefers SILNT_FRONTEND_URL so the link
+    # Resolve the WhiSPa web-app origin. Prefers SILNT_FRONTEND_URL so the link
     # is correct for mobile registrations too (mobile sends no Origin header, so
     # the request-derived fallback would point at the API host and 404).
     from .appenv import frontend_base_url
@@ -240,10 +240,10 @@ async def start_registration(
     # a screen asking for it, and on a deployment whose web app is closed the
     # link below will not open at all — so the thing that always works has to
     # be the thing they see first.
-    subject = "Thrilla — Verify your email"
+    subject = "WhiSPa — Verify your email"
     body = (
         f"Hi {username},\n\n"
-        f"Your Thrilla verification code is:\n\n"
+        f"Your WhiSPa verification code is:\n\n"
         f"    {code}\n\n"
         f"Enter it in the app to activate your account.\n\n"
         f"Or, if you registered in a web browser, open this link instead:\n\n"
@@ -252,7 +252,7 @@ async def start_registration(
         f"{VERIFICATION_TOKEN_TTL_SECONDS // 60} minutes, and using either one "
         f"activates your account.\n\n"
         f"If you didn't request this, you can safely ignore this email.\n\n"
-        f"— Thrilla"
+        f"— WhiSPa"
     )
 
     if not settings.lnbits_email_notifications_enabled:
@@ -431,12 +431,12 @@ async def _create_verified_account(
 
     # ── Send welcome email — non-fatal if it fails ────────────────────────────
     try:
-        welcome_subject = "Welcome to Thrilla"
+        welcome_subject = "Welcome to WhiSPa"
         welcome_body = (
             f"Hi {username},\n\n"
-            f"Your Thrilla account is now active. You can sign in any time at the "
+            f"Your WhiSPa account is now active. You can sign in any time at the "
             f"URL below using your username and password.\n\n"
-            f"What you can do with Thrilla:\n"
+            f"What you can do with WhiSPa:\n"
             f"  • Create Silent Payment (BIP-352) wallets — private by default\n"
             f"  • Scan the chain for incoming payments via your BlindBit oracle\n"
             f"  • Send to sp1… / bc1q… / BIP-353 (alice@domain) recipients\n"
@@ -445,7 +445,7 @@ async def _create_verified_account(
             f"Keep your mnemonic safe; without it your funds can't be recovered.\n\n"
             f"If you ever need to reset your password, use the 'Forgot password' "
             f"link on the sign-in screen.\n\n"
-            f"— Thrilla"
+            f"— WhiSPa"
         )
         if settings.lnbits_email_notifications_enabled:
             res = await send_email_notification(

@@ -24,7 +24,7 @@ DEVICE_COOKIE_DOMAIN = silnt_env("SILNT_DEVICE_COOKIE_DOMAIN") or None
 DEVICE_HEADER = "X-Silnt-Device"
 
 def _is_thrilla_request(request: Request) -> bool:
-    # Thrilla's fetch wrapper sends this header on every call. The LNbits-native
+    # WhiSPa's fetch wrapper sends this header on every call. The LNbits-native
     # extension page does not.
     return request.headers.get("X-Thrilla-Client") == "1"
 
