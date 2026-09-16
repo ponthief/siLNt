@@ -2872,24 +2872,11 @@ async def get_issued_bitmail_sp_address(username: str) -> Optional[str]:
 async def list_approved_bitmails() -> list[dict]:
     """Every APPROVED BitMail siLNt issued: its final_username, the SP address we
     recorded, and the owning user_id/wallet_id. Used by the tamper sweep to
-    resolve each via DNS and compare against the recorded SP.
-
-    Also returns address_id and the CURRENTLY STORED display address, so the
-    sweep can repair a stored address left behind by a domain move. The stored
-    value lives in one of two columns depending on which SP address the BitMail
-    was issued for — wallet_addresses.hr_address for a labeled address,
-    wallets.hr_address for the wallet's base address — so both come back
-    separately rather than COALESCEd: a labeled row whose own hr_address is
-    NULL must not be mistaken for the wallet's."""
+    resolve each via DNS and compare against the recorded SP."""
     rows = await db.fetchall(
-        """SELECT r.final_username, r.sp_address, r.user_id, r.wallet_id,
-                  r.address_id,
-                  a.hr_address AS label_hr,
-                  w.hr_address AS wallet_hr
-           FROM silnt.bip353_requests r
-           LEFT JOIN silnt.wallets w ON w.id = r.wallet_id
-           LEFT JOIN silnt.wallet_addresses a ON a.id = r.address_id
-           WHERE r.status = 'approved' AND r.final_username IS NOT NULL""",
+        """SELECT final_username, sp_address, user_id, wallet_id
+           FROM silnt.bip353_requests
+           WHERE status = 'approved' AND final_username IS NOT NULL""",
     )
     return [dict(r) for r in rows]
 

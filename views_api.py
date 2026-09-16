@@ -51,7 +51,6 @@ from .helpers.transactions import get_wallet_transaction_detail, list_wallet_tra
 from lnbits.core.crud import get_account, get_account_by_username, get_account_by_email
 from lnbits.core.crud.users import delete_account
 from lnbits.core.services.notifications import send_email_notification
-from .helpers.bitmail import plan_repoint
 from .helpers.device_auth import (
     require_trusted_device,
     require_trusted_device_admin,    
@@ -3953,7 +3952,6 @@ async def _run_bitmail_tamper_sweep_inner() -> dict:
 
     checked = 0
     mismatches = 0
-    repointed = 0
     for row in issued:
         uname = (row.get("final_username") or "").strip()
         expected = (row.get("sp_address") or "").strip()
@@ -3992,45 +3990,6 @@ async def _run_bitmail_tamper_sweep_inner() -> dict:
                     logger.warning(f"tamper sweep: cleared {cleared} stale alert(s) for {bitmail} (now matches)")
             except Exception as e:
                 logger.warning(f"tamper sweep: could not clear stale alert for {bitmail}: {e}")
-
-            # Repair a display address stranded by a domain move.
-            #
-            # This sweep composes the address it checks as
-            # final_username@<current configured domain>, so it followed the
-            # SILNT_BITMAIL_DOMAIN change by itself. The address the apps SHOW
-            # does not: wallets.hr_address (and wallet_addresses.hr_address for a
-            # labeled address) is a snapshot written once, when the BitMail was
-            # issued — see bip353_cloudflare.py, `hr_address = f"{username}@{domain}"`.
-            # Move the DNS record to a new domain and the stored string keeps
-            # naming the old one, which is what a user sees.
-            #
-            # Getting here is proof it is safe to rewrite: the record at the NEW
-            # domain exists AND resolves to exactly the SP address siLNt issued
-            # this BitMail for. That is the same check the wallet-update endpoint
-            # makes before accepting an hr_address, so nothing is being taken on
-            # trust. It also means a BitMail a user points at a domain of their
-            # own is left alone — the instance-composed address will not resolve
-            # to their SP address, so this branch is never reached for it.
-            #
-            # Idempotent: once stored and derived agree there is nothing to do,
-            # and no extra DNS lookup is spent — this reuses the resolution the
-            # sweep already performed.
-            try:
-                plan = plan_repoint(row, bitmail)
-                if plan.needed:
-                    if plan.address_id:
-                        await update_label_hr_address(plan.address_id, plan.derived)
-                    else:
-                        await update_hr_address(wid, plan.derived)
-                    repointed += 1
-                    logger.warning(
-                        f"tamper sweep: repointed stored BitMail {plan.stored} -> "
-                        f"{plan.derived} (wallet {wid}"
-                        f"{', address ' + plan.address_id if plan.address_id else ''}) — "
-                        f"it resolves to the issued SP address, so the domain moved"
-                    )
-            except Exception as e:
-                logger.warning(f"tamper sweep: could not repoint stored BitMail for {bitmail}: {e}")
             continue
         if result.lower() != expected.lower():
             mismatches += 1
@@ -4060,7 +4019,7 @@ async def _run_bitmail_tamper_sweep_inner() -> dict:
             except Exception as e:
                 logger.error(f"tamper sweep: could not record alert for {bitmail}: {e}")
             await _notify_and_mark_tamper(bitmail, detail)
-    return {"checked": checked, "mismatches": mismatches, "repointed": repointed}
+    return {"checked": checked, "mismatches": mismatches}
 
 async def probe_blindbit_health() -> None:
     """Reachability probe for the BlindBit Oracle, callable from a background
