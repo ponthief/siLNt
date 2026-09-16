@@ -331,6 +331,46 @@ negation, so the cost is O(tweaks x labels). The scan set is always four labels
 (change m=0, legacy change m=1, and labeled addresses m=2,3), which is why the
 default is 2.7x the no-label cost.
 
+### Reverse matching
+
+That multiplier exists only because `/tweaks` returns tweaks and nothing else.
+Not knowing which transaction a tweak belongs to, the scanner has to enumerate
+**forwards**: build every output the tweak could possibly produce — the plain
+one, plus each label added and negated — and look all nine up among the block's
+outputs. Nine curve operations per tweak, spent almost entirely on transactions
+belonging to other people.
+
+`/range/compute-index` pairs each tweak with its txid. Given the transaction,
+the test inverts: subtract the plain candidate from that transaction's own
+outputs and see whether the difference is a label. One curve operation per
+output, and the label comparison becomes a set lookup.
+
+| matcher | per block (800 tweaks, 4 labels, 2 outputs/tx) |
+|---|---|
+| `sync_block` (forward) | 135.7 ms |
+| `sync_block_reverse` | 94.7 ms |
+| | **1.43x** |
+
+On the reported 119-block scan that is ~23.2s of matching down to ~16.2s. The
+scanner uses it automatically when the oracle serves `/range/compute-index`, and
+falls back to forward matching when it does not — detected once per scan.
+
+**Both sign combinations are required.** The scanner only ever sees an output
+x-only, so it reconstructs P_0 with even parity forced; where the true P_0 is
+odd, the reconstruction is -P_0 and only the other sign yields the label.
+Testing one sign silently misses ~40% of labeled payments — including change,
+which lives at m=0. That is not hypothetical: it is precisely the defect in
+`sync_block_from_compute_index`, the opt-in path behind
+`SILNT_SCAN_COMPUTE_INDEX` that has never run in production.
+
+Because this decides whether money is found, `tests/test_reverse_matching.py`
+holds the two matchers to returning *identical* results — same txids, vouts,
+amounts, key tweaks and labels — across a randomised corpus of plain payments,
+every label, multiple outputs to us in one transaction, mixed labels, and
+decoys. A separate test counts how many transactions reach extraction, because
+a filter that passed everything would still be correct and would silently undo
+the whole saving.
+
 Matching runs on a **single** dedicated worker thread. This is not a limitation
 to be raised: `coincurve` holds the GIL through its calls, so extra matching
 threads contend rather than share. Measured on 4 cores, 8 blocks of 300 tweaks:
@@ -347,6 +387,75 @@ Real parallelism needs processes, not threads. Worth doing only after the
 per-tweak cost itself comes down — and the way to do that is
 `SILNT_SCAN_COMPUTE_INDEX`, which moves the work to the oracle entirely.
 
+### Range endpoints
+
+The table above measures the matching. The other half of a scan is the requests,
+and the per-block endpoints cost three of them per block — so the 1200-block
+scan in that log line made 3600 requests and spent 48 s waiting on them against
+1.9 s matching. Which half dominates depends entirely on the chain: a signet
+block with 20 tweaks is network-bound, a mainnet block with 2000 is compute-bound.
+
+A BlindBit oracle that reports `max_range_blocks` in `/info` serves
+`/range/tweaks`, `/range/utxos` and `/range/spent-outputs`, which return a span
+of blocks per request. The scanner detects this once per scan and, when it is
+available, switches to batches of `SILNT_SCAN_RANGE_BATCH` blocks costing three
+requests per batch instead of three per block. A 10,000-block scan goes from
+~30,000 requests to ~1,200. Against an oracle without the endpoints nothing
+changes: the scanner uses the per-block path exactly as before, and falls back to
+it mid-scan if a range request fails.
+
+**Fewer requests is not by itself faster.** The first version of this batched
+correctly and was *slower* than the per-block path it replaced — 44s for 119
+blocks where the old path managed the same work in less. Cutting requests had
+worked; what broke was overlap. The per-block path gathered 24 block coroutines
+at once, so while one block matched on the worker thread the others were on the
+wire. Fetching a whole batch and only then matching it put the network and the
+CPU in a queue behind each other, and the wall clock became their sum: 20.4s of
+requests plus 23.2s of matching is the 44s exactly.
+
+So the range path does two things beyond batching:
+
+- The three requests for a batch go out **together**, not one after another.
+  They do not depend on each other, and a batch that waits for the tweaks before
+  asking for the UTXOs pays a round trip it does not need to.
+- Batch N+1 is **prefetched while batch N matches**, so the network runs during
+  the computation instead of before it.
+
+Measured over that 119-block scan (~800 tweaks per block, so ~195ms of matching
+each), with the request time held at the reported 20.4s:
+
+| | wall clock |
+|---|---|
+| batched, sequential (the regression) | 43.4s |
+| + three requests concurrently | 27.9s |
+| + prefetch next batch while matching | **22.9s** |
+| matching alone — the floor | 21.7s |
+
+The batch size is the pipeline depth, which is why the default is 25 rather than
+the oracle's cap: 119 blocks in batches of 100 is two stages and hides almost
+nothing (27.1s), while batches of 20–40 hide essentially all of it. Bigger
+batches only save requests, and at three per batch there is little left to save.
+
+Note what the floor means. Once the network is hidden, the scan costs what the
+matching costs, and nothing in the transport layer moves it. On a chain with
+~800 tweaks per block this path is compute-bound, and the next lever is the
+per-tweak cost or real parallelism (processes, not threads) — not requests.
+
+Two things to know about the range responses:
+
+- Heights the oracle never indexed are **omitted** from the response, while a
+  block that genuinely holds nothing comes back present and empty. The scanner
+  treats an omitted height as an error, not as an empty block.
+- A range response the oracle could not finish arrives **truncated** and fails to
+  parse, which the scanner reports as a failed batch. Both of these exist for the
+  same reason: a block that was never read must not be recorded as scanned, or
+  any payment in it stays invisible until someone rescans by hand.
+
+When a scan cannot read a block, it stops advancing the resume point past it and
+returns `gap_height`. The blocks above the gap are still scanned, but the next
+scan starts from the gap and covers them again — re-scanning is slow, skipping
+is wrong.
+
 Set these in **LNbits' `.env`** (the same file as `LNBITS_ADMIN_UI` and friends),
 or as real environment variables — either works. They are read with the
 extension's `silnt_env` resolver, which checks the process environment first and
@@ -356,8 +465,9 @@ restart is needed for a change to take effect; they are read once at import.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `SILNT_SCAN_BATCH_SIZE` | `24` | Blocks scanned concurrently. Lower it if the oracle starts returning timeouts or 429s; the ceiling is the HTTP pool's `max_connections` (64). |
-| `SILNT_SCAN_COMPUTE_INDEX` | off | `1` uses the oracle's `compute-index` endpoint, which filters server-side: **one oracle request per block instead of three**. `verify` runs both paths per block and logs disagreements while still returning the trusted result — see below. **This path has never run in production** (the branch guarding it was unreachable), and a mistake in it does not raise, it silently misses outputs. Run `verify` first. |
+| `SILNT_SCAN_BATCH_SIZE` | `24` | Blocks scanned concurrently on the per-block path. Lower it if the oracle starts returning timeouts or 429s; the ceiling is the HTTP pool's `max_connections` (64). |
+| `SILNT_SCAN_RANGE_BATCH` | `25` | Blocks per request when the oracle supports range endpoints. This is the pipeline depth, not just a request size — raising it makes batches fewer and larger, which hides *less* of the network behind the matching, not more. Capped by the oracle's own `max_range_blocks`. |
+| `SILNT_SCAN_COMPUTE_INDEX` | off | `1` uses the oracle's `compute-index` endpoint, which filters server-side instead of downloading every tweak and UTXO per block. `verify` runs both paths per block and logs any disagreement while still returning the trusted result. **Opt-in: this path has never run in production** — the branch guarding it was unreachable — and a mistake here does not raise, it silently misses outputs. Run `verify` over a range with known payments first. |
 | `SILNT_ORACLE_VERIFY_TLS` | off | Verify the oracle's TLS certificate. Off by default only because that is the behaviour this has always had. Turn it on if your oracle has a valid certificate: without it, anyone on the path can serve forged tweaks and UTXOs, which shows a wrong balance and reveals which blocks a user cares about. It cannot leak keys — scanning never sees a spend key. |
 
 ### Proving the fast path before trusting it
