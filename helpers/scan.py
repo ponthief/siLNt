@@ -344,9 +344,12 @@ def _tx_has_candidate(opk: bytes, out_keys: list[bytes], label_x: set) -> bool:
 
     Both sign combinations are required. The scanner only ever sees an output
     x-only, so it reconstructs P_0 with even parity forced; where the true P_0
-    is odd, b33 is -P_0 and only the other sign yields the label. Testing one
-    sign silently misses about 40% of labeled payments — which is exactly the
-    defect in sync_block_from_compute_index below.
+    is odd, b33 is -P_0 and only the other sign yields the label.
+
+    Testing one sign only is not a theoretical concern: the removed per-block
+    compute-index matcher did exactly that, and measured over 400 payments per
+    case it lost 46.8% of m=0 (change), 47.8% of m=1, 48.8% of m=2 and 53.8% of
+    m=3, while both matchers here found 100%. Do not drop either sign.
     """
     if opk in out_keys:
         return True
@@ -434,62 +437,6 @@ def sync_block_reverse(compute_index, utxos, scan_key, spend_pub_key, labels):
     return owned
 
 
-def sync_block_from_compute_index(index, scan_key, spend_pub_key, labels):
-    owned: list[OwnedUTXO] = []
-    for entry in index:
-        tweak_hex = entry.get("tweak", "")
-        txid = entry.get("txid", "")
-        outputs_hex = entry.get("outputs", [])
-        if not tweak_hex or not outputs_hex:
-            continue
-        try:
-            ss = create_shared_secret(bytes.fromhex(tweak_hex), scan_key)
-            shorts = set(outputs_hex)
-            k = 0
-            while True:
-                opk, t_k = create_output_pub_key_and_tweak(ss, spend_pub_key, k)
-                matched = False
-                if opk.hex()[:16] in shorts:
-                    owned.append(
-                        OwnedUTXO(
-                            txid=bytes.fromhex(txid),
-                            vout=0,
-                            amount=0,
-                            priv_key_tweak=t_k,
-                            pub_key=opk,
-                            utxo_state="unspent",
-                        )
-                    )
-                    matched = True
-                if labels:
-                    b33 = b"\x02" + opk
-                    for label in labels:
-                        try:
-                            lo = add_public_keys(b33, label.pub_key)
-                            if lo[1:].hex()[:16] in shorts:
-                                owned.append(
-                                    OwnedUTXO(
-                                        txid=bytes.fromhex(txid),
-                                        vout=0,
-                                        amount=0,
-                                        priv_key_tweak=add_private_keys(
-                                            t_k, label.tweak
-                                        ),
-                                        pub_key=lo[1:],
-                                        utxo_state="unspent",
-                                        label=label,
-                                    )
-                                )
-                                matched = True
-                        except Exception:
-                            pass
-                if not matched:
-                    break
-                k += 1
-        except Exception as e:
-            logger.warning(f"compute_index txid={txid}: {e}")
-    return owned
-
 async def get_outspend_status(base_mempool_url: str, txid: str, vout: int) -> dict | None:
     """
     Exact-outpoint spent check via mempool.
@@ -547,18 +494,26 @@ _http: Optional[httpx.AsyncClient] = None
 # it is what the rest of the extension already uses (see device_auth.py).
 _VERIFY_TLS = silnt_env("SILNT_ORACLE_VERIFY_TLS").lower() in ("1", "true", "yes")
 
-# Opt-in, because the path it enables has never run. See the note in scan_block.
+# SILNT_SCAN_COMPUTE_INDEX is RETIRED. The per-block compute-index path it used
+# to select was removed (see scan_block) because it lost about half of every
+# labeled payment, change included.
 #
-#   unset / 0  legacy path: tweaks + utxos per block, plus the spent check.
-#   verify     run BOTH per block, compare, log any disagreement, and RETURN
-#              THE LEGACY RESULT. Costs more, proves the fast path against the
-#              one already trusted with your money.
-#   1 / true   compute-index only. One oracle request per block instead of
-#              three, which on a local oracle at ~28ms of service time per
-#              request is most of a scan.
-_COMPUTE_INDEX_MODE = silnt_env("SILNT_SCAN_COMPUTE_INDEX").strip().lower()
-_USE_COMPUTE_INDEX = _COMPUTE_INDEX_MODE in ("1", "true", "yes")
-_VERIFY_COMPUTE_INDEX = _COMPUTE_INDEX_MODE == "verify"
+# It is still read, and only to complain. A deployment that has the variable
+# left over in its .env would otherwise get a silent no-op — you set a scanning
+# option, see no change, and have no way to tell whether it applied. That is the
+# same failure this file already guards against by reading through silnt_env
+# rather than os.getenv, so it is not going to be reintroduced from the other
+# direction.
+_RETIRED_COMPUTE_INDEX = silnt_env("SILNT_SCAN_COMPUTE_INDEX").strip()
+if _RETIRED_COMPUTE_INDEX:
+    logger.error(
+        "SILNT_SCAN_COMPUTE_INDEX is set to %r but no longer does anything — the "
+        "per-block compute-index scan path was removed because it silently "
+        "missed ~47%% of labeled payments (including change). Scanning is using "
+        "the tweaks+utxos path, with the range endpoints where the oracle "
+        "supports them. Remove the variable from your .env.",
+        _RETIRED_COMPUTE_INDEX,
+    )
 
 
 def _env_int(name: str, default: int, lo: int, hi: int) -> int:
@@ -833,13 +788,6 @@ class BlindBitOracleClient:
         r = await self._get(f"/spent-outputs/{height}")
         return None if r.status_code == 404 else r.json()
 
-    async def get_compute_index(self, height: int) -> Optional[dict]:
-        r = await self._get(f"/compute-index/{height}")
-        if r.status_code == 404:
-            return None
-        d = r.json()
-        return d if isinstance(d, dict) and "index" in d else {"index": d}
-
     async def get_block_hash(self, height: int) -> Optional[dict]:
         r = await self._get(f"/blockhash/{height}")
         return None if r.status_code == 404 else r.json()
@@ -886,93 +834,35 @@ async def _match_in_thread(client, fn, *args):
         client.stats.match_seconds += time.perf_counter() - started
 
 
-def _owned_fingerprint(owned) -> set:
-    """What two scan paths must agree on, reduced to something comparable.
-
-    txid, vout and the output key — identity and spendability. Deliberately not
-    the timestamp, which the two paths source differently and which is display
-    metadata, not money.
-    """
-    return {(o.txid.hex(), o.vout, o.pub_key.hex()) for o in (owned or [])}
-
-
 async def scan_block(
     height, client, scan_secret_bytes, spend_pub_bytes, labels,
     network: str,
 ):
+    """Scan one block.
+
+    There used to be a second, opt-in path here that asked the oracle's
+    per-block /compute-index endpoint to do the filtering — one request per
+    block instead of three. It is gone, and deliberately not replaced:
+
+    * It was wrong. It tested one sign of each label, so it lost about half of
+      every labeled payment — measured at 46.8% for m=0, which is CHANGE, not
+      some optional feature. It also claimed outputs with vout 0 and amount 0,
+      patched afterwards from a /utxos fetch only when the lookup hit, and its
+      fallback matched on an 8-byte key prefix and then overwrote the correctly
+      derived key with whatever it matched.
+    * Its reason for existing is obsolete. The saving was requests, and the
+      range endpoints already collapse three-per-block into three-per-batch —
+      far more than this ever offered.
+
+    The compute index itself is still used, via get_compute_index_range and
+    sync_block_reverse, which pairs each tweak with its own transaction and is
+    held to returning exactly what the forward matcher returns
+    (tests/test_reverse_matching.py). That one is sound; this one was not.
+    """
     client.stats.blocks += 1
-
-    # Verification mode: run the fast path and the trusted one over the same
-    # block and report any disagreement. The LEGACY result is what gets
-    # returned, so a bug in the fast path cannot cost anyone a payment while it
-    # is being evaluated. Slower than either path alone, by design — this is a
-    # thing you run once over a range whose payments you already know, not a
-    # setting to leave on.
-    if _VERIFY_COMPUTE_INDEX:
-        fast = None
-        try:
-            fast = await _scan_block_compute_index(
-                height, client, scan_secret_bytes, spend_pub_bytes, labels, network
-            )
-        except Exception as e:
-            logger.error(f"compute-index verify: block {height} raised {e!r}")
-        legacy = await _scan_block_legacy(
-            height, client, scan_secret_bytes, spend_pub_bytes, labels, network
-        )
-        a, b = _owned_fingerprint(fast), _owned_fingerprint(legacy)
-        if fast is None:
-            logger.error(f"compute-index verify: block {height} FAST PATH FAILED")
-        elif a != b:
-            logger.error(
-                f"compute-index verify: block {height} MISMATCH — "
-                f"fast-only={sorted(a - b)} legacy-only={sorted(b - a)}"
-            )
-        else:
-            logger.debug(f"compute-index verify: block {height} agrees ({len(b)} owned)")
-        return legacy
-
-    if _USE_COMPUTE_INDEX:
-        return await _scan_block_compute_index(
-            height, client, scan_secret_bytes, spend_pub_bytes, labels, network
-        )
     return await _scan_block_legacy(
         height, client, scan_secret_bytes, spend_pub_bytes, labels, network
     )
-
-
-async def _scan_block_compute_index(
-    height, client, scan_secret_bytes, spend_pub_bytes, labels, network: str,
-):
-    """One oracle request per block: the oracle does the filtering."""
-    compute_data = await client.get_compute_index(height)
-    if not compute_data:
-        # 404 means this oracle does not serve compute-index. Fall back rather
-        # than report an empty block, which would look exactly like having no
-        # money here.
-        return await _scan_block_legacy(
-            height, client, scan_secret_bytes, spend_pub_bytes, labels, network
-        )
-    matches = await _match_in_thread(
-        client, sync_block_from_compute_index,
-        compute_data["index"], scan_secret_bytes, spend_pub_bytes, labels,
-    )
-    if matches:
-        full_utxos = await client.get_utxos(height)
-        client.stats.utxos += len(full_utxos)
-        lkp = {u["pubkey"]: u for u in full_utxos if "pubkey" in u}
-        for owned in matches:
-            ph = owned.pub_key.hex()
-            full = lkp.get(ph) or next(
-                (u for u in full_utxos if u.get("pubkey", "")[:16] == ph[:16]), None
-            )
-            if full:
-                owned.vout = full.get("vout", owned.vout)
-                owned.amount = full.get("amount", owned.amount)
-                owned.timestamp = full.get("timestamp") or await get_block_ts(
-                    full.get("txid", ""), network
-                )
-                owned.pub_key = bytes.fromhex(full["pubkey"])
-    return matches
 
 
 async def _scan_block_legacy(

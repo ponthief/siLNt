@@ -24,7 +24,6 @@ from coincurve import PublicKey
 from conftest import scan
 
 from test_reverse_matching import (
-    LABEL_BY_M,
     LABELS,
     SCAN_SECRET,
     SPEND_PUB,
@@ -160,62 +159,54 @@ def test_amount_txid_and_vout_come_from_the_oracle_verbatim():
     assert _spend_key_matches(o)
 
 
-# ── 3. the opt-in compute-index matcher ──────────────────────────────────────
+# ── 3. the retired per-block compute-index matcher ───────────────────────────
 
-def _shorts(outs):
-    """The oracle's compute-index `outputs`: 8-byte key prefixes as hex."""
-    return [o.hex()[:16] for o in outs]
+def test_broken_compute_index_path_is_gone():
+    """sync_block_from_compute_index must not come back.
 
+    It tested one sign of each label. Measured over 400 payments per case before
+    removal: 46.8% of m=0 (CHANGE) lost, 47.8% of m=1, 48.8% of m=2, 53.8% of
+    m=3, against 0% for both matchers that remain. It also claimed outputs with
+    vout 0 and amount 0, and its /utxos repair step could overwrite a correctly
+    derived key with one that merely shared an 8-byte prefix.
 
-def test_compute_index_matcher_finds_a_plain_payment():
-    """Baseline: the path does work for an unlabeled payment."""
-    rng = random.Random(21)
-    tweak, outs = build_tx(rng, ours=[None], n_decoys=2)
-    index = [{"txid": "11" * 32, "tweak": tweak.hex(), "outputs": _shorts(outs)}]
-    owned = scan.sync_block_from_compute_index(index, SCAN_SECRET, SPEND_PUB, LABELS)
-    assert len(owned) == 1
-
-
-@pytest.mark.parametrize("m", [0, 1, 2, 3])
-def test_compute_index_matcher_loses_labeled_payments(m):
-    """Roughly half of labeled payments are invisible to this path.
-
-    _tx_has_candidate's docstring says so outright: it tests one sign of the
-    label only, and where the true P_0 is odd the scanner's even-forced
-    reconstruction needs the other sign. Whether a given payment survives is
-    decided by a parity nobody controls, so this walks a range of payments and
-    asserts the path misses some — the point being that it is lossy, not that a
-    particular one fails.
+    Earlier revisions of this file tested the defect. Testing for absence is
+    what is left once the defect is deleted, and it is the version worth
+    keeping: the saving it chased — one oracle request per block instead of
+    three — is already beaten by the range endpoints, which do three per BATCH.
     """
-    misses = 0
-    total = 0
-    for seed in range(40):
-        rng = random.Random(9000 + seed * 7 + m)
-        tweak, outs = build_tx(rng, ours=[m], n_decoys=1)
-        index = [{"txid": "11" * 32, "tweak": tweak.hex(), "outputs": _shorts(outs)}]
-        got = scan.sync_block_from_compute_index(
-            index, SCAN_SECRET, SPEND_PUB, LABELS
+    for name in (
+        "sync_block_from_compute_index",
+        "_scan_block_compute_index",
+        "_USE_COMPUTE_INDEX",
+        "_VERIFY_COMPUTE_INDEX",
+    ):
+        assert not hasattr(scan, name), (
+            f"{name} is back. The per-block compute-index path loses about half "
+            f"of all labeled payments, change included — see this test's "
+            f"docstring before restoring it."
         )
-        total += 1
-        if not got:
-            misses += 1
-    assert misses > 0, (
-        f"m={m}: expected this path to lose some labeled payments; it found all "
-        f"{total}. If the one-sign bug has been fixed, delete this test."
-    )
 
 
-def test_compute_index_matcher_fabricates_vout_and_amount():
-    """What it does claim, it claims with vout 0 and amount 0.
+def test_the_sound_compute_index_matcher_is_still_there():
+    """Removing the broken path must not have taken the good one with it.
 
-    _scan_block_compute_index patches both afterwards from a /utxos fetch, but
-    only `if full:` — when the lookup misses, an output enters the wallet with a
-    zero amount and a vout pointing at the wrong place in the transaction.
+    sync_block_reverse also works off compute-index data, but pairs each tweak
+    with its own transaction and tests both label signs. It is the one the range
+    scan uses, and test_reverse_matching.py holds it to returning exactly what
+    the forward matcher returns.
     """
-    rng = random.Random(33)
-    tweak, outs = build_tx(rng, ours=[None], n_decoys=0)
-    index = [{"txid": "11" * 32, "tweak": tweak.hex(), "outputs": _shorts(outs)}]
-    owned = scan.sync_block_from_compute_index(index, SCAN_SECRET, SPEND_PUB, LABELS)
-    assert len(owned) == 1
-    assert owned[0].vout == 0
-    assert owned[0].amount == 0
+    assert hasattr(scan, "sync_block_reverse")
+    rng = random.Random(77)
+    tweak, outs = build_tx(rng, ours=[2], n_decoys=2)
+    utxos = [
+        {"txid": "11" * 32, "vout": v, "amount": 500, "pubkey": o.hex(),
+         "timestamp": 1}
+        for v, o in enumerate(outs)
+    ]
+    owned = scan.sync_block_reverse(
+        [{"txid": "11" * 32, "tweak": tweak.hex()}],
+        utxos, SCAN_SECRET, SPEND_PUB, LABELS,
+    )
+    assert len(owned) == 1, "the sound reverse matcher stopped finding a labeled payment"
+    assert _spend_key_matches(owned[0])

@@ -358,10 +358,22 @@ falls back to forward matching when it does not — detected once per scan.
 **Both sign combinations are required.** The scanner only ever sees an output
 x-only, so it reconstructs P_0 with even parity forced; where the true P_0 is
 odd, the reconstruction is -P_0 and only the other sign yields the label.
-Testing one sign silently misses ~40% of labeled payments — including change,
-which lives at m=0. That is not hypothetical: it is precisely the defect in
-`sync_block_from_compute_index`, the opt-in path behind
-`SILNT_SCAN_COMPUTE_INDEX` that has never run in production.
+Testing one sign silently misses about half of all labeled payments — including
+change, which lives at m=0. That is not hypothetical: it was precisely the
+defect in `sync_block_from_compute_index`, the opt-in path that used to sit
+behind `SILNT_SCAN_COMPUTE_INDEX`. Measured over 400 payments per case before
+that path was removed:
+
+| payment to | lost by the one-sign matcher | lost by the two matchers that remain |
+| --- | --- | --- |
+| base address | 0.0% | 0.0% |
+| label `m=0` — **change** | 46.8% | 0.0% |
+| label `m=1` | 47.8% | 0.0% |
+| label `m=2` | 48.8% | 0.0% |
+| label `m=3` | 53.8% | 0.0% |
+
+`tests/test_output_verification.py` now asserts that path is gone rather than
+measuring its loss.
 
 Because this decides whether money is found, `tests/test_reverse_matching.py`
 holds the two matchers to returning *identical* results — same txids, vouts,
@@ -383,9 +395,11 @@ threads contend rather than share. Measured on 4 cores, 8 blocks of 300 tweaks:
 | 4 workers | 2.18 s |
 | default pool (`min(32, cpu+4)`) | 2.27 s |
 
-Real parallelism needs processes, not threads. Worth doing only after the
-per-tweak cost itself comes down — and the way to do that is
-`SILNT_SCAN_COMPUTE_INDEX`, which moves the work to the oracle entirely.
+Real parallelism needs processes, not threads, and it is worth doing only after
+the per-tweak cost itself comes down. This used to point at
+`SILNT_SCAN_COMPUTE_INDEX` as the way to move the work to the oracle; that path
+is gone (see the table above), and the request count it was chasing is already
+handled better by the range endpoints below.
 
 ### Range endpoints
 
@@ -467,33 +481,35 @@ restart is needed for a change to take effect; they are read once at import.
 |---|---|---|
 | `SILNT_SCAN_BATCH_SIZE` | `24` | Blocks scanned concurrently on the per-block path. Lower it if the oracle starts returning timeouts or 429s; the ceiling is the HTTP pool's `max_connections` (64). |
 | `SILNT_SCAN_RANGE_BATCH` | `25` | Blocks per request when the oracle supports range endpoints. This is the pipeline depth, not just a request size — raising it makes batches fewer and larger, which hides *less* of the network behind the matching, not more. Capped by the oracle's own `max_range_blocks`. |
-| `SILNT_SCAN_COMPUTE_INDEX` | off | `1` uses the oracle's `compute-index` endpoint, which filters server-side instead of downloading every tweak and UTXO per block. `verify` runs both paths per block and logs any disagreement while still returning the trusted result. **Opt-in: this path has never run in production** — the branch guarding it was unreachable — and a mistake here does not raise, it silently misses outputs. Run `verify` over a range with known payments first. |
-| `SILNT_ORACLE_VERIFY_TLS` | off | Verify the oracle's TLS certificate. Off by default only because that is the behaviour this has always had. Turn it on if your oracle has a valid certificate: without it, anyone on the path can serve forged tweaks and UTXOs, which shows a wrong balance and reveals which blocks a user cares about. It cannot leak keys — scanning never sees a spend key. |
+| `SILNT_SCAN_COMPUTE_INDEX` | **retired** | Selected a per-block `compute-index` scan path that lost about half of every labeled payment, change included. The path is deleted. The variable is still *read*, and only so that a leftover value logs an error instead of silently doing nothing. Remove it from your `.env`. |
+| `SILNT_ORACLE_VERIFY_TLS` | off | Verify the oracle's TLS certificate. Off because a self-hosted BlindBit typically has no certificate to verify. What protects you instead is the network path: **run the oracle on the same host and address it over loopback**, where there is nobody in the middle. If the oracle is ever reachable off-box, this stops being a trade-off and becomes a hole — see the note below. |
 
-### Proving the fast path before trusting it
+### What a scan verifies, and what it takes on trust
 
-The oracle's per-request service time is the floor on a scan: three requests per
-block at ~28 ms each is ~5.7 s per hundred blocks, and no amount of client-side
-concurrency gets under it if the oracle serialises. `compute-index` is the lever
-that matters, because it cuts the request count rather than trying to make
-requests faster.
+Worth being precise about, because the two halves have very different
+consequences.
 
-But it decides whether your money is found, so prove it on your own data first:
+**Verified.** The output key. A UTXO is only ever claimed if its key equals one
+the wallet derived itself from (tweak, scan key, spend pubkey). The oracle
+cannot put money in your wallet by asserting it exists — it would have to
+predict `P_k`, which needs your scan key.
+`tests/test_output_verification.py` checks this two ways: a real tweak paired
+with a key the wallet never derived is rejected, and every output that *is*
+claimed is confirmed spendable by adding the recorded tweak to the spend
+**secret** — the receiver's real spending path, using a key the scanner never
+sees.
 
-```bash
-SILNT_SCAN_COMPUTE_INDEX=verify   # then rescan a range whose payments you know
-docker logs lnbits 2>&1 | grep "compute-index verify"
-```
+**Taken on trust.** The amount, txid and vout. Those are copied from the
+oracle's answer verbatim; nothing cross-checks them against a second source.
+Electrum (`listunspent`) is used for the plain BIP-84 chain and for PayJoin, but
+not for Silent Payment UTXOs. `insert_utxos_for_wallet` does not validate them
+either, and on conflict it overwrites `amount` with the new value.
 
-In `verify` mode each block is scanned **both** ways and the results compared on
-(txid, vout, output key). Timestamps are excluded deliberately — the two paths
-source them differently and they are display metadata, not money. The **legacy**
-result is always what gets returned, so a bug in the fast path cannot cost a
-payment while it is being evaluated. A silent log means they agreed; a
-`MISMATCH` line names exactly which outputs differed.
-
-Once a range with known payments comes back clean, switch to
-`SILNT_SCAN_COMPUTE_INDEX=1`.
+So a hostile or intercepted oracle can corrupt a balance and break a spend — a
+wrong amount produces a transaction the network rejects — but it **cannot
+steal**: it never learns a key, and it cannot make the wallet sign to an address
+of its choosing. That is the whole reason the loopback point above matters: it
+is what closes the gap that `SILNT_ORACLE_VERIFY_TLS` would otherwise close.
 
 Oracle requests share one pooled, keep-alive HTTP client for the whole process.
 Before that they each opened their own connection — and their own TLS handshake
