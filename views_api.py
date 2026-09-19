@@ -1492,7 +1492,6 @@ async def api_build_transaction(
             data.utxos,
             bool(get_scan_progress(data.wallet_id).get("active")),
         )
-        _orig_recipient = data.recipient.strip()
         data.recipient = await resolve_recipient(data.recipient)
 
         result = build_transaction(
@@ -1504,10 +1503,11 @@ async def api_build_transaction(
             utxos=data.utxos,
             network=wallet.network,
         )
-        try:
-            await touch_sp_contact(key_info.wallet.user, _orig_recipient, wallet.network)
-        except Exception:
-            pass
+        # touch_sp_contact used to fire here. It runs on broadcast now:
+        # building is not paying, and with /tx/prepare a client can build,
+        # change its mind and never send — which would have left a contact for
+        # someone who was never paid. Broadcast also sees the pre-resolution
+        # name, which is the one a contact should remember.
         return result
     except HTTPException:
         raise
@@ -1522,7 +1522,10 @@ async def api_build_transaction(
 @silnt_api_router.post(
     "/api/v1/tx/broadcast", dependencies=[Depends(require_trusted_device_admin)]
 )
-async def api_broadcast_transaction(data: BroadcastTxRequest):
+async def api_broadcast_transaction(
+    data: BroadcastTxRequest,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
     try:
         _bwallet = await get_silnt_wallet(data.wallet_id)
         if not _bwallet:
@@ -1565,6 +1568,19 @@ async def api_broadcast_transaction(data: BroadcastTxRequest):
                     f"Broadcast {txid}: no spent_outpoints supplied; the Sent tx "
                     f"will only appear in Activity after the next rescan"
                 )
+
+            # Remember who was paid, now that they actually have been. Moved
+            # here from /tx/build, which no longer sees every send — and which
+            # recorded a contact for a transaction that might never go out.
+            # Best-effort: a contact that fails to save must not turn a
+            # broadcast payment into an error the user reads as "it didn't go".
+            if data.recipient:
+                try:
+                    await touch_sp_contact(
+                        key_info.wallet.user, data.recipient.strip(), _bwallet.network
+                    )
+                except Exception as e:
+                    logger.warning(f"could not record sp contact after broadcast: {e}")
 
             return {"txid": txid}
 
