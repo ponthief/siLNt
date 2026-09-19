@@ -83,7 +83,16 @@ worth a decision of their own:
   until their users update. Keep it serving, or 301 it at the edge so those
   builds follow.
 - `admin.thrilla.me` / `admin-signet.thrilla.me` — the admin portal builds.
-- `dominus@thrilla.me` — the BitMail donation name on the site, and
-  `thrilla@bitaurus.net`, the device-confirmation sender and the GPG key uid.
-  These are live identifiers, not copy; renaming them breaks resolution and
-  signature verification respectively.
+- `dominus@thrilla.me` — the BitMail donation name on the site. A live
+  identifier, not copy: renaming it breaks resolution. Now
+  `dominus@whispawallet.com`.
+- `thrilla@bitaurus.net` — was two separate things wearing one address, and
+  they moved apart:
+  - **the device-confirmation sender**, which followed the mail server to
+    `admin@whispawallet.com`;
+  - **the GPG signing key's uid**, which did not and cannot. A uid is part of
+    the key; changing it means rotating the key. download.html still shows the
+    old address in the signing-key block and in the sample `gpg` output,
+    deliberately — that is what `gpg` prints, and a verify page that shows
+    anything else teaches people to accept a mismatch. The page says so, and
+    points at the fingerprint as the thing to check.

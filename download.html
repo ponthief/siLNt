@@ -104,13 +104,13 @@
   <!-- The fingerprint appears exactly once on this site. When the key is
        rotated, this line is the only one to change. -->
   <div class="fp" id="fp">F061 E3E9 56FC F57F 99D2  FE48 81DC EBD9 74E9 CABE</div>
-  <p style="font-size:13px;margin-top:8px;font-family:var(--mono);color:var(--dim)">Thrilla &lt;thrilla@bitaurus.net&gt;</p>
+  <p style="font-size:13px;margin-top:8px;font-family:var(--mono);color:var(--dim)">Thrilla &lt;<span class="mailtxt" data-user="thrilla" data-domain="bitaurus.net"></span>&gt;</p>
   <!-- The key's user id is deliberately NOT rebranded. It is what gpg actually
        prints, and a verification page that shows something other than the real
        output teaches people to accept a mismatch — the exact habit this page
        exists to prevent. Explained instead, so nobody reads the old name as a
        sign the download was tampered with. -->
-  <p style="font-size:13px;margin-top:6px;color:var(--dim)">The key is still named after the old project. It was created before the rename, and replacing a signing key is a far bigger event than changing a name, so it stays until there's a reason to rotate it. <strong>The fingerprint above is what you check</strong> — not the name beside it.</p>
+  <p style="font-size:13px;margin-top:6px;color:var(--dim)">The key is still named after the old project, and the address in it no longer receives mail — both are baked into the key, which was created before the rename. Replacing a signing key is a far bigger event than changing a name, so it stays until there's a reason to rotate it. <strong>The fingerprint above is what you check</strong> — not the name or address beside it, and this is what <code>gpg</code> will print too. To reach us, use <span class="mailref" data-user="admin" data-domain="whispawallet.com"></span>.</p>
 
   <div class="warnbox">
     <p><strong>Confirm this fingerprint somewhere other than this page</strong> — on
@@ -141,7 +141,7 @@ sha256sum --ignore-missing -c SHA256SUMS
 <span class="c"># macOS has no sha256sum — instead of the line above:</span>
 <span class="c"># grep ' whispa-mainnet.apk$' SHA256SUMS | shasum -a 256 -c -</span></div>
 
-  <div class="out">gpg: <b>Good signature from "Thrilla &lt;thrilla@bitaurus.net&gt;"</b> [unknown]
+  <div class="out">gpg: <b>Good signature from "Thrilla &lt;<span class="mailtxt" data-user="thrilla" data-domain="bitaurus.net"></span>&gt;"</b> [unknown]
 gpg: <i>WARNING: This key is not certified with a trusted signature!</i>
 Primary key fingerprint: F061 E3E9 56FC F57F 99D2  FE48 81DC EBD9 74E9 CABE
 whispa-mainnet.apk: <b>OK</b></div>
@@ -167,7 +167,7 @@ whispa-mainnet.apk: <b>OK</b></div>
       <div class="n">1</div>
       <div>
         <h4>Create an account</h4>
-        <p>Each device is confirmed by an email link from <span class="mailref" data-user="thrilla" data-domain="bitaurus.net"></span> — check spam. A password alone can't reach your funds.</p>
+        <p>Each device is confirmed by an email link from <span class="mailref" data-user="admin" data-domain="whispawallet.com"></span> — check spam. A password alone can't reach your funds.</p>
       </div>
     </div>
     <div class="stp">
@@ -229,15 +229,28 @@ whispa-mainnet.apk: <b>OK</b></div>
 
   // Crawler-resistant email: assembled in JS from split data-* attributes so the
   // address never appears verbatim in the HTML source for scrapers to scrape.
+  //
+  // Two flavours, because one of them must not be a link. `.mailref` is a real
+  // contact address and becomes a mailto. `.mailtxt` is an address quoted
+  // inside sample terminal output — turning that into a clickable link would
+  // misrepresent what gpg prints, so it renders as plain text and only the '@'
+  // is withheld from the source.
   (function () {
+    function join(el) {
+      var u = el.getAttribute('data-user'), d = el.getAttribute('data-domain');
+      return (u && d) ? u + String.fromCharCode(64) + d : '';   // 64 = '@'
+    }
     function buildEmails() {
       document.querySelectorAll('.mailref').forEach(function (el) {
-        var u = el.getAttribute('data-user'), d = el.getAttribute('data-domain');
-        if (!u || !d) return;
-        var addr = u + String.fromCharCode(64) + d;   // 64 = '@'
+        var addr = join(el);
+        if (!addr) return;
         var a = document.createElement('a');
         a.href = 'mailto:' + addr; a.textContent = addr;
         el.textContent = ''; el.appendChild(a);
+      });
+      document.querySelectorAll('.mailtxt').forEach(function (el) {
+        var addr = join(el);
+        if (addr) el.textContent = addr;
       });
     }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', buildEmails);
