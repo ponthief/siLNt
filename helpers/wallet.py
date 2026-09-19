@@ -43,6 +43,13 @@ from embit.ec import SchnorrSig
 from mnemonic import Mnemonic
 SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 
+# Below this an output costs more to spend than it holds. Bitcoin Core relays a
+# P2TR output down to 330 sats, so 546 is deliberately stricter than the network
+# — it is the same floor helpers/plain.py and the dust_check flagging use, and
+# a wallet that flags a received 400-sat output as a suspected dust attack has
+# no business creating one.
+DUST_SATS = 546
+
 # ── Phase 1: per-input tweaked signing keys + scripts (orig steps 1–2) ────────
 def _prepare_inputs(spend_key, utxos: list[dict]):
     """
@@ -94,20 +101,47 @@ def _derive_recipient_script(recipient: str, spend_key, utxos: list[dict]) -> Sc
 def _compute_amounts(utxos: list[dict], amount: int, fee_rate: float):
     """
     Returns (total_input, fee, change_amount, estimated_vsize).
-    Dust change (<546) is absorbed into the fee, leaving change_amount = 0.
+    Dust change (<DUST_SATS) is absorbed into the fee, leaving change_amount = 0.
+
+    Both ends are checked. Only the change end used to be, and the asymmetry was
+    a money-loss path rather than a cosmetic gap: with change absorbed into the
+    fee unconditionally, asking to send 1 sat from a 561-sat coin built a valid,
+    signed transaction that paid 1 sat to the recipient and 560 sats to the
+    miner. helpers/plain.py has had the amount check from the start; this is the
+    same rule, in the builder the Silent Payments path actually uses.
     """
     total_input = sum(u["amount"] for u in utxos)
     estimated_vsize = int(10 + (57.5 * len(utxos)) + (31 * 2))
     fee = max(1, math.ceil(estimated_vsize * fee_rate))
+
+    if amount < DUST_SATS:
+        raise ValueError(
+            f"{amount} sats is below the {DUST_SATS} sat dust limit. An output "
+            f"that small costs more to spend than it holds, and the network may "
+            f"refuse to relay it."
+        )
+
     change_amount = total_input - amount - fee
 
     if change_amount < 0:
+        # Say what the coins CAN pay, not just that they cannot pay this. When
+        # the answer is "nothing", say that too rather than quoting a maximum
+        # that is itself dust and would be refused on the next attempt.
+        spendable = total_input - fee
+        if spendable < DUST_SATS:
+            raise ValueError(
+                f"These coins total {total_input} sats, which leaves {spendable} "
+                f"sats after a {fee} sat fee — below the {DUST_SATS} sat dust "
+                f"limit, so they cannot fund any payment at this fee rate. "
+                f"Select more coins, or wait for a lower fee rate."
+            )
         raise ValueError(
             f"Insufficient funds. Need {amount + fee} sats "
-            f"(including {fee} sats fee), have {total_input} sats."
+            f"(including {fee} sats fee), have {total_input} sats. "
+            f"The most these coins can send is {spendable} sats."
         )
 
-    if 0 < change_amount < 546:
+    if 0 < change_amount < DUST_SATS:
         logger.debug(f"Change {change_amount} sats below dust — adding to fee")
         fee += change_amount
         change_amount = 0
@@ -118,7 +152,7 @@ def _compute_amounts(utxos: list[dict], amount: int, fee_rate: float):
 # ── Phase 4: BIP-352 m=0 change scriptPubKey (orig step 5) ────────────────────
 def _derive_change_script(change_amount, scan_secret_hex, spend_key, utxos, network):
     """Returns the change Script, or None when change is dust/zero."""
-    if change_amount < 546:
+    if change_amount < DUST_SATS:
         return None
     spend_pub_hex = coincurve.PublicKey.from_secret(
         spend_key.secret
