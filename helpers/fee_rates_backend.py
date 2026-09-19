@@ -73,7 +73,14 @@ async def get_recommended_fees(network: str = DEFAULT_CONFIG_NETWORK) -> dict:
                 if not isinstance(v, (int, float)) or v <= 0:
                     logger.warning(f"fee lookup missing/invalid '{k}'; using fallback")
                     return {**_FALLBACK, "source": "fallback"}
-                tiers[k] = int(v)
+                # int(v) used to be here, and it was lossy in the one direction
+                # that matters. mempool.space never returns below 1 sat/vB, but
+                # a self-hosted instance in front of a node with a lowered
+                # minrelaytxfee does — and int(0.5) is 0, which the clients read
+                # as "no rate" and refuse to build with. A tier that exists gets
+                # passed through as it was given.
+                v = float(v)
+                tiers[k] = int(v) if v.is_integer() else round(v, 3)
             tiers["source"] = "mempool"
             return tiers
     except Exception as e:
