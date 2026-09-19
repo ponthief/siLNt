@@ -273,8 +273,24 @@ def scan_addresses(
     }
 
 
-def build_plain_transaction(
-    keys: list[str],
+def destination_vbytes(destination: str) -> int:
+    """What one output to `destination` costs, without deriving its script.
+
+    A Silent Payment output is always P2TR, so its size is known from the
+    address alone — which is the whole reason the plan below can price a send
+    the server cannot itself construct.
+    """
+    dest = (destination or "").strip()
+    if dest.startswith("sp1") or dest.startswith("tsp1"):
+        return OUTPUT_VBYTES
+    try:
+        spk = script.address_to_scriptpubkey(dest)
+    except Exception as e:
+        raise ValueError(f"Invalid destination address: {e}")
+    return output_vbytes(spk.data if hasattr(spk, "data") else bytes(spk))
+
+
+def plan_plain_spend(
     destination: str,
     utxos: list[dict],
     fee_rate: float,
@@ -283,79 +299,45 @@ def build_plain_transaction(
     change_address: Optional[str] = None,
 ) -> dict:
     """
-    Spend `utxos` from the plain BIP-84 chain.
+    Everything a plain-chain spend needs decided, with no private key in sight.
 
-    Two shapes, and the difference is `amount`:
+    Every rule that used to live inside build_plain_transaction is here: which
+    coins, in what order, what the destination is, what it costs, what comes
+    back as change, and every refusal. The builder below runs this and then does
+    nothing but derive scripts and sign, so a client that signs for itself is
+    held to exactly the same rules as one that does not — there is only one copy
+    of them.
 
-      * amount=None — send everything, no change output. The chosen addresses
-        are emptied and the fee comes out of the total.
-
-      * amount=N — send N and return the rest to `change_address`, which must be
-        another address on this same chain.
-
-    `destination` may be any ordinary address, or a Silent Payment one — paying
-    the user's own SP address is how coins move into that wallet, if they want
-    them there. It is a destination, not a special mode. Change, when there is
-    any, is always P2WPKH on this chain.
-
-    `keys` are the private keys for the addresses those UTXOs sit on, in any
-    order — each input is matched to its key by address.
+    `destination_script` is None for a Silent Payment destination and only for
+    that. The output key there is derived from the input PRIVATE keys (BIP-352),
+    so it cannot be computed here and the caller with the keys must derive it.
+    The size is still known, so the fee is not left to the caller.
     """
     if not utxos:
         raise ValueError("No confirmed coins on these addresses.")
-    if not keys:
-        raise ValueError("No keys supplied to sign with.")
     if amount is not None and amount < DUST_SATS:
         raise ValueError(f"Amount must be at least {DUST_SATS} sats.")
 
-    # address → (key, pubkey), so each input is signed with the key that
-    # actually controls it.
-    by_address: dict[str, tuple] = {}
-    for key_hex in keys:
-        priv = ec.PrivateKey(bytes.fromhex(key_hex))
-        pub = priv.get_public_key()
-        by_address[script.p2wpkh(pub).address(_net(network))] = (priv, pub)
-
-    missing = {u.get("address") for u in utxos} - set(by_address)
-    if missing:
-        # Refuse rather than sign what we can: a partial spend would leave coins
-        # behind while the user is told the address was emptied.
-        raise ValueError(
-            f"No key supplied for {len(missing)} address(es) holding coins."
-        )
+    dest = (destination or "").strip()
+    if not dest:
+        raise ValueError("A destination is required.")
+    is_sp = dest.startswith("sp1") or dest.startswith("tsp1")
+    dest_vbytes = destination_vbytes(dest)
+    dest_script = (
+        None if is_sp else script.address_to_scriptpubkey(dest).data.hex()
+    )
 
     total_input = sum(int(u["amount"]) for u in utxos)
 
-    # BIP-69 order. The outpoints below feed BIP-352's smallest-outpoint rule,
-    # which is order-independent, but a deterministic transaction is easier to
-    # reason about after the fact.
+    # BIP-69 order. The outpoints feed BIP-352's smallest-outpoint rule, which is
+    # order-independent, but a deterministic transaction is easier to reason
+    # about after the fact.
     ordered = sorted(utxos, key=lambda u: (u["txid"], int(u.get("vout", 0))))
 
-    # Every input is P2WPKH, so every key contributes UNNEGATED — see
-    # sp_scriptpubkey_from_inputs on why the taproot flag matters. Only used for
-    # a Silent Payments destination, but computed the same way regardless.
-    sp_inputs = [
-        (
-            int.from_bytes(by_address[u["address"]][0].secret, "big"),
-            bytes.fromhex(u["txid"])[::-1] + int(u.get("vout", 0)).to_bytes(4, "little"),
-            False,
-        )
-        for u in ordered
-    ]
-    dest = destination.strip()
-    if dest.startswith("sp1") or dest.startswith("tsp1"):
-        out_script = Script(sp_scriptpubkey_from_inputs(dest, sp_inputs))
-    else:
-        try:
-            out_script = script.address_to_scriptpubkey(dest)
-        except Exception as e:
-            raise ValueError(f"Invalid destination address: {e}")
-
-    dest_bytes = out_script.data if hasattr(out_script, "data") else bytes(out_script)
     vsize = math.ceil(
         OVERHEAD_VBYTES
         + INPUT_VBYTES * len(ordered)
-        + output_vbytes(dest_bytes)
+        + dest_vbytes
         + (CHANGE_VBYTES if amount is not None else 0)
     )
     fee = max(1, math.ceil(vsize * fee_rate))
@@ -385,7 +367,7 @@ def build_plain_transaction(
             change = 0
             vsize -= CHANGE_VBYTES
 
-    tx_outputs = [TransactionOutput(send_amount, out_script)]
+    change_script = None
     if change:
         if not change_address:
             raise ValueError("A change address is required when not sending everything.")
@@ -393,8 +375,117 @@ def build_plain_transaction(
             # Change must come back to this chain. Refusing anything else means a
             # malformed request cannot quietly route the remainder elsewhere.
             raise ValueError("Change address must be a native segwit address on this network.")
+        change_script = script.address_to_scriptpubkey(change_address).data.hex()
+
+    return {
+        "destination": dest,
+        "destination_script": dest_script,
+        "is_silent_payment": is_sp,
+        "utxos": ordered,
+        "amount": send_amount,
+        "change": change,
+        "change_address": change_address if change else None,
+        "change_script": change_script,
+        "fee": fee,
+        "total_input": total_input,
+        "vsize": vsize,
+        "fee_rate_used": fee_rate,
+        "input_count": len(ordered),
+        "network": network,
+    }
+
+
+def build_plain_transaction(
+    keys: list[str],
+    destination: str,
+    utxos: list[dict],
+    fee_rate: float,
+    network: str,
+    amount: Optional[int] = None,
+    change_address: Optional[str] = None,
+) -> dict:
+    """
+    Spend `utxos` from the plain BIP-84 chain.
+
+    Two shapes, and the difference is `amount`:
+
+      * amount=None — send everything, no change output. The chosen addresses
+        are emptied and the fee comes out of the total.
+
+      * amount=N — send N and return the rest to `change_address`, which must be
+        another address on this same chain.
+
+    `destination` may be any ordinary address, or a Silent Payment one — paying
+    the user's own SP address is how coins move into that wallet, if they want
+    them there. It is a destination, not a special mode. Change, when there is
+    any, is always P2WPKH on this chain.
+
+    `keys` are the private keys for the addresses those UTXOs sit on, in any
+    order — each input is matched to its key by address.
+
+    DEPRECATED as the way the apps spend. Both clients now call plan_plain_spend
+    through /api/v1/plain/prepare and sign on the device, so no private key
+    crosses the network. This stays for installed builds that have not updated,
+    and runs the very same plan so the two paths cannot disagree.
+    """
+    if not utxos:
+        raise ValueError("No confirmed coins on these addresses.")
+    if not keys:
+        raise ValueError("No keys supplied to sign with.")
+
+    plan = plan_plain_spend(
+        destination=destination,
+        utxos=utxos,
+        fee_rate=fee_rate,
+        network=network,
+        amount=amount,
+        change_address=change_address,
+    )
+    ordered = plan["utxos"]
+    total_input = plan["total_input"]
+    send_amount = plan["amount"]
+    change = plan["change"]
+    fee = plan["fee"]
+    vsize = plan["vsize"]
+
+    # address → (key, pubkey), so each input is signed with the key that
+    # actually controls it.
+    by_address: dict[str, tuple] = {}
+    for key_hex in keys:
+        priv = ec.PrivateKey(bytes.fromhex(key_hex))
+        pub = priv.get_public_key()
+        by_address[script.p2wpkh(pub).address(_net(network))] = (priv, pub)
+
+    missing = {u.get("address") for u in utxos} - set(by_address)
+    if missing:
+        # Refuse rather than sign what we can: a partial spend would leave coins
+        # behind while the user is told the address was emptied.
+        raise ValueError(
+            f"No key supplied for {len(missing)} address(es) holding coins."
+        )
+
+    # Every input is P2WPKH, so every key contributes UNNEGATED — see
+    # sp_scriptpubkey_from_inputs on why the taproot flag matters. Only used for
+    # a Silent Payments destination, but computed the same way regardless.
+    sp_inputs = [
+        (
+            int.from_bytes(by_address[u["address"]][0].secret, "big"),
+            bytes.fromhex(u["txid"])[::-1] + int(u.get("vout", 0)).to_bytes(4, "little"),
+            False,
+        )
+        for u in ordered
+    ]
+    dest = plan["destination"]
+    out_script = (
+        Script(sp_scriptpubkey_from_inputs(dest, sp_inputs))
+        if plan["is_silent_payment"]
+        else Script(bytes.fromhex(plan["destination_script"]))
+    )
+
+    tx_outputs = [TransactionOutput(send_amount, out_script)]
+    if change:
         tx_outputs.append(
-            TransactionOutput(change, script.address_to_scriptpubkey(change_address))
+            TransactionOutput(change, Script(bytes.fromhex(plan["change_script"])))
         )
         # Do not leak which output is change by its position.
         tx_outputs.sort(

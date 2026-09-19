@@ -172,6 +172,24 @@ class SpendPlainRequest(BaseModel):
     fee_rate: float = 1
 
 
+class PreparePlainRequest(BaseModel):
+    """
+    Everything /plain/spend needs except the keys.
+
+    The same request with `addresses` in place of `keys`: the server still finds
+    the coins, checks the destination and does every piece of the arithmetic,
+    but it has nothing that can move them. The client derives the addresses from
+    its own xprv, so it can match each returned coin back to the key that signs
+    for it without the server ever seeing one.
+    """
+    wallet_id: str
+    addresses: list[str]
+    destination: str
+    amount: Optional[int] = None
+    change_address: Optional[str] = None
+    fee_rate: float = 1
+
+
 class BroadcastPlainRequest(BaseModel):
     wallet_id: str
     tx_hex: str

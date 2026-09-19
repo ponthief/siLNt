@@ -73,6 +73,7 @@ from .helpers.psbt_combine import combine_and_finalize
 from .helpers.electrum_client import ElectrumClient
 from .helpers.plain import (
     build_plain_transaction,
+    plan_plain_spend,
     hrp_for as plain_hrp_for,
     is_p2wpkh_for_network,
     scan_addresses,
@@ -216,6 +217,7 @@ from .models import (
     PrepareTxRequest,
     BroadcastTxRequest,
     BroadcastPlainRequest,
+    PreparePlainRequest,
     SpendPlainRequest,
     Config,
     ScanWalletRequest,
@@ -3069,6 +3071,73 @@ async def api_plain_preview(
             status_code=HTTPStatus.BAD_GATEWAY,
             detail=f"Could not reach the chain index: {e}",
         )
+
+
+@silnt_api_router.post(
+    "/api/v1/plain/prepare", dependencies=[Depends(require_trusted_device_admin)]
+)
+async def api_plain_prepare(
+    data: PreparePlainRequest,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """
+    Everything a plain-chain spend needs decided, without a private key in it.
+
+    What /plain/spend does minus the signing: find the confirmed coins on these
+    addresses, check the destination, order the inputs, and work out the fee and
+    the change. The client then signs on its own device and posts the finished
+    transaction to /plain/broadcast.
+
+    `destination_script` is null for a Silent Payments destination and nothing
+    else — that output key is derived from the input private keys, so only the
+    holder of them can compute it. Its SIZE is fixed, so the fee here is still
+    the real one.
+    """
+    wallet = await _plain_wallet_or_403(data.wallet_id, key_info)
+    if not data.addresses:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST, detail="addresses is required."
+        )
+    if len(data.addresses) > MAX_PLAIN_ADDRESSES:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"At most {MAX_PLAIN_ADDRESSES} addresses per spend.",
+        )
+    # Same gate as the preview: without it this is an address-lookup service for
+    # anyone with a login.
+    for a in data.addresses:
+        _require_p2wpkh(a, wallet.network)
+    if not (data.destination or "").strip():
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST, detail="A destination is required."
+        )
+
+    host, port, tls, _ = await _fulcrum_cfg(wallet.network)
+    try:
+        found = await asyncio.to_thread(scan_addresses, data.addresses, host, port, tls)
+    except Exception as e:
+        logger.warning(
+            f"pool prepare utxo fetch failed ({len(data.addresses)} addresses): {e}"
+        )
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_GATEWAY,
+            detail=f"Could not reach the chain index: {e}",
+        )
+
+    try:
+        plan = plan_plain_spend(
+            destination=data.destination.strip(),
+            utxos=found["utxos"],
+            fee_rate=data.fee_rate,
+            network=wallet.network,
+            amount=data.amount,
+            change_address=data.change_address,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+
+    plan["unconfirmed_sats"] = found["unconfirmed_sats"]
+    return plan
 
 
 @silnt_api_router.post(
