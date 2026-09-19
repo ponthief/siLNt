@@ -86,13 +86,20 @@ worth a decision of their own:
 - `dominus@thrilla.me` — the BitMail donation name on the site. A live
   identifier, not copy: renaming it breaks resolution. Now
   `dominus@whispawallet.com`.
-- `thrilla@bitaurus.net` — was two separate things wearing one address, and
-  they moved apart:
-  - **the device-confirmation sender**, which followed the mail server to
-    `admin@whispawallet.com`;
-  - **the GPG signing key's uid**, which did not and cannot. A uid is part of
-    the key; changing it means rotating the key. download.html still shows the
-    old address in the signing-key block and in the sample `gpg` output,
-    deliberately — that is what `gpg` prints, and a verify page that shows
-    anything else teaches people to accept a mismatch. The page says so, and
-    points at the fingerprint as the thing to check.
+- `thrilla@bitaurus.net` — retired. It was two separate things wearing one
+  address, and both are now `admin@whispawallet.com`:
+  - **the device-confirmation sender**, which followed the mail server;
+  - **the GPG signing key's uid**. The key was *not* rotated: a new uid was
+    added, made primary, and the old one revoked, so the fingerprint
+    `F061 E3E9 56FC F57F 99D2  FE48 81DC EBD9 74E9 CABE` is unchanged and every
+    release signed before the change still verifies. download.html's
+    signing-key block and its sample `gpg` output both show the new uid,
+    because they have to match what `gpg` prints character for character — a
+    verify page showing anything else teaches people to accept a mismatch.
+
+  Two things revocation does not do, worth knowing before anyone reports them
+  as bugs: the old uid is still physically present in the key
+  (`gpg --list-options show-unusable-uids --list-keys`), and anyone who
+  imported the key before the change keeps seeing the old name until they run
+  `gpg --refresh-keys` or re-import. Only a brand-new key would remove the
+  string, at the cost of a new fingerprint and re-signing every release.

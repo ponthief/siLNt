@@ -107,13 +107,12 @@
   <!-- The fingerprint appears exactly once on this site. When the key is
        rotated, this line is the only one to change. -->
   <div class="fp" id="fp">F061 E3E9 56FC F57F 99D2  FE48 81DC EBD9 74E9 CABE</div>
-  <p style="font-size:13px;margin-top:8px;font-family:var(--mono);color:var(--dim)">Thrilla &lt;<span class="mailtxt" data-user="thrilla" data-domain="bitaurus.net"></span>&gt;</p>
-  <!-- The key's user id is deliberately NOT rebranded. It is what gpg actually
-       prints, and a verification page that shows something other than the real
-       output teaches people to accept a mismatch — the exact habit this page
-       exists to prevent. Explained instead, so nobody reads the old name as a
-       sign the download was tampered with. -->
-  <p style="font-size:13px;margin-top:6px;color:var(--dim)">The key is still named after the old project, and the address in it no longer receives mail — both are baked into the key, which was created before the rename. Replacing a signing key is a far bigger event than changing a name, so it stays until there's a reason to rotate it. <strong>The fingerprint above is what you check</strong> — not the name or address beside it, and this is what <code>gpg</code> will print too. To reach us, use <span class="mailref" data-user="admin" data-domain="whispawallet.com"></span>.</p>
+  <p style="font-size:13px;margin-top:8px;font-family:var(--mono);color:var(--dim)">WhiSPa Wallet &lt;<span class="mailtxt" data-user="admin" data-domain="whispawallet.com"></span>&gt;</p>
+  <!-- This line and the sample gpg output below must match what gpg ACTUALLY
+       prints, character for character. A verify page showing anything else
+       teaches people to accept a mismatch, which is the one habit this page
+       exists to prevent. If the key's uid changes again, both change with it. -->
+  <p style="font-size:13px;margin-top:6px;color:var(--dim)">The key carried the old project's name until the identity on it was replaced. <strong>The key itself did not change</strong> — same key, same fingerprint above, so every release signed before that still verifies exactly as it did. If you imported the key earlier you will see the old name until you refresh it: <code>gpg --refresh-keys</code>, or import the <code>.asc</code> below again. <strong>The fingerprint is what you check</strong>, not the name beside it.</p>
 
   <div class="warnbox">
     <p><strong>Confirm this fingerprint somewhere other than this page</strong> — on
@@ -144,7 +143,7 @@ sha256sum --ignore-missing -c SHA256SUMS
 <span class="c"># macOS has no sha256sum — instead of the line above:</span>
 <span class="c"># grep ' whispa-mainnet.apk$' SHA256SUMS | shasum -a 256 -c -</span></div>
 
-  <div class="out">gpg: <b>Good signature from "Thrilla &lt;<span class="mailtxt" data-user="thrilla" data-domain="bitaurus.net"></span>&gt;"</b> [unknown]
+  <div class="out">gpg: <b>Good signature from "WhiSPa Wallet &lt;<span class="mailtxt" data-user="admin" data-domain="whispawallet.com"></span>&gt;"</b> [unknown]
 gpg: <i>WARNING: This key is not certified with a trusted signature!</i>
 Primary key fingerprint: F061 E3E9 56FC F57F 99D2  FE48 81DC EBD9 74E9 CABE
 whispa-mainnet.apk: <b>OK</b></div>
@@ -152,7 +151,7 @@ whispa-mainnet.apk: <b>OK</b></div>
   <p style="margin-top:16px;font-size:14px">You want <strong>Good signature</strong>, a fingerprint matching the one above, and <strong>OK</strong>. The <em>WARNING</em> is expected and does not mean the signature is bad — it only says you haven't told GPG you personally trust this key, which you don't need to do.</p>
 
   <div class="warnbox">
-    <p><strong>If either command fails, don't install the APK.</strong> Delete it, download again on a different network, and check once more. If it fails twice, <a href="index.html#contact">tell us</a> before installing anything.</p>
+    <p><strong>If either command fails, don't install the APK.</strong> Delete it, download again on a different network, and check once more. If it fails twice, tell us at <span class="mailref" data-user="admin" data-domain="whispawallet.com"></span> before installing anything.</p>
   </div>
 
   <p class="also" style="margin-top:26px">Separately, Android checks the APK's own signature on every update, so once WhiSPa is installed a build signed by a different key can't replace it. That makes the first install the one worth verifying.</p>
