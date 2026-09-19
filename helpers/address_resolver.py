@@ -63,13 +63,49 @@ def _query_txt_with_dnssec(qname: str) -> tuple[list[str], bool]:
     raise Exception(f"All DNSSEC resolvers failed. Last error: {last_error}")
 
 
+def _domain_resolves(domain: str) -> bool:
+    """Does the bare domain exist at all?
+
+    Only ever called on the failure path, to tell a typo in the domain apart
+    from a BitMail that simply isn't published. Any doubt answers True, because
+    the caller uses this to pick wording — guessing "that domain doesn't exist"
+    at someone whose DNS is merely slow is worse than the vaguer message.
+    """
+    for rdtype in (dns.rdatatype.SOA, dns.rdatatype.A):
+        try:
+            request = dns.message.make_query(dns.name.from_text(domain), rdtype)
+            response = dns.query.udp(request, DNSSEC_RESOLVERS[0], timeout=5)
+            if response.rcode() != dns.rcode.NXDOMAIN:
+                return True
+        except Exception:
+            return True
+    return False
+
+
+# Every message below is read by someone trying to pay a person, in a small red
+# line on a phone. "No TXT record found for alice.user._bitcoin-payment.ex.com"
+# told them nothing they could act on. Three things decide the wording:
+#
+#   1. Say what it means for the payment, not what the resolver returned.
+#   2. Say whose problem it is — the address, the recipient's setup, or ours.
+#   3. Never call an address invalid when it might be fine. A DNS outage and a
+#      domain without DNSSEC are not typos, and telling someone their friend's
+#      address is bogus because a resolver timed out sends them chasing the
+#      wrong thing. Those two keep their own wording, and stay retryable.
+#
+# The precise DNS name stays in the logs, where whoever is debugging will look.
+
+
 def bip353_resolve(address: str) -> dict:
-    try:
-        user, domain = address.strip().split("@")
-    except ValueError:
+    address = address.strip()
+    user, _, domain = address.partition("@")
+    if not user or not domain or "@" in domain:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
-            detail="Invalid BIP353 address format. Expected user@domain.com",
+            detail=(
+                f"“{address}” isn’t a valid BitMail address. "
+                f"It should look like name@example.com."
+            ),
         )
 
     dns_domain = f"{user}.user._bitcoin-payment.{domain}"
@@ -78,27 +114,34 @@ def bip353_resolve(address: str) -> dict:
         records, dnssec_valid = _query_txt_with_dnssec(dns_domain)
 
         if not records:
-            raise HTTPException(
-                status_code=HTTPStatus.NOT_FOUND,
-                detail=f"No TXT record found for {dns_domain}",
-            )
+            raise dns.resolver.NoAnswer()
 
         if not dnssec_valid:
+            # A security refusal, not a bad address — say so, and give them the
+            # way round it. Softening this into "invalid address" would hide
+            # the one case where the lookup succeeded and we still won't trust
+            # the answer.
+            logger.warning(f"BIP353 {address}: DNSSEC not validated for {dns_domain}")
             raise HTTPException(
                 status_code=HTTPStatus.BAD_REQUEST,
                 detail=(
-                    f"DNSSEC validation failed for {dns_domain}. "
-                    "The domain must have valid DNSSEC signatures. "
-                    "Resolving this address would be unsafe."
+                    f"{address} can’t be used safely: {domain} isn’t signed with "
+                    f"DNSSEC, so there’s no way to prove its BitMail record hasn’t "
+                    f"been altered. Ask the recipient for their sp1… address instead."
                 ),
             )
 
         result = records[0]
 
         if not result.startswith("bitcoin:"):
+            logger.warning(f"BIP353 {address}: {dns_domain} holds {result!r}")
             raise HTTPException(
                 status_code=HTTPStatus.BAD_REQUEST,
-                detail=f"TXT record does not contain a valid bitcoin: URI: {result}",
+                detail=(
+                    f"The BitMail record for {address} is published but malformed — "
+                    f"it doesn’t contain a Bitcoin address. Only the recipient can "
+                    f"fix that."
+                ),
             )
 
         # logger.info(f"BIP353 resolved {address} → {result} (DNSSEC validated)")
@@ -111,18 +154,40 @@ def bip353_resolve(address: str) -> dict:
 
     except HTTPException:
         raise
-    except dns.resolver.NXDOMAIN:
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+        # Both mean the same thing to the payer: nothing is published here. The
+        # reported case — a record that existed and was deleted — lands on one
+        # or the other depending on whether siblings remain, so they must not
+        # read differently. The only split worth making is whether the domain
+        # itself is reachable, because that is the difference between a typo
+        # and a BitMail that is gone.
+        logger.info(f"BIP353 {address}: nothing published at {dns_domain}")
+        if not _domain_resolves(domain):
+            raise HTTPException(
+                status_code=HTTPStatus.NOT_FOUND,
+                detail=(
+                    f"No BitMail found for {address} — the domain {domain} doesn’t "
+                    f"exist. Check the spelling."
+                ),
+            )
         raise HTTPException(
             status_code=HTTPStatus.NOT_FOUND,
-            detail=f"Domain not found: {dns_domain}",
-        )
-    except dns.resolver.NoAnswer:
-        raise HTTPException(
-            status_code=HTTPStatus.NOT_FOUND,
-            detail=f"No TXT record found for {address}",
+            detail=(
+                f"No BitMail found for {address}. It may have been removed, or "
+                f"never set up. Check it with the recipient, or ask for their "
+                f"sp1… address."
+            ),
         )
     except Exception as exc:
+        # Our problem or the network's, and it may well work in a minute. This
+        # must never read as "bad address" — that sends the payer off correcting
+        # something that was right all along.
+        logger.error(f"BIP353 {address}: lookup failed for {dns_domain}: {exc}")
         raise HTTPException(
             status_code=HTTPStatus.BAD_GATEWAY,
-            detail=f"DNS resolution failed: {str(exc)}",
+            detail=(
+                f"Couldn’t look up {address} right now — the DNS lookup didn’t "
+                f"complete. The address may be fine; this is usually temporary, "
+                f"so try again in a moment."
+            ),
         )
