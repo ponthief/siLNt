@@ -163,7 +163,11 @@ h1 em { font-style: normal; color: var(--orange); }
 header.hero { padding: 56px 0 60px; border-bottom: 1px solid var(--border); }
 /* Larger than the old mascot: this mark carries the WhiSPa wordmark, and below
    about 130px the lettering stops being readable. */
-.hero-mascot { display: block; width: clamp(132px, 15vw, 188px); height: auto; margin: 0 auto 20px; animation: bob 6s ease-in-out infinite; }
+/* 34px, not 20: the eyebrow used to sit between the mascot and the headline
+   and carried its own 20px below it. With the eyebrow gone the h1 came up to
+   20px under a bobbing image, which read as crowded — this restores the gap
+   the hero had before. */
+.hero-mascot { display: block; width: clamp(132px, 15vw, 188px); height: auto; margin: 0 auto 34px; animation: bob 6s ease-in-out infinite; }
 /* The previous version rocked between -2deg and 2deg, which suited a
    celebrating coin. A figure asking for quiet should not wobble: just a slow
    rise and fall, and none at all for anyone who has asked for less motion. */

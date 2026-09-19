@@ -17,7 +17,7 @@
 <!-- ?v= is a cache buster: styles.css is served with max-age=14400 and cached at
      the CDN edge, so BUMP THIS NUMBER whenever styles.css changes or the new
      styles will not reach visitors for up to four hours. -->
-<link rel="stylesheet" href="styles.css?v=10">
+<link rel="stylesheet" href="styles.css?v=11">
 </head>
 <body>
 
@@ -55,7 +55,11 @@
 <header class="hero wrap">
   <img class="hero-mascot" src="whispa-hero.png"
        alt="WhiSPa Wallet — a hooded figure signalling for quiet, holding a Bitcoin coin">
-  <div class="eyebrow"><span class="dot"></span> <b>Bitcoin only</b> · Self-custodial · Silent Payments</div>
+  <!-- The eyebrow said "Bitcoin only · Self-custodial · Silent Payments". The
+       top bar now says exactly that, a couple of centimetres above, so it read
+       as a stutter rather than emphasis. The hero goes straight to the
+       headline; .eyebrow stays in styles.css, unused here but still available
+       to a page that needs a kicker. -->
   <h1>Your Bitcoin. <em>Your business.</em></h1>
   <p class="lead">One <strong>Silent Payment</strong> address. Put it on your site, in your bio, on a poster — and keep it for life. Every payment still lands somewhere brand new, so there is nothing for anyone to join up. Your spend key never leaves your device.</p>
 
