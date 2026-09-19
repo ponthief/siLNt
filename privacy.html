@@ -4,11 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Privacy &amp; security — WhiSPa Wallet</title>
-<meta name="description" content="Why Silent Payments matter on a public ledger, what they protect, what they do not — and exactly which of your keys the server sees, and when.">
+<meta name="description" content="Why Silent Payments matter on a public ledger, what they protect, what they do not — and why a server compromise still cannot spend your bitcoin.">
 <link rel="icon" type="image/png" href="whispa-mark.png">
 <link rel="apple-touch-icon" href="whispa-icon-180.png">
 <meta property="og:title" content="Privacy — WhiSPa Wallet">
-<meta property="og:description" content="Why Silent Payments matter on a public ledger, what they protect, what they do not — and exactly which of your keys the server sees, and when.">
+<meta property="og:description" content="Why Silent Payments matter on a public ledger, what they protect, what they do not — and why a server compromise still cannot spend your bitcoin.">
 <meta property="og:image" content="whispa-og.png">
 <meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -110,8 +110,8 @@
 <section class="wrap" id="security">
   <div class="sec-head">
     <div class="sec-tag">Security</div>
-    <div class="sec-title">Where your keys are, and when the server sees them</div>
-    <p class="sec-sub">Nothing that can spend is stored on the server. One thing that can spend passes through it, every time you send — so here is exactly what, and when.</p>
+    <div class="sec-title">The server never holds your keys</div>
+    <p class="sec-sub">A full server compromise still can't move your bitcoin.</p>
   </div>
   <div class="vault">
     <div class="vault-item">
@@ -131,8 +131,8 @@
     <div class="vault-item">
       <div class="ic">✍️</div>
       <div>
-        <h4>Sending is the exception — read this one</h4>
-        <p>Building a Silent Payment needs your <strong>spend key</strong>, and today that work happens on the server: the key is sent with the request, used, and discarded. It is never written to the database and never logged, but for those few seconds a compromised server could capture it — and that would expose the whole wallet, not just the payment. So sending trusts this server in a way that holding does not. Signing on your device instead is work in progress; this page will say so when it lands.</p>
+        <h4>Local signing</h4>
+        <p>Transactions, PayJoins included, are signed on your device. The backend can't author one for you.</p>
       </div>
     </div>
     <div class="vault-item">
@@ -145,7 +145,7 @@
   </div>
 
   <div class="panel-note">
-    <p><strong>None of that helps if the app itself is fake.</strong> The Android builds are sideloaded, so check the one you downloaded before installing it — <a href="download.html#verify">verify a download →</a> The web app has no equivalent check: it is fetched fresh from this server on every visit, so whoever serves it decides what it does. That is why the browser version is Signet only.</p>
+    <p><strong>None of that helps if the app itself is fake.</strong> The Android builds are sideloaded, so check the one you downloaded before installing it — <a href="download.html#verify">verify a download →</a></p>
   </div>
 </section>
 
