@@ -168,7 +168,9 @@ async def get_wallet_transaction_detail(
         "confirmed":     None,
         "block_height":  None,
         "block_time":    None,
-        "explorer_url":  f"{mempool_base.rstrip('/')}/tx/{txid}",
+        # The explorer base, not mempool_base: this one is opened by the user's
+        # browser, which may be nowhere near a LAN-only node.
+        "explorer_url":  f"{backend.explorer_base()}/tx/{txid}",
     }
 
     if tx is None:

@@ -1643,7 +1643,14 @@ async def api_get_config(
     # limit enforced in api_wallet_create.
     current  = await count_silnt_wallets(key_info.wallet.user, network)
     return {
+        # mempool_endpoint stays for clients already in the field that read it
+        # to build explorer links; explorer_endpoint is what new ones should
+        # use. They differ only once an admin points mempool_url at a private
+        # instance, which is exactly when an old client would start producing
+        # links nobody can open — nothing can be done about an APK already
+        # installed, but the key must not be repurposed underneath it.
         "mempool_endpoint": blindbit.mempool_url or "https://mempool.space",
+        "explorer_endpoint": blindbit.explorer_base(),
         "sats_denominated": config.sats_denominated,
         "network": config.network,
         "min_scan_height":   blindbit.min_scan_height or 0,

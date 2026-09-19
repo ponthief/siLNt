@@ -23,7 +23,19 @@ class CreateWallet(BaseModel):
 
 class BackendConfig(BaseModel):
     blindbit_url: str = ""
+    # API endpoint: fee tiers, broadcast, tx status, outspend and dust checks.
+    # Point this at your own instance — it is the backend asking about your
+    # users' transactions, and on a public explorer that traffic identifies
+    # which txids each of them cares about.
     mempool_url: str = "https://mempool.space"
+    # Where a *user's browser* is sent when they tap "open in explorer". Split
+    # from mempool_url because the two have opposite requirements: the API
+    # endpoint wants to be private and is often LAN-only, while a link has to
+    # resolve on a phone that is nowhere near the node. A link also leaks far
+    # less — one txid the user chose to look up, rather than every txid the
+    # wallet touches. Empty falls back to mempool_url, so an install that never
+    # sets it behaves exactly as before.
+    explorer_url: str = "https://mempool.space"
     min_scan_height:  int = 0   # 0 = no minimum; e.g. 840000 = no scans before block 840000
     max_wallets_per_user: int = 1   # 0 = unlimited
     dust_threshold_sats:    int = 5000
@@ -33,6 +45,16 @@ class BackendConfig(BaseModel):
     fulcrum_tls: bool = False
     login_scan_enabled: bool = True            # auto catch-up scan on wallet open
     login_scan_auto_threshold: int = 432       # gap < this => scan silently; >= => prompt
+
+    def explorer_base(self) -> str:
+        """Base URL for links handed to a user's browser, no trailing slash.
+
+        Falls back to mempool_url so the field can be left blank, and to the
+        public explorer so a link is never built against an empty string.
+        """
+        return (
+            self.explorer_url or self.mempool_url or "https://mempool.space"
+        ).rstrip("/")
 
 class CreateWallet(BaseModel):
     mnemonic: str = None
