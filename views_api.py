@@ -8,12 +8,14 @@ import re
 import secrets
 import time
 import time as _time
+from embit import script
 from .helpers.wallet import (
     generate_silent_wallet_address,
     decrypt_mnemonic,
     build_transaction,
     generate_labeled_sp_address,
     get_spend_pub_from_secret,
+    _compute_amounts,
 )
 from .helpers.scan import (
     scan_wallet, get_scan_progress, request_scan_stop, get_tx_status,
@@ -64,6 +66,7 @@ from .helpers.device_auth import (
 from .helpers.user import is_lnbits_admin, require_admin, validate_born_height
 from .helpers.scan import BlindBitOracleClient
 from .helpers.fee_rates_backend import  get_recommended_fees, get_btc_usd_rate
+from .helpers.send_guards import resolve_recipient, validate_spendable_utxos
 from .helpers.payjoin_wallet import sync_wallet, next_unused_receive_index
 from .helpers.payjoin_merge import build_merged_payjoin
 from .helpers.psbt_combine import combine_and_finalize
@@ -210,6 +213,7 @@ from .models import (
     CreateWallet,
     WalletAccount,
     BuildTxRequest,
+    PrepareTxRequest,
     BroadcastTxRequest,
     BroadcastPlainRequest,
     SpendPlainRequest,
@@ -1374,6 +1378,89 @@ async def api_bip353_available(
     
 
 # Transactions
+@silnt_api_router.post(
+    "/api/v1/tx/prepare", dependencies=[Depends(require_trusted_device_admin)]
+)
+async def api_prepare_transaction(
+    data: PrepareTxRequest,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """Everything needed to build a send, with no key material either way.
+
+    The client takes this, derives its outputs and signs on the device
+    (src/services/spSign.ts), then posts the finished tx_hex to /tx/broadcast.
+    That removes the only remaining reason to send a spend key: /tx/build.
+
+    What stays here is the work that needs the server's DATA rather than the
+    user's secret — the eligibility check and the BitMail tampering guard, both
+    shared with /tx/build through helpers/send_guards.py so the two cannot
+    drift. The arithmetic is _compute_amounts, the same function the builder
+    calls, so the fee the client signs is the fee quoted here.
+    """
+    wallet = await get_silnt_wallet(data.wallet_id)
+    if not wallet:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
+        )
+    if wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+
+    rows = await validate_spendable_utxos(
+        data.wallet_id,
+        data.utxos,
+        bool(get_scan_progress(data.wallet_id).get("active")),
+    )
+    recipient = await resolve_recipient(data.recipient)
+
+    # The client only implements the Silent Payments derivation. Every other
+    # address type is turned into a scriptPubKey here, where the conversion
+    # already exists and needs no secret.
+    is_sp = recipient.startswith("sp1") or recipient.startswith("tsp1")
+    recipient_script = None
+    if not is_sp:
+        try:
+            recipient_script = bytes(
+                script.address_to_scriptpubkey(recipient).data
+            ).hex()
+        except Exception as e:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail=f"Invalid recipient address: {e}",
+            )
+
+    utxos = [
+        {
+            "txid": r["txid"],
+            "vout": r["vout"],
+            "amount": r["amount"],
+            "pub_key": r["pub_key"],
+            "priv_key_tweak": r["priv_key_tweak"],
+        }
+        for r in rows
+    ]
+
+    try:
+        total_input, fee, change, vsize = _compute_amounts(
+            utxos, data.amount, data.fee_rate
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+
+    return {
+        "recipient": recipient,
+        "recipient_script": recipient_script,
+        "is_silent_payment": is_sp,
+        "network": wallet.network,
+        "utxos": utxos,
+        "amount": data.amount,
+        "fee": fee,
+        "change": change,
+        "vsize": vsize,
+        "total_input": total_input,
+        "fee_rate": data.fee_rate,
+    }
+
+
 @silnt_api_router.post("/api/v1/tx/build", dependencies=[Depends(require_trusted_device_admin)])
 async def api_build_transaction(
     data: BuildTxRequest, key_info: WalletTypeInfo = Depends(require_trusted_device_admin)
@@ -1398,112 +1485,16 @@ async def api_build_transaction(
                 status_code=HTTPStatus.BAD_REQUEST,
                 detail="scan_secret is required (used to derive change address).",
             )
-        # ── Validate UTXOs against the DB: refuse frozen, refuse non-owned ──
-        if not data.utxos:
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST,
-                detail="No UTXOs provided for the transaction.",
-            )
-
-        def _txid_of(u):
-            return u["txid"] if isinstance(u, dict) else u.txid
-
-        def _vout_of(u):
-            if isinstance(u, dict):
-                return int(u.get("vout", 0))
-            return int(getattr(u, "vout", 0) or 0)
-        
-        passed_txids_vouts = [(_txid_of(u), _vout_of(u)) for u in data.utxos]
-        eligible_rows = await get_eligible_utxos(
-            wallet_id=data.wallet_id,
-            txid_vout_pairs=passed_txids_vouts,
+        # Both guards now live in helpers/send_guards.py so that /tx/prepare
+        # runs the same code rather than a second copy. See that module for why.
+        await validate_spendable_utxos(
+            data.wallet_id,
+            data.utxos,
+            bool(get_scan_progress(data.wallet_id).get("active")),
         )
-        eligible_set = {(r["txid"], r["vout"]) for r in eligible_rows}
-
-        # Anything passed but not in eligible_set is either frozen, not unspent,
-        # or doesn't belong to this wallet
-        rejected = [
-            (_txid_of(u), _vout_of(u)) for u in data.utxos
-            if (_txid_of(u), _vout_of(u)) not in eligible_set
-        ]
-        if rejected:
-            rejected_str = ", ".join(f"{t[:12]}…:{v}" for t, v in rejected)
-            scanning = bool(get_scan_progress(data.wallet_id).get("active"))
-            if scanning:
-                detail = (
-                    f"Cannot spend these UTXOs ({rejected_str}) because a scan is "
-                    f"in progress and their state just changed. Refresh your UTXOs "
-                    f"and reselect, then try again."
-                )
-            else:
-                detail = (
-                    f"Cannot spend these UTXOs ({rejected_str}). "
-                    f"They are either frozen, already spent, or don't belong "
-                    f"to this wallet. Unfreeze them or remove from selection."
-                )
-            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=detail)
         _orig_recipient = data.recipient.strip()
-        if "@" in data.recipient:
-            user, domain = data.recipient.strip().split("@")
-            if user and domain:
-                resolved = bip353_resolve(data.recipient)
-                result = resolved["result"].replace("bitcoin:?sp=", "")
-                if not result.startswith("sp1") and not result.startswith("tsp1"):
-                    raise HTTPException(
-                        status_code=HTTPStatus.BAD_REQUEST,
-                        detail="Address must resolve to Silent Payment address (sp1).",
-                    )
-                 # Tampering guard: if this BitMail is one WE issued on OUR
-                # configured domain, the DNS TXT must still resolve to the SP
-                # address we recorded. A mismatch means the record was altered to
-                # redirect funds — block the send, alert the admin, and ntfy.
-                try:
-                    cf = await get_cloudflare_config()
-                    our_domain = (getattr(cf, "domain", "") or "").strip().lower()
-                except Exception:
-                    our_domain = ""
-                if our_domain and domain.strip().lower() == our_domain:
-                    expected = await get_issued_bitmail_sp_address(user.strip())
-                    if expected and expected.strip().lower() != result.strip().lower():
-                        detail = (
-                            f"BitMail {user}@{domain} resolved to {result} but siLNt "
-                            f"issued it for {expected}. The DNS record may have been "
-                            f"tampered with to redirect funds. Send blocked."
-                        )
-                        try:
-                            await create_admin_alert(
-                                kind="bitmail_tamper",
-                                severity="critical",
-                                title=f"BitMail tampering: {user}@{domain}",
-                                detail=detail,
-                                meta=json.dumps({
-                                    "bitmail": f"{user}@{domain}",
-                                    "resolved_sp": result,
-                                    "expected_sp": expected,
-                                }),
-                            )
-                        except Exception as e:
-                            logger.error(f"could not record bitmail-tamper alert: {e}")
-                        try:
-                            await send_ntfy_notification(
-                                title="⚠ BitMail tampering detected",
-                                message=detail,
-                                tags=["rotating_light"],
-                                priority="urgent",
-                            )
-                        except Exception as e:
-                            logger.warning(f"ntfy (bitmail tamper) failed: {e}")
-                        raise HTTPException(
-                            status_code=HTTPStatus.BAD_REQUEST,
-                            detail=(
-                                "This BitMail resolves to an address that does not match "
-                                "what was registered. The send has been blocked and an "
-                                "administrator has been alerted. Do not retry — verify the "
-                                "recipient address out of band."
-                            ),
-                        )
-                data.recipient = result                
-        
+        data.recipient = await resolve_recipient(data.recipient)
+
         result = build_transaction(
             spend_key_hex=data.spend_key,
             scan_secret_hex = data.scan_secret,

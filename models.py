@@ -130,6 +130,27 @@ class BuildTxRequest(BaseModel):
     scan_secret:  str
 
 
+class PrepareTxRequest(BaseModel):
+    """Everything /tx/build takes EXCEPT the keys.
+
+    The client signs locally (src/services/spSign.ts) and posts the finished
+    tx_hex to /tx/broadcast, so the spend key stops crossing the network. The
+    server keeps the two jobs that need its data rather than a secret: refusing
+    coins that are frozen, spent or somebody else's, and resolving a BitMail
+    through the tampering guard.
+
+    `utxos` is outpoints only — {txid, vout}. Amounts and keys come back from
+    the database, so a client cannot build against a stale amount it cached
+    before a rescan.
+    """
+
+    wallet_id: str
+    recipient: str
+    amount: int
+    fee_rate: float = 1
+    utxos: list[dict]
+
+
 class SpendPlainRequest(BaseModel):
     """
     Pay out of the plain BIP-84 chain. The coins go straight from there to the

@@ -1009,8 +1009,14 @@ async def get_eligible_utxos(
         params[f"t{i}"] = txid
         params[f"v{i}"] = vout
 
+    # priv_key_tweak and pub_key are selected for /tx/prepare, which hands the
+    # client the DATABASE's view of each coin rather than trusting the one it
+    # sent — a client that cached an amount before a rescan would otherwise
+    # sign for the wrong value. Both are already on the wire in /tx/build's
+    # request body, so this exposes nothing new; neither can spend without the
+    # spend key, which is the whole point of the endpoint that reads them.
     sql = f"""
-        SELECT txid, vout, amount FROM silnt.utxos
+        SELECT txid, vout, amount, priv_key_tweak, pub_key FROM silnt.utxos
         WHERE wallet_id = :wid
           AND utxo_state = 'unspent'
           AND COALESCE(frozen, FALSE) = FALSE
