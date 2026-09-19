@@ -65,12 +65,17 @@ section:last-of-type { border-bottom: 0; }
 .bar { max-width: 900px; margin: 0 auto; padding: 12px 28px; display: flex; align-items: center; gap: 12px; }
 .brand { display: flex; align-items: center; gap: 9px; font-weight: 600; font-size: 16.5px; text-decoration: none; letter-spacing: -.01em; }
 .brand img { width: 28px; height: 28px; object-fit: contain; }
-.only-btc {
-  font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
-  color: var(--orange); background: var(--orange-dim);
-  border: 1px solid var(--border-bright); border-radius: 6px; padding: 3px 8px;
+/* What kind of wallet this is, stated in the bar. Replaced the "₿ Bitcoin
+   only" badge, which said what the wallet excludes — useful, but it left
+   someone who has never heard of Silent Payments none the wiser about what
+   they were looking at. Plain text rather than a pill: three claims in a badge
+   read as decoration, and this is meant to be read. */
+.kind {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--dim);
   white-space: nowrap; flex-shrink: 0;
 }
+.kind b { color: var(--orange); font-weight: 600; }
 /* The bar is a fixed set of items in a fixed width, so nothing in it may
    shrink or wrap — it sheds labels at the breakpoints below instead. */
 .bar .brand, .bar .btn { flex-shrink: 0; white-space: nowrap; }
@@ -209,7 +214,11 @@ header.hero { padding: 56px 0 60px; border-bottom: 1px solid var(--border); }
 
 /* ── download cards ──────────────────────────────────────────────────────── */
 .dl-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-@media (max-width: 900px){ .dl-grid { grid-template-columns: 1fr; } }
+/* try.html offers two ways in, not three. Without this the pair keeps the
+   three-column track and sits squeezed against the left with a column of dead
+   space beside it. */
+.dl-grid.two { grid-template-columns: repeat(2, 1fr); }
+@media (max-width: 900px){ .dl-grid, .dl-grid.two { grid-template-columns: 1fr; } }
 .dl-card {
   border: 1px solid var(--border); border-radius: var(--radius);
   background: var(--panel); padding: 22px; box-shadow: var(--shadow);
@@ -480,29 +489,36 @@ footer nav { display: flex; flex-wrap: wrap; gap: 14px; }
 /* ── top bar: what the bar sheds, and at what width ───────────────────────────
    The bar carries a fixed set of items in a fixed width, so as the viewport
    narrows it drops the least useful ink at each step rather than letting
-   anything wrap or overflow. "₿ Bitcoin only" is the one thing that survives
-   all the way down to the narrowest phone — it is the positioning, so it stays
-   next to the brand and stays visible. Measured in Chromium at 1280 / 900 /
-   768 / 640 / 430 / 390 / 360 / 320px: no overflow at any of them. */
+   anything wrap or overflow. The wallet-kind line sheds right to left, because
+   the claims are in descending order of "would a stranger understand this":
+   "Bitcoin-only" lands on its own, "Silent Payments" does not.
+   Every breakpoint below is measured, not guessed — see the note on each. */
 
-/* 1. ≤900px — "Try it in your browser" no longer fits beside the primary
-      button, so the button reads just "Try it". */
+/* 1. ≤1080px — "· Silent Payments" goes. It is the longest of the three and
+      the one the rest of the page explains at length anyway. */
 .btn-try .btn-try-long { display: inline; }
+@media (max-width: 1080px) { .kind .kind-long { display: none; } }
+
+/* 2. ≤980px — "· self-custodial" goes, leaving "Bitcoin-only". */
+@media (max-width: 980px) { .kind .kind-mid { display: none; } }
+
+/* 3. ≤900px — "Try it on Signet" no longer fits beside the primary button, so
+      the button reads just "Try it". */
 @media (max-width: 900px) { .btn-try .btn-try-long { display: none; } }
 
-/* 2. ≤640px — "Try it" leaves the bar entirely (see the block above); the
-      badge tightens up to buy room for the primary button. */
+/* 4. ≤640px — "Try it" leaves the bar entirely (see the block above); what is
+      left of the kind line tightens to buy room for the primary button. */
 @media (max-width: 640px) {
-  .only-btc { font-size: 9.5px; padding: 3px 7px; letter-spacing: .07em; }
+  .kind { font-size: 10px; letter-spacing: .04em; }
   .brand { font-size: 15.5px; gap: 8px; }
   .brand img { width: 25px; height: 25px; }
 }
 
-/* 3. ≤447px — the badge drops the word "Bitcoin" and reads "₿ only", keeping
-      the symbol that carries the meaning. 447 and not 430: measured every 2px,
-      the full label stops fitting beside the wordmark and the primary button
-      at 446px, so shedding at 430 left 432–446 overflowing. */
-@media (max-width: 447px) { .only-btc .obtc-long { display: none; } }
+/* 5. ≤430px — the kind line goes entirely rather than shrinking further.
+      "Bitcoin-only" is a phrase, not a badge: at the size it would need to
+      survive beside the wordmark and "Get the app" it stops being readable,
+      and the hero says the same thing two lines further down. */
+@media (max-width: 430px) { .kind { display: none; } }
 
 @media (max-width: 430px) {
   .bar { padding: 10px 14px; gap: 8px; }
@@ -517,13 +533,13 @@ footer nav { display: flex; flex-wrap: wrap; gap: 14px; }
   .bar .btn-sm { padding: 7px 10px; font-size: 12.5px; }
 }
 
-/* 5. ≤355px — the brand wordmark goes. The mark alone still identifies the
-      site, and this is what keeps "Get the app" on one line on the narrowest
-      phones still in use. 355 is where the wordmark stops fitting: the bar
-      needs 336px of content and has (viewport − 20px) of room. */
-@media (max-width: 355px) {
-  .brand { font-size: 0; gap: 0; }
-  .brand img { width: 26px; height: 26px; }
+/* 6. ≤330px — only the button arrows go. The wordmark used to be dropped at
+      355px too, because the badge sat beside it all the way down and the two
+      together stopped fitting. With the kind line leaving at 430 that room is
+      back: re-measured with the wordmark forced on, the bar fits at 355, 340,
+      330, 320 and 300px. Hiding the site's own name on a phone was a cost
+      worth paying for the badge and is not worth paying for nothing. */
+@media (max-width: 330px) {
   .bar .btn .arrow { display: none; }
 }
 

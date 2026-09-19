@@ -17,7 +17,7 @@
 <!-- ?v= is a cache buster: styles.css is served with max-age=14400 and cached at
      the CDN edge, so BUMP THIS NUMBER whenever styles.css changes or the new
      styles will not reach visitors for up to four hours. -->
-<link rel="stylesheet" href="styles.css?v=9">
+<link rel="stylesheet" href="styles.css?v=10">
 </head>
 <body>
 
@@ -33,7 +33,7 @@
         </div>
         <a href="index.html">Home</a>
         <a href="download.html">Download</a>
-        <a href="https://signet.whispawallet.com">Try it <span class="ext">↗</span></a>
+        <a href="try.html">Try it</a>
         <a href="features.html">Features</a>
         <a href="privacy.html" aria-current="page">Privacy &amp; security</a>
         <a href="how-it-works.html">How it works</a>
@@ -42,9 +42,12 @@
       </nav>
     </details>
     <a class="brand" href="index.html"><img src="whispa-mark.png" alt=""> WhiSPa</a>
-    <span class="only-btc"><b>₿</b> <span class="obtc-long">Bitcoin </span>only</span>
+    <!-- What this is, in the bar. The old "₿ Bitcoin only" badge said what the
+         wallet excludes; a visitor who has never heard of Silent Payments needs
+         to be told what it IS. Sheds right-to-left as the bar narrows. -->
+    <span class="kind"><b>Bitcoin-only</b><span class="kind-mid"> · self-custodial</span><span class="kind-long"> · Silent Payments</span></span>
     <div class="spacer"></div>
-    <a class="btn btn-ghost btn-sm btn-try" href="https://signet.whispawallet.com"><span>Try it<span class="btn-try-long"> in your browser</span></span> <span class="arrow">→</span></a>
+    <a class="btn btn-ghost btn-sm btn-try" href="try.html"><span>Try it<span class="btn-try-long"> on Signet</span></span> <span class="arrow">→</span></a>
     <a class="btn btn-primary btn-sm" href="download.html">Get the app <span class="arrow">→</span></a>
   </div>
 </header>
@@ -155,6 +158,7 @@
     <nav>
       <a href="index.html">Home</a>
       <a href="download.html">Download</a>
+      <a href="try.html">Try it</a>
       <a href="features.html">Features</a>
       <a href="privacy.html">Privacy &amp; security</a>
       <a href="how-it-works.html">How it works</a>

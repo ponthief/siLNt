@@ -17,7 +17,7 @@
 <!-- ?v= is a cache buster: styles.css is served with max-age=14400 and cached at
      the CDN edge, so BUMP THIS NUMBER whenever styles.css changes or the new
      styles will not reach visitors for up to four hours. -->
-<link rel="stylesheet" href="styles.css?v=9">
+<link rel="stylesheet" href="styles.css?v=10">
 </head>
 <body>
 
@@ -33,7 +33,7 @@
         </div>
         <a href="index.html">Home</a>
         <a href="download.html" aria-current="page">Download</a>
-        <a href="https://signet.whispawallet.com">Try it <span class="ext">↗</span></a>
+        <a href="try.html">Try it</a>
         <a href="features.html">Features</a>
         <a href="privacy.html">Privacy &amp; security</a>
         <a href="how-it-works.html">How it works</a>
@@ -42,9 +42,12 @@
       </nav>
     </details>
     <a class="brand" href="index.html"><img src="whispa-mark.png" alt=""> WhiSPa</a>
-    <span class="only-btc"><b>₿</b> <span class="obtc-long">Bitcoin </span>only</span>
+    <!-- What this is, in the bar. The old "₿ Bitcoin only" badge said what the
+         wallet excludes; a visitor who has never heard of Silent Payments needs
+         to be told what it IS. Sheds right-to-left as the bar narrows. -->
+    <span class="kind"><b>Bitcoin-only</b><span class="kind-mid"> · self-custodial</span><span class="kind-long"> · Silent Payments</span></span>
     <div class="spacer"></div>
-    <a class="btn btn-ghost btn-sm btn-try" href="https://signet.whispawallet.com"><span>Try it<span class="btn-try-long"> in your browser</span></span> <span class="arrow">→</span></a>
+    <a class="btn btn-ghost btn-sm btn-try" href="try.html"><span>Try it<span class="btn-try-long"> on Signet</span></span> <span class="arrow">→</span></a>
     <a class="btn btn-primary btn-sm" href="download.html">Get the app <span class="arrow">→</span></a>
   </div>
 </header>
@@ -156,37 +159,6 @@ whispa-mainnet.apk: <b>OK</b></div>
 
 </section>
 
-<section class="wrap" id="try">
-  <div class="sec-head">
-    <div class="sec-tag">Try it</div>
-    <div class="sec-title">Three steps to your first payment</div>
-    <p class="sec-sub">On Signet the coins are worthless, so there's nothing to lose while you learn what a Silent Payment feels like.</p>
-  </div>
-  <div class="steps">
-    <div class="stp">
-      <div class="n">1</div>
-      <div>
-        <h4>Create an account</h4>
-        <p>Each device is confirmed by an email link from <span class="mailref" data-user="admin" data-domain="whispawallet.com"></span> — check spam. A password alone can't reach your funds.</p>
-      </div>
-    </div>
-    <div class="stp">
-      <div class="n">2</div>
-      <div>
-        <h4>Make a wallet, keep the seed</h4>
-        <p>Keys are derived on your phone. Write the seed down — it's the only way back.</p>
-      </div>
-    </div>
-    <div class="stp">
-      <div class="n">3</div>
-      <div>
-        <h4>Fund it and send</h4>
-        <p>On Signet, take free coins from the <a href="https://silentpayments.dev/faucet/signet" target="_blank" rel="noopener noreferrer">faucet</a>. On mainnet, send yourself a small amount first.</p>
-      </div>
-    </div>
-  </div>
-  <div class="note"><span class="badge">Heads up</span> The Signet build is the safe place to start — its coins have no value.</div>
-</section>
 
 <div class="wrap">
   <footer>
@@ -197,6 +169,7 @@ whispa-mainnet.apk: <b>OK</b></div>
     <nav>
       <a href="index.html">Home</a>
       <a href="download.html">Download</a>
+      <a href="try.html">Try it</a>
       <a href="features.html">Features</a>
       <a href="privacy.html">Privacy &amp; security</a>
       <a href="how-it-works.html">How it works</a>

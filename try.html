@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Try WhiSPa Wallet on Signet — no real money</title>
+<meta name="description" content="Try WhiSPa Wallet in your browser on Signet, Bitcoin's test network. Free coins, no real money at risk, and the same wallet you would run on mainnet.">
+<link rel="icon" type="image/png" href="whispa-mark.png">
+<link rel="apple-touch-icon" href="whispa-icon-180.png">
+<meta property="og:title" content="Try WhiSPa Wallet — free, on Signet">
+<meta property="og:description" content="Try WhiSPa Wallet in your browser on Signet, Bitcoin's test network. Free coins, no real money at risk.">
+<meta property="og:image" content="whispa-og.png">
+<meta property="og:type" content="website">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<!-- ?v= is a cache buster: styles.css is served with max-age=14400 and cached at
+     the CDN edge, so BUMP THIS NUMBER whenever styles.css changes or the new
+     styles will not reach visitors for up to four hours. -->
+<link rel="stylesheet" href="styles.css?v=10">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="bar">
+    <details class="menu" id="menu">
+      <summary aria-label="Menu" title="Menu"><span class="burger" aria-hidden="true"></span></summary>
+      <div class="drawer-backdrop"></div>
+      <nav class="drawer" aria-label="Site">
+        <div class="drawer-head">
+          <span>WhiSPa Wallet</span>
+          <button type="button" class="drawer-close" aria-label="Close menu">✕</button>
+        </div>
+        <a href="index.html">Home</a>
+        <a href="download.html">Download</a>
+        <a href="try.html" aria-current="page">Try it</a>
+        <a href="features.html">Features</a>
+        <a href="privacy.html">Privacy &amp; security</a>
+        <a href="how-it-works.html">How it works</a>
+        <div class="menu-sep"></div>
+        <a href="index.html#contact">Contact</a>
+      </nav>
+    </details>
+    <a class="brand" href="index.html"><img src="whispa-mark.png" alt=""> WhiSPa</a>
+    <!-- What this is, in the bar. The old "₿ Bitcoin only" badge said what the
+         wallet excludes; a visitor who has never heard of Silent Payments needs
+         to be told what it IS. Sheds right-to-left as the bar narrows. -->
+    <span class="kind"><b>Bitcoin-only</b><span class="kind-mid"> · self-custodial</span><span class="kind-long"> · Silent Payments</span></span>
+    <div class="spacer"></div>
+    <a class="btn btn-ghost btn-sm btn-try" href="try.html"><span>Try it<span class="btn-try-long"> on Signet</span></span> <span class="arrow">→</span></a>
+    <a class="btn btn-primary btn-sm" href="download.html">Get the app <span class="arrow">→</span></a>
+  </div>
+</header>
+<div class="wrap page-head">
+  <h1>Try it, with nothing at stake</h1>
+  <p class="lead">WhiSPa runs on <strong>Signet</strong> — a Bitcoin test network that works exactly like the real one, except the coins are free and worth nothing. Same wallet, same Silent Payments, same everything you would do with real money. Get it wrong here instead of there.</p>
+</div>
+
+<section class="wrap" id="start">
+  <div class="dl-grid two">
+    <div class="dl-card web">
+      <div class="dl-net">Browser · Signet</div>
+      <h3>Open it in a tab</h3>
+      <p>Nothing to install. Your keys are generated in the browser and stay encrypted there — the server never holds anything that can spend.</p>
+      <a class="btn btn-primary" href="https://signet.whispawallet.com">Open the web app <span class="arrow">→</span></a>
+      <div class="dl-meta">signet.whispawallet.com</div>
+    </div>
+    <div class="dl-card test">
+      <div class="dl-net">Android · Signet</div>
+      <h3>Or install the Signet build</h3>
+      <p>The test build sits happily beside the real one — separate app, separate coins, nothing shared between them.</p>
+      <a class="btn btn-ghost" href="download.html">Get the APK <span class="arrow">→</span></a>
+      <div class="dl-meta">Android 6+ · ~36 MB</div>
+    </div>
+  </div>
+</section>
+
+<section class="wrap" id="steps">
+  <div class="sec-head">
+    <div class="sec-tag">Three steps</div>
+    <div class="sec-title">From nothing to your first Silent Payment</div>
+    <p class="sec-sub">About five minutes, most of it waiting for a confirmation.</p>
+  </div>
+  <div class="steps">
+    <div class="stp">
+      <div class="n">1</div>
+      <div>
+        <h4>Create an account</h4>
+        <p>Each device is confirmed by an email link from <span class="mailref" data-user="admin" data-domain="whispawallet.com"></span> — check spam. The account gets you in; it is <em>not</em> what holds your coins, and a password alone can never reach them.</p>
+      </div>
+    </div>
+    <div class="stp">
+      <div class="n">2</div>
+      <div>
+        <h4>Make a wallet and back up the phrase</h4>
+        <p>Keys are derived on your device — write the twelve words down. On the Android app you can see them again later under <strong>Settings → Security</strong>, behind your PIN or fingerprint, so a mistyped word is fixable. That only helps while you still have the phone: lose or wipe it with no written copy and the coins are gone.</p>
+      </div>
+    </div>
+    <div class="stp">
+      <div class="n">3</div>
+      <div>
+        <h4>Get free coins and send some</h4>
+        <p>Take Signet coins from the <a href="https://silentpayments.dev/faucet/signet" target="_blank" rel="noopener noreferrer">faucet <span class="ext">↗</span></a>, then pay your own Silent Payment address and watch a brand-new output appear for it. That is the whole idea, in one transaction.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="wrap" id="what-carries-over">
+  <div class="sec-head">
+    <div class="sec-tag">Before mainnet</div>
+    <div class="sec-title">What carries over, and what doesn't</div>
+  </div>
+  <div class="grid">
+    <div class="card">
+      <span class="icon">🧠</span>
+      <h3>What you learned</h3>
+      <p>Everything. The mainnet build is the same wallet against a different chain — nothing about sending, receiving, coin control or backups changes.</p>
+      <span class="tag">Same app</span>
+    </div>
+    <div class="card">
+      <span class="icon">🔑</span>
+      <h3>Not your keys</h3>
+      <p>Signet keys are Signet keys. Mainnet starts with a fresh wallet and a fresh recovery phrase — back that one up properly, because it is guarding something.</p>
+      <span class="tag">Start again</span>
+    </div>
+    <div class="card">
+      <span class="icon">🪙</span>
+      <h3>Not the coins</h3>
+      <p>Signet coins cannot be moved to mainnet and are worth nothing. There is no exchange rate and nothing to lose — which is the point of practising here.</p>
+      <span class="tag">Worthless on purpose</span>
+    </div>
+  </div>
+  <div class="note"><span class="badge">Heads up</span> When you do move to mainnet, send yourself a small amount first and spend it back out. A test you can afford to lose beats a first transaction you can't.</div>
+</section>
+<div class="wrap">
+  <footer>
+    <div>
+      <div style="color:var(--dim)">WhiSPa Wallet · self-custodial, Bitcoin-only Silent Payments</div>
+      <div class="disclaim">The mainnet build holds real bitcoin; Signet coins have no value. Self-custody means you alone are responsible for your keys and backups. Not financial advice.</div>
+    </div>
+    <nav>
+      <a href="index.html">Home</a>
+      <a href="download.html">Download</a>
+      <a href="try.html">Try it</a>
+      <a href="features.html">Features</a>
+      <a href="privacy.html">Privacy &amp; security</a>
+      <a href="how-it-works.html">How it works</a>
+      <a href="index.html#contact">Contact</a>
+    </nav>
+  </footer>
+</div>
+
+<script>
+  // <details> opens the menu by itself; this only closes it again on an outside
+  // click or Escape, which a bare <details> won't do.
+  (function () {
+    var menu = document.getElementById('menu');
+    if (!menu) return;
+    function close() { menu.open = false; }
+    document.addEventListener('click', function (e) {
+      if (menu.open && !menu.contains(e.target)) close();
+    });
+    var backdrop = menu.querySelector('.drawer-backdrop');
+    if (backdrop) backdrop.addEventListener('click', close);
+    var closeBtn = menu.querySelector('.drawer-close');
+    if (closeBtn) closeBtn.addEventListener('click', close);
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && menu.open) { menu.open = false; menu.querySelector('summary').focus(); }
+    });
+    menu.querySelectorAll('a').forEach(function (a) {
+      a.addEventListener('click', function () { menu.open = false; });
+    });
+  })();
+  // Crawler-resistant email: assembled in JS from split data-* attributes so the
+  // address never appears verbatim in the HTML source for scrapers to scrape.
+  //
+  // Two flavours, because one of them must not be a link. `.mailref` is a real
+  // contact address and becomes a mailto. `.mailtxt` is an address quoted
+  // inside sample terminal output — turning that into a clickable link would
+  // misrepresent what gpg prints, so it renders as plain text and only the '@'
+  // is withheld from the source.
+  (function () {
+    function join(el) {
+      var u = el.getAttribute('data-user'), d = el.getAttribute('data-domain');
+      return (u && d) ? u + String.fromCharCode(64) + d : '';   // 64 = '@'
+    }
+    function buildEmails() {
+      document.querySelectorAll('.mailref').forEach(function (el) {
+        var addr = join(el);
+        if (!addr) return;
+        var a = document.createElement('a');
+        a.href = 'mailto:' + addr; a.textContent = addr;
+        el.textContent = ''; el.appendChild(a);
+      });
+      document.querySelectorAll('.mailtxt').forEach(function (el) {
+        var addr = join(el);
+        if (addr) el.textContent = addr;
+      });
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', buildEmails);
+    else buildEmails();
+  })();
+</script>
+
+</body>
+</html>
