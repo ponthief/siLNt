@@ -132,12 +132,9 @@
   </div>
 
   <div class="panel-note" style="margin-top:26px">
-    <p><strong>What a dust attack is, and why the freeze matters.</strong> Someone sends you a few hundred sats you never asked for. It looks like nothing — but the moment you spend it alongside your other coins, you have signed a transaction proving the two belong to the same wallet, and whoever sent the dust has just linked them. It is one of the cheapest deanonymisation tricks there is. WhiSPa compares every incoming coin against a threshold and against your own change, and <strong>anything small that didn't come from you is flagged and frozen automatically</strong> — out of the coin selection until you deliberately unfreeze it. A freeze you set by hand is never overridden.</p>
+    <p><strong>What a dust attack is, and why the freeze matters.</strong> Someone sends you a few hundred sats you never asked for. It looks like nothing — but the moment you spend it alongside your other coins, you have signed a transaction proving the two belong to the same wallet, and whoever sent the dust has just linked them. WhiSPa compares every incoming coin against a threshold and against your own change, and <strong>anything small that didn't come from you is flagged and frozen automatically</strong> — out of the coin selection until you deliberately unfreeze it. A freeze you set by hand is never overridden.</p>
   </div>
 
-  <div class="panel-note" style="margin-top:14px">
-    <p><strong>What it's all for.</strong> Publishing a Bitcoin address normally means publishing your history — anyone who pays you can read every other payment that address ever received. Silent Payments end that: <strong>one address you can hand out freely</strong>, and each payment arrives somewhere only you can find. <strong>Your keys are your responsibility</strong> — no one can move your bitcoin, or recover it if you lose your backup.</p>
-  </div>
 </section>
 
 <section class="wrap" id="onchain">
@@ -255,7 +252,7 @@
   </div>
 
   <div class="panel-note" style="margin-top:22px">
-    <p><strong>What this does not do.</strong> Bitcoin is still a public ledger, and honesty about that is part of the point. Silent Payments break the link on the <em>receiving</em> side — there is no reused address to cluster on. They do not hide amounts, they do not hide the payer's own coins, and they cannot help you if you then spend two of those outputs in one transaction: doing that publishes the link yourself. That is exactly why <a href="#features">coin control and the dust freeze</a> are in the wallet, and why the Coins screen counts dust on its own line.</p>
+    <p><strong>What this does not do.</strong> Silent Payments break the link on the <em>receiving</em> side. They do not hide amounts, they do not hide the payer's own coins, and they cannot help you if you spend two of those outputs in one transaction — doing that publishes the link yourself, which is what <a href="#features">coin control</a> is for. <a href="privacy.html">The full list of limits →</a></p>
   </div>
 </section>
 
