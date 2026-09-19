@@ -181,9 +181,13 @@ class WalletAddress(BaseModel):
     created_at: int = 0
 
 
-class PreviewAddressRequest(BaseModel):    
+class PreviewAddressRequest(BaseModel):
     scan_secret: str
-    spend_key: str
+    # Deprecated and ignored, same as ScanRequest.spend_key above: a labelled
+    # address needs the scan secret and the spend PUBLIC key, and the server
+    # reads B_spend out of the wallet's own sp_address. Kept Optional so an
+    # older client that still sends it doesn't 422.
+    spend_key: Optional[str] = None
     label_index: Optional[int] = None   # auto-picked if None
 
 

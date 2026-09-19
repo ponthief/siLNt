@@ -627,7 +627,22 @@ async def api_preview_wallet_address(
         or await label_index_taken(wallet_id, label_index)
     ):
         label_index = await get_next_label_index(wallet_id)
-    spend_pub_hex = get_spend_pub_from_secret(data.spend_key)
+    # Previewing a labelled address needs the scan secret (the label tweak is
+    # hash(b_scan || m)) and the spend PUBLIC key — never the spend secret. This
+    # used to take the secret and immediately reduce it to the public key with
+    # get_spend_pub_from_secret, which put spend-capable material on the wire
+    # for a read-only preview. B_spend is in the wallet's own sp_address, so
+    # take it from there, exactly as the scan endpoint does. data.spend_key is
+    # ignored if an older client still sends it.
+    from .helpers.wallet import parse_sp_address
+    try:
+        _b_scan, _b_spend = parse_sp_address(wallet.sp_address)
+        spend_pub_hex = _b_spend.hex()
+    except Exception:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="This wallet has no usable Silent Payment address on file.",
+        )
     hrp = "sp" if wallet.network == "mainnet" else "tsp"
 
     try:
