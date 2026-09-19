@@ -1440,8 +1440,14 @@ async def api_prepare_transaction(
     ]
 
     try:
+        # The recipient's output is sized from its real script. A Silent
+        # Payments recipient has none yet — the client derives it — but it is
+        # always P2TR, which is what _compute_amounts assumes when given None.
         total_input, fee, change, vsize = _compute_amounts(
-            utxos, data.amount, data.fee_rate
+            utxos,
+            data.amount,
+            data.fee_rate,
+            bytes.fromhex(recipient_script) if recipient_script else None,
         )
     except ValueError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))

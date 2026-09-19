@@ -39,6 +39,12 @@ from .curve import (
 # byte-for-byte against curve.py's pure-Python versions
 # (helpers/_curve_equivalence_check.py).
 from .curve_native import pubkey_point_gen_from_int, point_add, point_mul
+from .txsize import (
+    TAPROOT_OUTPUT_VBYTES,
+    estimate_vsize,
+    fee_for,
+    output_vbytes,
+)
 from embit.ec import SchnorrSig
 from mnemonic import Mnemonic
 SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
@@ -98,10 +104,25 @@ def _derive_recipient_script(recipient: str, spend_key, utxos: list[dict]) -> Sc
 
 
 # ── Phase 3: amounts, fee, change (orig step 4) ───────────────────────────────
-def _compute_amounts(utxos: list[dict], amount: int, fee_rate: float):
+def _compute_amounts(
+    utxos: list[dict],
+    amount: int,
+    fee_rate: float,
+    recipient_spk: bytes | None = None,
+):
     """
     Returns (total_input, fee, change_amount, estimated_vsize).
     Dust change (<DUST_SATS) is absorbed into the fee, leaving change_amount = 0.
+
+    `recipient_spk` sizes the recipient's output. It defaults to P2TR, which is
+    what a Silent Payments recipient always is; pass the real script when paying
+    an ordinary address, or a P2WPKH recipient is charged 12 vB too many.
+
+    THE FEE THIS RETURNS WAS WRONG UNTIL helpers/txsize.py. The old formula was
+    `10 + 57.5*inputs + 31*2`, and 31 vB is a P2WPKH output. Every output here
+    is P2TR at 43 vB, so a two-output send under-counted by 25 vB and paid about
+    16% under the rate the user asked for — enough to miss the block target
+    during congestion. Sizes now come from one module both builders share.
 
     Both ends are checked. Only the change end used to be, and the asymmetry was
     a money-loss path rather than a cosmetic gap: with change absorbed into the
@@ -111,8 +132,16 @@ def _compute_amounts(utxos: list[dict], amount: int, fee_rate: float):
     same rule, in the builder the Silent Payments path actually uses.
     """
     total_input = sum(u["amount"] for u in utxos)
-    estimated_vsize = int(10 + (57.5 * len(utxos)) + (31 * 2))
-    fee = max(1, math.ceil(estimated_vsize * fee_rate))
+    recipient_vbytes = (
+        output_vbytes(recipient_spk) if recipient_spk else TAPROOT_OUTPUT_VBYTES
+    )
+    # Priced with change, because that is the transaction being planned. If the
+    # change turns out to be dust the output disappears and the size is
+    # recomputed below.
+    estimated_vsize = estimate_vsize(
+        len(utxos), [recipient_vbytes, TAPROOT_OUTPUT_VBYTES]
+    )
+    fee = fee_for(estimated_vsize, fee_rate)
 
     if amount < DUST_SATS:
         raise ValueError(
@@ -142,9 +171,13 @@ def _compute_amounts(utxos: list[dict], amount: int, fee_rate: float):
         )
 
     if 0 < change_amount < DUST_SATS:
+        # Uneconomic to create, so it goes to the miner. The transaction is one
+        # output smaller than priced, which is reported honestly rather than
+        # left reading as the two-output size.
         logger.debug(f"Change {change_amount} sats below dust — adding to fee")
         fee += change_amount
         change_amount = 0
+        estimated_vsize = estimate_vsize(len(utxos), [recipient_vbytes])
 
     return total_input, fee, change_amount, estimated_vsize
 
@@ -492,7 +525,7 @@ def build_transaction(
     input_keys, input_scripts = _prepare_inputs(spend_key, utxos)
     recipient_script = _derive_recipient_script(recipient, spend_key, utxos)
     total_input, fee, change_amount, estimated_vsize = _compute_amounts(
-        utxos, amount, fee_rate
+        utxos, amount, fee_rate, bytes(recipient_script.data)
     )
     change_script = _derive_change_script(
         change_amount, scan_secret_hex, spend_key, utxos, network

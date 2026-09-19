@@ -5,10 +5,13 @@ wallet's own dust_check would flag as a suspected dust attack if it arrived —
 and the Send screen went through to Confirm.
 
 It should not have, and the reason is arithmetic rather than UI. One input and
-two outputs is 129 vB by the builder's own formula, so at 1 sat/vB a 561-sat
-coin has 432 sats left after the fee. That is below every dust floor in the
-codebase. There is no amount that coin can send, so nothing should have been
-buildable at all.
+two P2TR outputs is 154 vB, so at 1 sat/vB a 561-sat coin has 407 sats left
+after the fee. That is below every dust floor in the codebase. There is no
+amount that coin can send, so nothing should have been buildable at all.
+
+(154, not the 129 this said originally: the fee formula priced P2TR outputs as
+if they were P2WPKH until helpers/txsize.py. The conclusion only got stronger —
+the coin has less left, not more.)
 
 Worse, the builder did not merely allow it. `0 < change < DUST → fee += change`
 had no counterpart on the recipient side, so asking to send 1 sat produced a
@@ -52,13 +55,28 @@ def _load_real_wallet():
     return module
 
 
+def _load_txsize():
+    """helpers/txsize.py — no LNbits imports, so it loads straight."""
+    spec = importlib.util.spec_from_file_location(
+        f"{PKG}.helpers._txsize_under_test", ROOT / "helpers" / "txsize.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 wallet = _load_real_wallet()
 DUST = wallet.DUST_SATS
 
-# The coin from the report, and the fee its own formula charges to spend it at
-# the cheapest rate anyone would ever set.
+# The coin from the report, and the fee the builder charges to spend it at the
+# cheapest rate anyone would ever set. Derived rather than written down: it was
+# 129 until the fee formula was corrected — the old one priced P2TR outputs as
+# if they were P2WPKH — and a hardcoded figure just goes stale again.
 REPORTED_COIN = 561
-FEE_AT_1 = 129  # int(10 + 57.5 + 62) vB × 1 sat/vB
+_txsize = _load_txsize()
+FEE_AT_1 = _txsize.fee_for(
+    _txsize.estimate_vsize(1, [_txsize.TAPROOT_OUTPUT_VBYTES] * 2), 1
+)
 
 
 def _amounts(total, amount, fee_rate=1):
@@ -132,7 +150,12 @@ def test_absorption_can_no_longer_eat_a_whole_coin():
                 _t, fee, _c, vsize = _amounts(total, amount)
             except ValueError:
                 continue
-            nominal = max(1, -(-vsize // 1))  # ceil(vsize * 1)
+            # The bound is against what the transaction was PRICED at — two
+            # outputs — not the vsize returned, which after absorption
+            # describes the one-output transaction actually built.
+            nominal = _txsize.fee_for(
+                _txsize.estimate_vsize(1, [_txsize.TAPROOT_OUTPUT_VBYTES] * 2), 1
+            )
             assert fee - nominal < DUST, (
                 f"total={total} amount={amount}: fee {fee} exceeds the nominal "
                 f"{nominal} by {fee - nominal}, more than one dust output"

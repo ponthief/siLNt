@@ -125,8 +125,11 @@ def expected(case: dict) -> dict:
 
     input_keys, input_scripts = _w._prepare_inputs(spend_key, utxos)
     recipient_script = _w._derive_recipient_script(case["recipient"], spend_key, utxos)
+    # The recipient's script sizes its output, exactly as build_transaction
+    # passes it. Without this a P2WPKH recipient is priced as P2TR and the
+    # vectors would enshrine a 12 vB overcharge.
     total_in, fee, change, vsize = _w._compute_amounts(
-        utxos, case["amount"], case["fee_rate"]
+        utxos, case["amount"], case["fee_rate"], bytes(recipient_script.data)
     )
     change_script = _w._derive_change_script(
         change, case["scan_secret"], spend_key, utxos, case["network"]
@@ -220,7 +223,10 @@ def cases() -> list[dict]:
     # one output and the change script is never derived. The arithmetic for this
     # lives in _compute_amounts and the client has to agree on it, or it builds
     # a transaction with an output the wallet will never find.
-    fee_at_2 = max(1, -(-(int(10 + 57.5 * 1 + 62) * 2) // 1))
+    from siLNt.helpers.txsize import TAPROOT_OUTPUT_VBYTES, estimate_vsize, fee_for
+    fee_at_2 = fee_for(
+        estimate_vsize(1, [TAPROOT_OUTPUT_VBYTES, TAPROOT_OUTPUT_VBYTES]), 2
+    )
     out.append({
         "name": "dust change absorbed into the fee",
         "network": "signet",

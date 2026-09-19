@@ -47,6 +47,7 @@ from loguru import logger
 
 from .curve import ser256
 from .curve_native import point_add, point_mul, pubkey_point_gen_from_int
+from .txsize import TAPROOT_OUTPUT_VBYTES, estimate_vsize, fee_for
 from .wallet import (
     DUST_SATS,
     compressed_pubkey_to_point,
@@ -55,11 +56,9 @@ from .wallet import (
 
 SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 
-# One taproot key-path input is 57.5 vB, matching the estimate in wallet.py so
-# the two builders quote the same fee for the same shape.
-INPUT_VBYTES = 57.5
-OVERHEAD_VBYTES = 10
-OUTPUT_VBYTES = 31
+# Sizes come from helpers/txsize.py, which is also what wallet.py uses, so the
+# two builders cannot quote different fees for the same shape. This module had
+# its own copies and inherited the P2WPKH-output bug along with them.
 
 
 @dataclass
@@ -195,10 +194,9 @@ def change_script(
 
 
 def estimate_fee(n_inputs: int, n_outputs: int, fee_rate: float) -> tuple[int, int]:
-    """(vsize, fee). Same formula as the single-party builder, with the output
-    count spelled out because a PayJoin has two or three, not always two."""
-    vsize = int(OVERHEAD_VBYTES + INPUT_VBYTES * n_inputs + OUTPUT_VBYTES * n_outputs)
-    return vsize, max(1, math.ceil(vsize * fee_rate))
+    """(vsize, fee). Every input and every output in a PayJoin is P2TR."""
+    vsize = estimate_vsize(n_inputs, [TAPROOT_OUTPUT_VBYTES] * n_outputs)
+    return vsize, fee_for(vsize, fee_rate)
 
 
 def plan(

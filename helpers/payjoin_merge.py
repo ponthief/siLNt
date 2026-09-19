@@ -12,14 +12,21 @@ Model (sender-pays-fee, receiver is payee):
 
 from __future__ import annotations
 
+import math
+
 from embit import script
+from .txsize import (
+    OVERHEAD_VBYTES,
+    P2WPKH_INPUT_VBYTES,
+    P2WPKH_OUTPUT_VBYTES,
+    output_vbytes,
+)
 from embit.descriptor import Descriptor
 from embit.networks import NETWORKS
 from embit.psbt import PSBT, DerivationPath
 from embit.transaction import Transaction, TransactionInput, TransactionOutput
 
 DUST = 546
-P2WPKH_IN_VB = 68
 
 
 def _net(network: str):
@@ -92,7 +99,19 @@ def build_merged_payjoin(
     metas.append((rvin, rk, rspk, R, rdp))
 
     n_in = len(sender_inputs) + 1
-    vsize = int(10 + P2WPKH_IN_VB * n_in + 31 * 2)
+    # Descriptor PayJoin is a P2WPKH affair on both sides, so 31 vB per output
+    # is right here — unlike the Silent Payments builder, which was using the
+    # same figure for P2TR outputs and under-charging by 12 vB each. The
+    # payment output is sized from the destination's real script, which may be
+    # any type the payee chose. Overhead is 10.5, not 10: the segwit marker and
+    # flag are a weight unit each.
+    pay_spk_bytes = _spk_bytes(script.address_to_scriptpubkey(destination))
+    vsize = math.ceil(
+        OVERHEAD_VBYTES
+        + P2WPKH_INPUT_VBYTES * n_in
+        + output_vbytes(pay_spk_bytes)
+        + P2WPKH_OUTPUT_VBYTES
+    )
     fee = max(1, round(vsize * fee_rate))
     sender_change = S - amount - fee
     if sender_change < 0:
