@@ -194,6 +194,36 @@ def _fresh_access_token(creds) -> str:
     return creds.access_token()
 
 
+def _build_message(token: str, title: str, body: str, payload_data: dict) -> dict:
+    """One FCM v1 message, DATA-ONLY — deliberately no `notification` block.
+
+    With a `notification` block the firebase-messaging SDK on the device builds
+    and posts the notification itself whenever the app is not in the
+    foreground. That is inside Google's code, so the app cannot add a large
+    icon to it — and the large icon is the only full-colour slot a notification
+    has (the small icon is an alpha mask). FCM has no field for one either.
+
+    Data-only means the SDK displays nothing and the app's own receiver builds
+    it: android/.../notify/PaymentNotificationReceiver.kt. The client reads
+    `title` and `body` straight out of the data map, so they move in here
+    rather than into a `notification` block.
+
+    priority high is not optional for this: a normal-priority data message can
+    be held until the device next wakes, which for a payment alert is no alert
+    at all.
+
+    Still no amount in either field — data passes through Google exactly as a
+    notification body does.
+    """
+    return {
+        "message": {
+            "token": token,
+            "data": {**payload_data, "title": title, "body": body},
+            "android": {"priority": "high"},
+        }
+    }
+
+
 async def send_fcm(
     tokens: list, title: str, body: str, data: Optional[dict] = None
 ) -> None:
@@ -221,14 +251,7 @@ async def send_fcm(
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         for token in tokens:
-            msg = {
-                "message": {
-                    "token": token,
-                    "notification": {"title": title, "body": body},
-                    "data": payload_data,
-                    "android": {"priority": "high"},
-                }
-            }
+            msg = _build_message(token, title, body, payload_data)
             try:
                 r = await client.post(url, headers=headers, json=msg)
                 if r.status_code == 200:
@@ -294,14 +317,7 @@ async def send_fcm_report(
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         for token in tokens:
-            msg = {
-                "message": {
-                    "token": token,
-                    "notification": {"title": title, "body": body},
-                    "data": payload_data,
-                    "android": {"priority": "high"},
-                }
-            }
+            msg = _build_message(token, title, body, payload_data)
             try:
                 r = await client.post(url, headers=headers, json=msg)
                 if r.status_code == 200:
