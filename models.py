@@ -574,3 +574,86 @@ class AdminAlert(BaseModel):
     meta:         Optional[str] = None
     acknowledged: bool = False
     created_at:   int
+
+
+# ── Silent Payments PayJoin ──────────────────────────────────────────────────
+# The row, and the four request bodies that move it through its states. What is
+# NOT here is the point: no field on any of these carries a scan key, a spend
+# key or an input's private tweak. Each party derives its own output and signs
+# its own inputs on its own device; the server only ever sees public keys,
+# amounts, scriptPubKeys and witnesses. See migrations.py::m031.
+class PayjoinSpRequest(BaseModel):
+    id: str
+    status: str = "PROPOSED"
+    network: str = "signet"
+    payer_user_id: str
+    payer_username: str
+    payer_wallet_id: str
+    payee_user_id: Optional[str] = None
+    payee_username: str
+    payee_wallet_id: Optional[str] = None
+    amount_sats: int
+    fee_rate: float
+    payer_in_sats: Optional[int] = None
+    payee_in_sats: Optional[int] = None
+    payment_sats: Optional[int] = None
+    change_sats: Optional[int] = None
+    fee_sats: Optional[int] = None
+    vsize: Optional[int] = None
+    payer_inputs: Optional[str] = None      # JSON array
+    payee_inputs: Optional[str] = None      # JSON array
+    payment_spk: Optional[str] = None       # hex, derived by the payee
+    change_spk: Optional[str] = None        # hex, derived by the payer
+    payer_witnesses: Optional[str] = None   # JSON {input index: hex}
+    payee_witnesses: Optional[str] = None   # JSON {input index: hex}
+    unsigned_tx: Optional[str] = None
+    tx_hex: Optional[str] = None
+    txid: Optional[str] = None
+    reject_reason: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    expires_at: Optional[int] = None
+
+
+class PayjoinSpInput(BaseModel):
+    """One contributed UTXO, as the wire sees it — public data only.
+
+    `pub_key` is the 32-byte x-only key exactly as it sits on chain, which is
+    all that taking part in the shared input set requires: the sum of the input
+    PUBLIC keys is one of the two ways to reach BIP-352's shared secret, and it
+    is the way that works when the inputs have two different owners.
+    """
+    txid: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    vout: int = Field(ge=0)
+    pub_key: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    amount: int = Field(gt=0)
+
+
+class ProposePayjoinSpData(BaseModel):
+    payer_wallet_id: str
+    payee_username: str
+    amount_sats: int = Field(gt=0)
+    fee_rate: float = Field(gt=0)
+    inputs: List[PayjoinSpInput] = Field(min_length=1)
+    network: str = "signet"
+
+
+class ContributePayjoinSpData(BaseModel):
+    """The payee's half. It can derive its payment script here and only here:
+    this is the first moment the complete input set is known, and the set must
+    not change afterwards."""
+    payee_wallet_id: str
+    inputs: List[PayjoinSpInput] = Field(min_length=1)
+    payment_spk: str = Field(pattern=r"^5120[0-9a-fA-F]{64}$")
+
+
+class SignPayjoinSpData(BaseModel):
+    """Witnesses for the caller's own inputs, keyed by their index in the
+    frozen input set. `change_spk` comes with the payer's call and is absent
+    from the payee's — the payee has no output of its own to derive.
+
+    A witness here is the hex of a BIP-341 key-path signature: 64 bytes for
+    SIGHASH_DEFAULT, or 65 with an explicit sighash byte.
+    """
+    witnesses: dict
+    change_spk: Optional[str] = Field(default=None, pattern=r"^5120[0-9a-fA-F]{64}$")

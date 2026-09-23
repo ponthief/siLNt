@@ -42,7 +42,12 @@ from typing import Optional
 import coincurve
 from embit import ec
 from embit.script import Script
-from embit.transaction import TransactionOutput
+from embit.transaction import (
+    Transaction,
+    TransactionInput,
+    TransactionOutput,
+    Witness,
+)
 from loguru import logger
 
 from .curve import ser256
@@ -52,6 +57,7 @@ from .wallet import (
     DUST_SATS,
     compressed_pubkey_to_point,
     tagged_hash,
+    taproot_sighash,
 )
 
 SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
@@ -292,3 +298,129 @@ def signing_key(spend_secret: bytes, priv_key_tweak: bytes, pub_key: bytes) -> e
             "or the stored tweak belongs to another output"
         )
     return ec.PrivateKey(total.to_bytes(32, "big"))
+
+
+# ── assembly and witness handling: the server's half, and it needs no keys ───
+#
+# Everything below runs on the coordinator. None of it takes a scan key, a
+# spend key or a private tweak — it works from outpoints, x-only PUBLIC keys,
+# amounts and the two scriptPubKeys the parties derived on their own devices.
+# That is the whole reason this module can be split this way: the transaction
+# is assembled from public data, each party signs its own inputs at home, and
+# the coordinator checks the signatures it is handed against the public keys
+# already in the input set.
+
+
+def assemble(inputs: list[PayjoinInput], amounts: dict, payment_spk: bytes,
+             change_spk: Optional[bytes]) -> Transaction:
+    """The unsigned transaction, from the frozen input set and the two scripts.
+
+    Inputs go in `canonical` order and outputs in BIP-69, so both parties
+    reproduce this byte for byte from the same inputs. They have to: a
+    key-path signature commits to every prevout, amount, scriptPubKey and
+    output, so a coordinator that ordered things differently from the client
+    would produce signatures that verify against nothing.
+    """
+    ordered = canonical(inputs)
+    vin = [
+        TransactionInput(bytes.fromhex(i.txid)[::-1], i.vout) for i in ordered
+    ]
+    tx = Transaction(vin=vin, vout=outputs_for(amounts, payment_spk, change_spk))
+    return tx
+
+
+def sighashes(tx: Transaction, inputs: list[PayjoinInput]) -> list[bytes]:
+    """The BIP-341 key-path sighash for every input, SIGHASH_DEFAULT.
+
+    One per input and in the same order as tx.vin, which is `canonical` order.
+    """
+    ordered = canonical(inputs)
+    scripts = [Script(i.script) for i in ordered]
+    amounts = [i.amount for i in ordered]
+    return [
+        taproot_sighash(tx, n, scripts, amounts, sighash_type=0)
+        for n in range(len(ordered))
+    ]
+
+
+def owner_indices(
+    inputs: list[PayjoinInput], owned: list[PayjoinInput]
+) -> set[int]:
+    """Which positions in the frozen, canonically ordered set belong to one
+    party. The coordinator needs this to know which witnesses a caller is
+    entitled to supply, and to refuse one for an input that is not theirs."""
+    ordered = canonical(inputs)
+    mine = {(i.txid.lower(), i.vout) for i in owned}
+    return {n for n, i in enumerate(ordered) if (i.txid.lower(), i.vout) in mine}
+
+
+def verify_witnesses(
+    tx: Transaction,
+    inputs: list[PayjoinInput],
+    witnesses: dict,
+    allowed: set[int],
+) -> dict:
+    """Check a party's witnesses and return them normalised to {index: bytes}.
+
+    Every signature is verified against the x-only key already sitting in the
+    frozen input set, so a party cannot sign for an input it does not own, and
+    a malformed or mis-signed witness is refused here rather than by the
+    network — where the whole PayJoin would fail with nothing to point at.
+
+    Raises ValueError with something a user can act on. Nothing in here is a
+    secret: a signature and a public key are both on-chain data.
+    """
+    ordered = canonical(inputs)
+    digests = sighashes(tx, inputs)
+    out: dict = {}
+    for key, value in witnesses.items():
+        try:
+            n = int(key)
+        except (TypeError, ValueError):
+            raise ValueError(f"{key!r} is not an input index.")
+        if n not in allowed:
+            raise ValueError(
+                f"Input {n} is not yours to sign in this PayJoin."
+            )
+        try:
+            sig = bytes.fromhex(str(value))
+        except ValueError:
+            raise ValueError(f"The witness for input {n} is not hex.")
+        # 65 bytes is a signature with an explicit sighash byte appended. Only
+        # SIGHASH_DEFAULT is used here, and a 64-byte signature IS default, so
+        # an explicit 0x00 is invalid per BIP-341 and anything else is a
+        # sighash this flow does not build for.
+        if len(sig) != 64:
+            raise ValueError(
+                f"The witness for input {n} is {len(sig)} bytes; a taproot "
+                f"key-path signature for SIGHASH_DEFAULT is 64."
+            )
+        if not coincurve.PublicKeyXOnly(ordered[n].pub_key).verify(
+            sig, digests[n]
+        ):
+            raise ValueError(
+                f"The signature for input {n} does not match that input's key "
+                f"and this transaction. Both parties must sign the same frozen "
+                f"input set and the same outputs."
+            )
+        out[n] = sig
+    missing = sorted(allowed - set(out))
+    if missing:
+        raise ValueError(
+            f"No witness for input(s) {', '.join(map(str, missing))}."
+        )
+    return out
+
+
+def finalize(tx: Transaction, witnesses: dict) -> str:
+    """Put both parties' witnesses on the transaction and serialise it.
+
+    `witnesses` is {index: 64-byte signature} covering every input; a gap means
+    an unsigned input, which is not a transaction worth handing to the network.
+    """
+    for n in range(len(tx.vin)):
+        sig = witnesses.get(n)
+        if sig is None:
+            raise ValueError(f"Input {n} has no signature.")
+        tx.vin[n].witness = Witness([sig])
+    return tx.serialize().hex()

@@ -660,3 +660,128 @@ async def m030_drop_spend_watch(db):
     """
     await db.execute("DROP TABLE IF EXISTS silnt.spend_alerts")
     await db.execute("DROP TABLE IF EXISTS silnt.broadcast_txids")
+
+
+async def m031_payjoin_sp_requests(db):
+    """Silent Payments PayJoin coordination. Client-signed, key-free server.
+
+    Separate from payjoin_requests rather than more nullable columns on it,
+    because that table is PSBT- and descriptor-shaped end to end: every party
+    is identified by a payjoin_descriptors row, and four of its columns hold
+    base64 PSBTs. An SP PayJoin has neither. There is no descriptor — an SP
+    UTXO's key is a one-off from a tweak and has no derivation path — and no
+    PSBT, because PSBT exists to hand a transaction to an external signer and
+    here both signers are the parties' own apps.
+
+    WHAT THE SERVER HOLDS, AND WHAT IT NEVER SEES
+
+    Held: outpoints, the inputs' x-only PUBLIC keys and amounts, the two
+    derived output scriptPubKeys, witnesses, the assembled transaction. All of
+    it is on-chain data or about to be.
+
+    Never sent, never stored: b_scan, b_spend, or any input's private key
+    tweak. Each party derives its own output on its own device (the derivation
+    needs that party's scan key) and signs its own inputs there. helpers/
+    payjoin_sp.py::payment_script, change_script and signing_key are the
+    functions that would need those keys; nothing in views_api.py calls them,
+    and they remain only for the fixture generators and the spike check.
+
+    THE STATE MACHINE, AND WHY IT HAS AN EXTRA STEP
+
+    A taproot key-path signature commits to every output, and every SP output
+    is derived from the whole input set. So inputs must be frozen before any
+    output exists, and every output must exist before anyone signs. Adding an
+    input later invalidates the entire transaction, which is why there is no
+    "contribute and sign in one call" here as there is in the PSBT flow:
+
+      PROPOSED      payer named the payee, the amount and its own inputs
+      CONTRIBUTED   payee added its inputs AND its derived payment script.
+                    The input set is frozen from this point.
+      PAYER_SIGNED  payer posted its derived change script and witnesses for
+                    its own inputs; the unsigned transaction now exists
+      BROADCAST     payee's witnesses arrived, the two sets were combined and
+                    the transaction went to the network
+      CANCELLED     declined, cancelled or expired (terminal)
+
+    Inputs and witnesses are JSON rather than child tables. They are written
+    once and read as a whole — there is no query that wants one input — and a
+    frozen set is easier to reason about as one value than as rows that could
+    drift apart.
+    """
+    await db.execute(
+        f"""
+        CREATE TABLE silnt.payjoin_sp_requests (
+            id                  TEXT PRIMARY KEY,
+            status              TEXT NOT NULL DEFAULT 'PROPOSED',
+            network             TEXT NOT NULL,
+
+            -- Parties, addressed by username as the PSBT flow does. Both are
+            -- wallets on this instance: the derivation only works when each
+            -- side can compute its own outputs from the shared input set.
+            payer_user_id       TEXT NOT NULL,
+            payer_username      TEXT NOT NULL,
+            payer_wallet_id     TEXT NOT NULL,
+            payee_user_id       TEXT,
+            payee_username      TEXT NOT NULL,
+            payee_wallet_id     TEXT,
+
+            -- Economics. The payer pays the fee, as in payjoin_merge, and the
+            -- payee's contributed input comes straight back out in the payment
+            -- so it is no worse off for taking part.
+            amount_sats         {db.big_int} NOT NULL,
+            fee_rate            REAL NOT NULL,
+            payer_in_sats       {db.big_int},
+            payee_in_sats       {db.big_int},
+            payment_sats        {db.big_int},
+            change_sats         {db.big_int},
+            fee_sats            {db.big_int},
+            vsize               {db.big_int},
+
+            -- The frozen input set: JSON arrays of {txid, vout, pub_key,
+            -- amount}, public data only. Kept per party so each side can be
+            -- told which inputs are its own without the server guessing.
+            payer_inputs        TEXT,
+            payee_inputs        TEXT,
+
+            -- The two derived scriptPubKeys, hex. Each is computed on its
+            -- owner's device and is opaque to the other party: only the payee
+            -- holds the scan key the payment script comes from, which is why
+            -- the payer verifies that output by its VALUE and not its script.
+            payment_spk         TEXT,
+            change_spk          TEXT,
+
+            -- Witnesses, JSON {index: hex}, posted by whoever owns those
+            -- inputs. Two slots rather than one so the two parties cannot
+            -- overwrite each other and the order they sign in does not matter.
+            payer_witnesses     TEXT,
+            payee_witnesses     TEXT,
+
+            unsigned_tx         TEXT,
+            tx_hex              TEXT,
+            txid                TEXT,
+
+            reject_reason       TEXT,
+            created_at          TIMESTAMP NOT NULL DEFAULT {db.timestamp_now},
+            updated_at          TIMESTAMP NOT NULL DEFAULT {db.timestamp_now},
+            -- Unix seconds, matching payjoin_requests: this codebase only ever
+            -- uses db.timestamp_now for defaults and never writes a computed
+            -- TIMESTAMP, so an int avoids datetime-serialization differences
+            -- between Postgres and SQLite.
+            expires_at          {db.big_int}
+        );
+        """
+    )
+    # The payee's incoming queue, the payer's outgoing one, and the expiry
+    # sweep — the same three lookups the PSBT flow needs.
+    await db.execute(
+        "CREATE INDEX idx_payjoin_sp_payee "
+        "ON silnt.payjoin_sp_requests (payee_user_id, status);"
+    )
+    await db.execute(
+        "CREATE INDEX idx_payjoin_sp_payer "
+        "ON silnt.payjoin_sp_requests (payer_user_id, status);"
+    )
+    await db.execute(
+        "CREATE INDEX idx_payjoin_sp_status "
+        "ON silnt.payjoin_sp_requests (status, expires_at);"
+    )
