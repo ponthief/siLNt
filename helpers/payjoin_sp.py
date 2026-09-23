@@ -36,6 +36,7 @@ Adding an input afterwards invalidates every output in the transaction.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -479,3 +480,81 @@ def can_cancel(status: str) -> bool:
     """Either party, right up until it is broadcast. After that there is
     nothing to cancel — the transaction belongs to the network."""
     return status not in TERMINAL
+
+
+# ── wire shapes ──────────────────────────────────────────────────────────────
+#
+# These were Field(pattern=...) constraints on the request models until an
+# LNbits on Pydantic v1 refused to import the extension over the neighbouring
+# min_length. The regex spellings differ between v1 and v2 too (regex vs
+# pattern), and under v1 `pattern=` is not a keyword at all: it lands in the
+# schema extras and enforces nothing. Silently absent validation on the
+# endpoints that decide where money goes is worse than none, so the checks
+# moved here, where they run the same under either version and can be tested.
+
+_HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
+_P2TR_SPK = re.compile(r"^5120[0-9a-fA-F]{64}$")
+
+
+def validate_wire_input(i: dict, where: str = "input") -> None:
+    """One contributed UTXO as it arrived over the wire.
+
+    Shape only — that these are real, spendable, unreserved coins of the
+    caller's wallet is views_api.py's job, and it needs the database. This is
+    the check that stops a malformed value reaching the curve code, where a
+    64-character string that is not hex becomes an exception halfway through a
+    derivation rather than a 400 with a reason.
+    """
+    txid = str(i.get("txid", ""))
+    if not _HEX64.match(txid):
+        raise ValueError(f"{where}: txid must be 64 hex characters.")
+    try:
+        vout = int(i.get("vout"))
+    except (TypeError, ValueError):
+        raise ValueError(f"{where}: vout must be a whole number.")
+    if vout < 0:
+        raise ValueError(f"{where}: vout cannot be negative.")
+    if not _HEX64.match(str(i.get("pub_key", ""))):
+        raise ValueError(
+            f"{where}: pub_key must be a 32-byte x-only key, 64 hex "
+            f"characters. Only taproot inputs can join this input set."
+        )
+    try:
+        amount = int(i.get("amount"))
+    except (TypeError, ValueError):
+        raise ValueError(f"{where}: amount must be a whole number of sats.")
+    if amount <= 0:
+        raise ValueError(f"{where}: amount must be more than zero.")
+
+
+def validate_wire_inputs(rows: list, where: str = "inputs") -> None:
+    """A party's whole contribution: at least one input, each well formed, and
+    no outpoint named twice.
+
+    The duplicate check is not cosmetic. The same outpoint twice would be the
+    same coin spent twice in one transaction, which the network rejects — and
+    it would sail past the per-input checks, because each copy is individually
+    fine.
+    """
+    if not rows:
+        raise ValueError(f"{where}: a PayJoin needs at least one coin from you.")
+    for n, i in enumerate(rows):
+        validate_wire_input(i, f"{where}[{n}]")
+    seen = [(str(i["txid"]).lower(), int(i["vout"])) for i in rows]
+    if len(set(seen)) != len(seen):
+        raise ValueError(f"{where}: the same coin is listed twice.")
+
+
+def validate_spk(spk: str, where: str = "script") -> None:
+    """A P2TR scriptPubKey, hex: OP_1 <32-byte key>.
+
+    Every output in a PayJoin is P2TR, on both sides, so anything else is
+    either a bug in the client's derivation or an attempt to redirect an
+    output — and neither should be written to the row the other party will
+    sign over.
+    """
+    if not _P2TR_SPK.match(str(spk or "")):
+        raise ValueError(
+            f"{where}: must be a P2TR scriptPubKey — 5120 followed by 64 hex "
+            f"characters."
+        )

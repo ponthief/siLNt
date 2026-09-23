@@ -615,6 +615,27 @@ class PayjoinSpRequest(BaseModel):
     expires_at: Optional[int] = None
 
 
+# NO `pattern=` OR `min_length=` ON THE MODELS BELOW, and that is not laziness.
+#
+# This extension loads under whichever Pydantic LNbits brings, and the two
+# major versions disagree about both spellings:
+#
+#   list length   v1 wants min_items. v2 wants min_length, and rejects regex.
+#   string regex  v1 wants regex. v2 REMOVED regex and wants pattern.
+#
+# No spelling satisfies both. `min_length` on a list is the loud failure: under
+# v1 it is a str-only constraint, so v1 warns "the following field constraints
+# are set but not enforced", and that took LNbits down at import — the whole
+# extension, not just this feature. `pattern=` under v1 is the quiet one, and
+# worse for it: v1 has no such keyword, so it lands in the schema extras and
+# validates NOTHING. The format checks would have looked present while being
+# absent, on the endpoints that decide where money goes.
+#
+# So the shapes are checked by helpers/payjoin_sp.py::validate_wire_input and
+# ::validate_spk, called from the endpoints. Those behave the same on either
+# version and are unit-tested, which no Field kwarg here ever was.
+#
+# `gt`/`ge` stay: both versions accept and enforce them.
 class PayjoinSpInput(BaseModel):
     """One contributed UTXO, as the wire sees it — public data only.
 
@@ -622,10 +643,13 @@ class PayjoinSpInput(BaseModel):
     all that taking part in the shared input set requires: the sum of the input
     PUBLIC keys is one of the two ways to reach BIP-352's shared secret, and it
     is the way that works when the inputs have two different owners.
+
+    The hex shapes are checked by helpers/payjoin_sp.py::validate_wire_input,
+    not by a Field constraint here — see the note above this class.
     """
-    txid: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    txid: str
     vout: int = Field(ge=0)
-    pub_key: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    pub_key: str
     amount: int = Field(gt=0)
 
 
@@ -634,7 +658,7 @@ class ProposePayjoinSpData(BaseModel):
     payee_username: str
     amount_sats: int = Field(gt=0)
     fee_rate: float = Field(gt=0)
-    inputs: List[PayjoinSpInput] = Field(min_length=1)
+    inputs: List[PayjoinSpInput]
     network: str = "signet"
 
 
@@ -643,8 +667,8 @@ class ContributePayjoinSpData(BaseModel):
     this is the first moment the complete input set is known, and the set must
     not change afterwards."""
     payee_wallet_id: str
-    inputs: List[PayjoinSpInput] = Field(min_length=1)
-    payment_spk: str = Field(pattern=r"^5120[0-9a-fA-F]{64}$")
+    inputs: List[PayjoinSpInput]
+    payment_spk: str
 
 
 class SignPayjoinSpData(BaseModel):
@@ -656,4 +680,4 @@ class SignPayjoinSpData(BaseModel):
     SIGHASH_DEFAULT, or 65 with an explicit sighash byte.
     """
     witnesses: dict
-    change_spk: Optional[str] = Field(default=None, pattern=r"^5120[0-9a-fA-F]{64}$")
+    change_spk: Optional[str] = None

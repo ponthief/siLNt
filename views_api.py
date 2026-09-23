@@ -4375,7 +4375,7 @@ async def api_payjoin_sp_propose(
 ):
     """The payer proposes. Inputs are NOT frozen yet — the payee has still to
     add its own, and no output can be derived until it has."""
-    from .helpers.payjoin_sp import plan
+    from .helpers.payjoin_sp import plan, validate_wire_inputs
 
     payer_uid = key_info.wallet.user
     wallet = await _pj_own_wallet(data.payer_wallet_id, payer_uid)
@@ -4403,6 +4403,13 @@ async def api_payjoin_sp_propose(
         )
 
     rows = [i.dict() for i in data.inputs]
+    # Shape first, and from the helper rather than a Field constraint: the
+    # constraint spellings differ between Pydantic v1 and v2, and under v1 the
+    # `pattern=` form enforces nothing at all. See models.py.
+    try:
+        validate_wire_inputs(rows, "inputs")
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
     await _pj_validate_inputs(data.payer_wallet_id, rows)
     await _pj_refuse_reserved(payer_uid, rows)
 
@@ -4497,7 +4504,12 @@ async def api_payjoin_sp_contribute(
     This endpoint stores it and never checks it, and cannot: the payer is
     protected by the output's VALUE instead, which /sign pins.
     """
-    from .helpers.payjoin_sp import plan, require_turn
+    from .helpers.payjoin_sp import (
+        plan,
+        require_turn,
+        validate_spk,
+        validate_wire_inputs,
+    )
 
     uid = key_info.wallet.user
     req = await get_payjoin_sp_request(rid)
@@ -4520,6 +4532,11 @@ async def api_payjoin_sp_contribute(
         )
 
     rows = [i.dict() for i in data.inputs]
+    try:
+        validate_wire_inputs(rows, "inputs")
+        validate_spk(data.payment_spk, "payment_spk")
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
     await _pj_validate_inputs(data.payee_wallet_id, rows)
     await _pj_refuse_reserved(uid, rows)
 
@@ -4584,6 +4601,7 @@ async def api_payjoin_sp_sign(
         finalize,
         owner_indices,
         require_turn,
+        validate_spk,
         verify_witnesses,
     )
 
@@ -4614,6 +4632,13 @@ async def api_payjoin_sp_sign(
                 status_code=HTTPStatus.BAD_REQUEST,
                 detail="This PayJoin has change, so it needs your change script.",
             )
+        if data.change_spk:
+            try:
+                validate_spk(data.change_spk, "change_spk")
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_REQUEST, detail=str(e)
+                )
         change_spk = data.change_spk.lower() if data.change_spk else None
     else:
         change_spk = req.change_spk

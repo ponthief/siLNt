@@ -354,3 +354,105 @@ def test_cancelling_is_open_until_broadcast():
         assert pjsp.can_cancel(s)
     assert not pjsp.can_cancel(pjsp.BROADCAST)
     assert not pjsp.can_cancel(pjsp.CANCELLED)
+
+
+# ── wire shapes ──────────────────────────────────────────────────────────────
+#
+# These checks were Field(pattern=...) on the request models until an LNbits on
+# Pydantic v1 refused to import the extension over the min_length beside them.
+# They live here now because the Field spellings are not portable between the
+# two Pydantic majors, and because under v1 `pattern=` silently enforces
+# nothing — validation that looks present and is absent, on the endpoints that
+# decide where money goes.
+
+GOOD_INPUT = {"txid": "ab" * 32, "vout": 0, "pub_key": "cd" * 32, "amount": 1000}
+
+
+def test_a_well_formed_input_passes():
+    pjsp.validate_wire_input(GOOD_INPUT)
+
+
+@pytest.mark.parametrize(
+    "field,value,match",
+    [
+        ("txid", "ab" * 31, "64 hex"),
+        ("txid", "zz" * 32, "64 hex"),
+        ("txid", "", "64 hex"),
+        ("pub_key", "cd" * 33, "x-only"),
+        ("pub_key", "not hex at all" + "0" * 50, "x-only"),
+        ("vout", -1, "cannot be negative"),
+        ("vout", "later", "whole number"),
+        ("amount", 0, "more than zero"),
+        ("amount", -5, "more than zero"),
+        ("amount", None, "whole number"),
+    ],
+)
+def test_a_malformed_input_is_refused(field, value, match):
+    bad = {**GOOD_INPUT, field: value}
+    with pytest.raises(ValueError, match=match):
+        pjsp.validate_wire_input(bad)
+
+
+def test_a_33_byte_compressed_key_is_refused():
+    """An SP PayJoin's input set is taproot only: input_digest lifts each key
+    to even Y, which is meaningless for a 33-byte key that already states its
+    parity. Catching it here beats catching it in the curve code."""
+    with pytest.raises(ValueError, match="x-only"):
+        pjsp.validate_wire_input({**GOOD_INPUT, "pub_key": "02" + "cd" * 32})
+
+
+def test_no_inputs_is_refused():
+    with pytest.raises(ValueError, match="at least one coin"):
+        pjsp.validate_wire_inputs([])
+
+
+def test_the_same_coin_twice_is_refused():
+    """Individually fine, together a double spend the network would reject."""
+    with pytest.raises(ValueError, match="listed twice"):
+        pjsp.validate_wire_inputs([GOOD_INPUT, dict(GOOD_INPUT)])
+
+
+def test_the_same_txid_at_different_vouts_is_fine():
+    pjsp.validate_wire_inputs([GOOD_INPUT, {**GOOD_INPUT, "vout": 1}])
+
+
+def test_a_p2tr_script_passes():
+    pjsp.validate_spk("5120" + "ab" * 32)
+
+
+@pytest.mark.parametrize(
+    "spk",
+    [
+        "0014" + "ab" * 20,      # P2WPKH — not what a PayJoin output is
+        "5120" + "ab" * 31,      # too short
+        "5120" + "zz" * 32,      # not hex
+        "",
+        None,
+    ],
+)
+def test_anything_but_a_p2tr_script_is_refused(spk):
+    with pytest.raises(ValueError, match="P2TR"):
+        pjsp.validate_spk(spk)
+
+
+def test_the_request_models_carry_no_unportable_field_constraints():
+    """The regression guard for the outage itself.
+
+    `min_length` on a list and `pattern=` on a str are Pydantic v2 spellings.
+    Under v1, the first warns "set but not enforced" — loudly enough to stop
+    LNbits importing the extension — and the second enforces nothing at all.
+    Read as source rather than through pydantic, so this says the same thing
+    whichever version is installed where the tests run.
+    """
+    import re as _re
+
+    src = (ROOT / "models.py").read_text(encoding="utf-8")
+    start = src.index("class PayjoinSpInput")
+    block = src[start:]
+    offenders = _re.findall(r"^\s+\w+.*Field\([^)]*\b(pattern|min_length|min_items|regex)\s*=",
+                            block, _re.M)
+    assert not offenders, (
+        f"SP PayJoin models use {sorted(set(offenders))}, which do not mean the "
+        f"same thing in Pydantic v1 and v2. Validate in helpers/payjoin_sp.py "
+        f"instead."
+    )
