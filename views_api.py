@@ -174,6 +174,9 @@ from .crud import (
     list_payjoin_sp_for_payee,
     list_payjoin_sp_for_payer,
     get_reserved_sp_outpoints,
+    create_payjoin_sp_offer,
+    list_payjoin_sp_offers,
+    claim_payjoin_sp_offer,
     create_payjoin_invoice, list_payjoin_invoices_for_payer,
     get_account_id_by_email,
     create_payjoin_contact,
@@ -254,6 +257,8 @@ from .models import (
     ProposePayjoinSpData,
     ContributePayjoinSpData,
     SignPayjoinSpData,
+    OfferPayjoinSpData,
+    ClaimPayjoinSpData,
     PayInvoiceData,
     SignPayjoinData,
     CreateContactData,
@@ -4787,3 +4792,248 @@ async def _pj_broadcast(network: str, tx_hex: str) -> str:
             detail=f"Broadcast failed: {resp.text}",
         )
     return resp.text.strip()
+
+
+# ── advertised PayJoins ──────────────────────────────────────────────────────
+#
+# The payee posts an amount; a connected contact takes it. The directed flow
+# above has the payer start and name a payee, which only works when you already
+# know who you are paying. This is the other half: "I will take 50k sats from
+# whoever wants to PayJoin with me."
+#
+# THE EXTRA ROUND TRIP, and why it cannot be designed away. Every SP output is
+# derived from the whole input set. At advertisement time half that set does
+# not exist, so the payee cannot derive its payment script the way it does at
+# /contribute in the directed flow — it has to come back once a claimant's
+# inputs are in. So OPEN -> CLAIMED -> CONTRIBUTED, where the directed flow
+# goes straight to CONTRIBUTED. From CONTRIBUTED the two are the same and share
+# /sign and /cancel unchanged.
+#
+# VISIBILITY is accepted contacts only, the same consent rule the directed flow
+# enforces. An offer says "I hold a spendable coin of about this size", which
+# is not something to broadcast to every account on the instance.
+
+
+@silnt_api_router.post("/api/v1/payjoin/sp/offers")
+async def api_payjoin_sp_offer(
+    data: OfferPayjoinSpData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """Advertise a PayJoin to your contacts."""
+    from .helpers.payjoin_sp import plan, validate_wire_inputs
+
+    uid = key_info.wallet.user
+    wallet = await _pj_own_wallet(data.payee_wallet_id, uid)
+
+    rows = [i.dict() for i in data.inputs]
+    try:
+        validate_wire_inputs(rows, "inputs")
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+    await _pj_validate_inputs(data.payee_wallet_id, rows)
+    await _pj_refuse_reserved(uid, rows)
+
+    # Quote it against the payee's own inputs standing in for the payer's, so
+    # an amount that cannot work is refused now rather than by whoever claims
+    # it. Provisional: the real fee depends on how many inputs the claimant
+    # brings, and /claim recomputes it.
+    payee_inputs = _pj_payjoin_inputs(rows)
+    try:
+        plan(payee_inputs, payee_inputs, data.amount_sats, data.fee_rate)
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+
+    acct = await get_account(uid)
+    offer = await create_payjoin_sp_offer(
+        network=wallet.network,
+        payee_user_id=uid,
+        payee_username=(acct.username if acct else None) or uid,
+        payee_wallet_id=data.payee_wallet_id,
+        amount_sats=data.amount_sats,
+        fee_rate=data.fee_rate,
+        payee_inputs=rows,
+        memo=(data.memo or "").strip()[:200] or None,
+        expiry_seconds=PAYJOIN_SP_EXPIRY_SECONDS,
+    )
+
+    # Tell the contacts there is something on the board. No amount, as ever.
+    for cid in await list_accepted_contact_user_ids(uid):
+        await _notify_payjoin_sp(
+            cid,
+            "PayJoin offered",
+            "A contact is offering a PayJoin. Open WhiSPa to take it.",
+        )
+    return offer.dict()
+
+
+@silnt_api_router.get("/api/v1/payjoin/sp/offers")
+async def api_payjoin_sp_list_offers(
+    network: Optional[str] = None,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """The board: open offers from your contacts, and your own."""
+    uid = key_info.wallet.user
+    contacts = await list_accepted_contact_user_ids(uid)
+    offers = await list_payjoin_sp_offers(uid, contacts, network)
+    out = []
+    for o in offers:
+        row = o.dict()
+        row["mine"] = o.payee_user_id == uid
+        # The payee's own inputs are on the row and are nobody else's
+        # business until they are on chain. A claimant learns them at /claim,
+        # when it needs them to derive; a browser does not need them to decide.
+        if not row["mine"]:
+            row.pop("payee_inputs", None)
+        out.append(row)
+    return {"offers": out}
+
+
+@silnt_api_router.post("/api/v1/payjoin/sp/offers/{rid}/claim")
+async def api_payjoin_sp_claim(
+    rid: str,
+    data: ClaimPayjoinSpData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """Take an open offer: contribute the paying side's coins.
+
+    This is the transition the directed flow does not have, and the only one
+    with a race in it — two contacts can reach for the same offer. The UPDATE
+    in claim_payjoin_sp_offer carries `status = 'OPEN'` in its WHERE, so the
+    second one matches no rows and is told, rather than quietly replacing the
+    first claimant on a transaction they are already committed to.
+    """
+    from .helpers.payjoin_sp import is_open, plan, validate_wire_inputs
+
+    uid = key_info.wallet.user
+    offer = await get_payjoin_sp_request(rid)
+    if not offer:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Not found.")
+    if not is_open(offer.status):
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=f"This offer is {offer.status.lower()} — someone got there "
+                   f"first, or it was withdrawn.",
+        )
+    if offer.payee_user_id == uid:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="That is your own offer. A PayJoin with yourself creates no "
+                   "ambiguity, because both input sets would be yours.",
+        )
+    if offer.expires_at and offer.expires_at < int(time.time()):
+        raise HTTPException(
+            status_code=HTTPStatus.GONE, detail="This offer has expired."
+        )
+
+    # Consent both ways. The offer was only listed to contacts, but the list
+    # and the claim are separate requests and this one must not take the
+    # earlier one's word for it.
+    if offer.payee_user_id not in set(await list_accepted_contact_user_ids(uid)):
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN,
+            detail="You can only PayJoin a connected user.",
+        )
+
+    wallet = await _pj_own_wallet(data.payer_wallet_id, uid)
+    if wallet.network != offer.network:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"This offer is on {offer.network}; that wallet is not.",
+        )
+
+    rows = [i.dict() for i in data.inputs]
+    try:
+        validate_wire_inputs(rows, "inputs")
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+    await _pj_validate_inputs(data.payer_wallet_id, rows)
+    await _pj_refuse_reserved(uid, rows)
+
+    payee_rows = _pj_inputs(offer.payee_inputs)
+    overlap = {(str(i["txid"]).lower(), int(i["vout"])) for i in rows} & {
+        (str(i["txid"]).lower(), int(i["vout"])) for i in payee_rows
+    }
+    if overlap:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="An input cannot be contributed by both parties.",
+        )
+
+    try:
+        amounts = plan(
+            _pj_payjoin_inputs(rows),
+            _pj_payjoin_inputs(payee_rows),
+            offer.amount_sats,
+            offer.fee_rate,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+
+    acct = await get_account(uid)
+    claimed = await claim_payjoin_sp_offer(
+        rid,
+        payer_user_id=uid,
+        payer_username=(acct.username if acct else None) or uid,
+        payer_wallet_id=data.payer_wallet_id,
+        payer_inputs=rows,
+        amounts=amounts,
+    )
+    if not claimed:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail="Someone claimed this offer first. Nothing of yours was "
+                   "committed.",
+        )
+
+    await _notify_payjoin_sp(
+        offer.payee_user_id,
+        "PayJoin taken",
+        "Someone took your PayJoin offer. Open WhiSPa to carry on.",
+    )
+    return claimed.dict()
+
+
+@silnt_api_router.post("/api/v1/payjoin/sp/requests/{rid}/derive")
+async def api_payjoin_sp_derive(
+    rid: str,
+    data: ContributePayjoinSpData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """The payee's payment script, once a claimant has frozen the input set.
+
+    The advertised flow's counterpart to /contribute. /contribute takes inputs
+    AND a script because the payee learns the full set and derives in one go;
+    here the payee's inputs went in at /offers and only the script is left.
+    payee_wallet_id and inputs on the body are ignored — they are already on
+    the row, and taking them again would be inviting a second answer to a
+    question already settled.
+    """
+    from .helpers.payjoin_sp import require_turn, validate_spk
+
+    uid = key_info.wallet.user
+    req = await get_payjoin_sp_request(rid)
+    if not req or req.payee_user_id != uid:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Not found.")
+    try:
+        require_turn(req.status, "payee")
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.CONFLICT, detail=str(e))
+    if req.status != "CLAIMED":
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail="This PayJoin already has a payment output.",
+        )
+    try:
+        validate_spk(data.payment_spk, "payment_spk")
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+
+    updated = await update_payjoin_sp_request(
+        rid, status="CONTRIBUTED", payment_spk=data.payment_spk.lower()
+    )
+    await _notify_payjoin_sp(
+        req.payer_user_id,
+        "PayJoin ready",
+        "The other side is ready. Open WhiSPa to sign.",
+    )
+    return updated.dict()

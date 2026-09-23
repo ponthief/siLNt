@@ -456,3 +456,60 @@ def test_the_request_models_carry_no_unportable_field_constraints():
         f"same thing in Pydantic v1 and v2. Validate in helpers/payjoin_sp.py "
         f"instead."
     )
+
+
+# ── the advertised flow's turn rules ─────────────────────────────────────────
+#
+# The payee posts an amount and a contact takes it. It needs two states the
+# directed flow does not, for the reason everything here bends around: every
+# SP output comes from the WHOLE input set, and at advertisement time half of
+# it does not exist. So the payee cannot derive when it posts, and must come
+# back once someone claims.
+
+
+def test_an_open_offer_is_nobodys_turn_in_particular():
+    """Not None-because-finished and not a role: any contact may take it.
+    Callers that conflate the two would either hide a live offer or offer a
+    Sign button for a PayJoin with no payer."""
+    assert pjsp.whose_turn(pjsp.OPEN) is None
+    assert pjsp.is_open(pjsp.OPEN)
+    assert not pjsp.is_open(pjsp.BROADCAST)
+    assert not pjsp.is_open(pjsp.PROPOSED)
+
+
+@pytest.mark.parametrize("role", ["payer", "payee"])
+def test_nobody_can_sign_an_unclaimed_offer(role):
+    """The failure this prevents: signing before a payer exists means signing
+    before the input set is frozen, so every output is still to be derived."""
+    with pytest.raises(ValueError, match="still open for someone to take"):
+        pjsp.require_turn(pjsp.OPEN, role)
+
+
+def test_after_a_claim_the_payee_derives():
+    assert pjsp.whose_turn(pjsp.CLAIMED) == "payee"
+    pjsp.require_turn(pjsp.CLAIMED, "payee")
+    with pytest.raises(ValueError, match="waiting on the payee"):
+        pjsp.require_turn(pjsp.CLAIMED, "payer")
+
+
+def test_the_two_flows_converge_at_contributed():
+    """From CONTRIBUTED on, an advertised PayJoin and a directed one are the
+    same object and share /sign — so the turn table must not branch."""
+    for status in (pjsp.CONTRIBUTED, pjsp.PAYER_SIGNED):
+        assert pjsp.whose_turn(status) in ("payer", "payee")
+    assert pjsp.whose_turn(pjsp.CONTRIBUTED) == "payer"
+    assert pjsp.whose_turn(pjsp.PAYER_SIGNED) == "payee"
+
+
+def test_an_open_offer_can_be_withdrawn():
+    assert pjsp.can_cancel(pjsp.OPEN)
+    assert pjsp.can_cancel(pjsp.CLAIMED)
+
+
+def test_every_live_state_either_names_a_turn_or_is_open():
+    """No state may be reachable and answer neither. That combination is a
+    PayJoin nobody can move and nobody is told about."""
+    live = (pjsp.OPEN, pjsp.PROPOSED, pjsp.CLAIMED, pjsp.CONTRIBUTED,
+            pjsp.PAYER_SIGNED)
+    for s in live:
+        assert pjsp.whose_turn(s) is not None or pjsp.is_open(s), s

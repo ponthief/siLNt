@@ -3262,3 +3262,134 @@ async def list_expired_payjoin_sp_requests(
         {"now": now_ts},
     )
     return [PayjoinSpRequest(**r) for r in rows]
+
+
+async def create_payjoin_sp_offer(
+    *,
+    network: str,
+    payee_user_id: str,
+    payee_username: str,
+    payee_wallet_id: str,
+    amount_sats: int,
+    fee_rate: float,
+    payee_inputs: list,
+    memo: Optional[str] = None,
+    expiry_seconds: int = 86400,
+) -> PayjoinSpRequest:
+    """An advertised PayJoin: the payee posts an amount and its own inputs,
+    and waits for a contact to claim it.
+
+    No payer yet, which is why m032 made those three columns nullable. The
+    payee cannot derive its payment script here either — that needs the whole
+    input set, and half of it does not exist until someone claims.
+    """
+    rid = urlsafe_short_hash()
+    await db.execute(
+        """
+        INSERT INTO silnt.payjoin_sp_requests
+            (id, status, network,
+             payee_user_id, payee_username, payee_wallet_id,
+             amount_sats, fee_rate, payee_in_sats, payee_inputs, memo,
+             expires_at)
+        VALUES
+            (:id, 'OPEN', :network,
+             :payee_user_id, :payee_username, :payee_wallet_id,
+             :amount_sats, :fee_rate, :payee_in_sats, :payee_inputs, :memo,
+             :expires_at)
+        """,
+        {
+            "id": rid,
+            "network": network,
+            "payee_user_id": payee_user_id,
+            "payee_username": payee_username,
+            "payee_wallet_id": payee_wallet_id,
+            "amount_sats": amount_sats,
+            "fee_rate": fee_rate,
+            "payee_in_sats": sum(int(i["amount"]) for i in payee_inputs),
+            "payee_inputs": json.dumps(payee_inputs),
+            "memo": memo,
+            "expires_at": int(time.time()) + expiry_seconds,
+        },
+    )
+    return await get_payjoin_sp_request(rid)
+
+
+async def list_payjoin_sp_offers(
+    user_id: str, contact_ids: list, network: Optional[str] = None
+) -> list[PayjoinSpRequest]:
+    """The offer board: OPEN offers posted by people this user has connected
+    with, plus their own so they can withdraw them.
+
+    Contacts are passed in rather than joined here. Consent lives in
+    payjoin_contacts and is already resolved by the caller for the directed
+    flow; resolving it twice, two different ways, is how the two paths end up
+    disagreeing about who may see what.
+    """
+    allowed = list({*contact_ids, user_id})
+    if not allowed:
+        return []
+    keys = {f"u{n}": v for n, v in enumerate(allowed)}
+    placeholders = ", ".join(f":{k}" for k in keys)
+    sql = (
+        f"SELECT * FROM silnt.payjoin_sp_requests "
+        f"WHERE status = 'OPEN' AND payee_user_id IN ({placeholders})"
+    )
+    params = dict(keys)
+    if network:
+        sql += " AND network = :network"
+        params["network"] = network
+    sql += " ORDER BY created_at DESC"
+    rows = await db.fetchall(sql, params)
+    return [PayjoinSpRequest(**r) for r in rows]
+
+
+async def claim_payjoin_sp_offer(
+    rid: str,
+    *,
+    payer_user_id: str,
+    payer_username: str,
+    payer_wallet_id: str,
+    payer_inputs: list,
+    amounts: dict,
+) -> Optional[PayjoinSpRequest]:
+    """Take an OPEN offer, if it is still open.
+
+    The WHERE clause carries `status = 'OPEN'`, and that is the whole race
+    control: two contacts claiming the same offer at once both run this, and
+    the second one's UPDATE matches no rows. Returns None in that case so the
+    caller can say so, rather than quietly overwriting the first claimant and
+    leaving them signing a transaction that is no longer theirs.
+    """
+    await db.execute(
+        """
+        UPDATE silnt.payjoin_sp_requests SET
+            status = 'CLAIMED',
+            payer_user_id = :payer_user_id,
+            payer_username = :payer_username,
+            payer_wallet_id = :payer_wallet_id,
+            payer_inputs = :payer_inputs,
+            payer_in_sats = :payer_in_sats,
+            payment_sats = :payment_sats,
+            change_sats = :change_sats,
+            fee_sats = :fee_sats,
+            vsize = :vsize,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = :id AND status = 'OPEN'
+        """,
+        {
+            "id": rid,
+            "payer_user_id": payer_user_id,
+            "payer_username": payer_username,
+            "payer_wallet_id": payer_wallet_id,
+            "payer_inputs": json.dumps(payer_inputs),
+            "payer_in_sats": amounts["payer_in"],
+            "payment_sats": amounts["payment"],
+            "change_sats": amounts["change"],
+            "fee_sats": amounts["fee"],
+            "vsize": amounts["vsize"],
+        },
+    )
+    row = await get_payjoin_sp_request(rid)
+    if row and row.status == "CLAIMED" and row.payer_user_id == payer_user_id:
+        return row
+    return None

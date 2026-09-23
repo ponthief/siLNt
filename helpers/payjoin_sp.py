@@ -439,6 +439,16 @@ PAYER_SIGNED = "PAYER_SIGNED"
 BROADCAST = "BROADCAST"
 CANCELLED = "CANCELLED"
 
+# The advertised flow's two extra states, for a PayJoin the PAYEE starts.
+#
+# It needs them because of the same constraint everything else here bends
+# around: every SP output is derived from the WHOLE input set. When the payer
+# starts, the payee learns the complete set at the moment it contributes and
+# derives in that same call. When the payee starts, it posts before a payer
+# exists, so it can derive nothing and must come back once someone claims.
+OPEN = "OPEN"          # advertised, no payer yet
+CLAIMED = "CLAIMED"    # a contact added their inputs; the set is now frozen
+
 TERMINAL = (BROADCAST, CANCELLED)
 
 # Who acts next, per state. One table rather than an `if` in each handler:
@@ -447,15 +457,33 @@ TERMINAL = (BROADCAST, CANCELLED)
 # that is about to change, so it verifies against nothing and the PayJoin dies
 # with nobody able to say why.
 _TURN = {
+    # Payer-initiated.
     PROPOSED: "payee",       # contribute inputs and the derived payment script
+    # Payee-initiated. OPEN is the one state with no single party waited on —
+    # any contact may claim it — so it is handled separately below rather than
+    # answered with a role that would be a lie.
+    CLAIMED: "payee",        # derive the payment script, now the set is frozen
+    # Both, from here on. The two flows converge at CONTRIBUTED and share
+    # every endpoint after it.
     CONTRIBUTED: "payer",    # derive change, then sign
     PAYER_SIGNED: "payee",   # sign, which completes and broadcasts it
 }
 
 
 def whose_turn(status: str) -> Optional[str]:
-    """'payer', 'payee', or None when nobody is waited on."""
+    """'payer', 'payee', or None when no ONE party is waited on.
+
+    None covers two different situations and callers have to keep them apart:
+    a terminal PayJoin, where nobody acts again, and an OPEN offer, where
+    anybody among the payee's contacts may act. `is_open` tells them apart.
+    """
     return _TURN.get(status)
+
+
+def is_open(status: str) -> bool:
+    """An advertised offer nobody has claimed. Not anyone's 'turn': it is on
+    the board until a contact takes it or the payee withdraws it."""
+    return status == OPEN
 
 
 def require_turn(status: str, role: str) -> None:
@@ -464,6 +492,13 @@ def require_turn(status: str, role: str) -> None:
     point before broadcast, which is a different rule."""
     if role not in ("payer", "payee"):
         raise ValueError(f"{role!r} is not a party to a PayJoin.")
+    if is_open(status):
+        # Claiming is not taking a turn — see api_payjoin_sp_claim, which owns
+        # that transition and the race between two claimants.
+        raise ValueError(
+            "This PayJoin is still open for someone to take, not waiting on a "
+            "signature."
+        )
     turn = whose_turn(status)
     if turn == role:
         return

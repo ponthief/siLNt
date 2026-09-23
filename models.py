@@ -586,9 +586,11 @@ class PayjoinSpRequest(BaseModel):
     id: str
     status: str = "PROPOSED"
     network: str = "signet"
-    payer_user_id: str
-    payer_username: str
-    payer_wallet_id: str
+    # Optional because an advertised offer has no payer until a contact
+    # claims it. m032 dropped the NOT NULL to match.
+    payer_user_id: Optional[str] = None
+    payer_username: Optional[str] = None
+    payer_wallet_id: Optional[str] = None
     payee_user_id: Optional[str] = None
     payee_username: str
     payee_wallet_id: Optional[str] = None
@@ -669,6 +671,23 @@ class ContributePayjoinSpData(BaseModel):
     payee_wallet_id: str
     inputs: List[PayjoinSpInput]
     payment_spk: str
+
+
+class OfferPayjoinSpData(BaseModel):
+    """The payee advertising an amount. No payment_spk: it cannot be derived
+    until a claimant's inputs are in, which is what CLAIMED exists for."""
+    payee_wallet_id: str
+    amount_sats: int = Field(gt=0)
+    fee_rate: float = Field(gt=0)
+    inputs: List[PayjoinSpInput]
+    memo: Optional[str] = None
+    network: str = "signet"
+
+
+class ClaimPayjoinSpData(BaseModel):
+    """A contact taking an offer, contributing the paying side's coins."""
+    payer_wallet_id: str
+    inputs: List[PayjoinSpInput]
 
 
 class SignPayjoinSpData(BaseModel):

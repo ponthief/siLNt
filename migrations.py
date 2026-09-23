@@ -789,3 +789,147 @@ async def m031_payjoin_sp_requests(db):
         "CREATE INDEX idx_payjoin_sp_status "
         "ON silnt.payjoin_sp_requests (status, expires_at);"
     )
+
+
+async def m032_payjoin_sp_offers(db):
+    """An advertised PayJoin: the payee posts an amount, a contact claims it.
+
+    m031 assumed the payer starts, so payer_user_id, payer_username and
+    payer_wallet_id are NOT NULL. In an advertised PayJoin nobody is the payer
+    yet, so those three have to become nullable.
+
+    SQLite cannot drop a NOT NULL in place, so the table is rebuilt: create,
+    copy, drop, rename. Portable to Postgres, and safe here because the only
+    rows this can touch are in-flight PayJoins on an instance that has run m031
+    -- which nothing has yet used in anger. Copying rather than truncating
+    anyway: losing someone's half-signed PayJoin because a migration found it
+    inconvenient is not a trade to make quietly.
+
+    WHY THE ADVERTISED FLOW NEEDS A STATE m031 DOES NOT HAVE. Every SP output
+    is derived from the WHOLE input set, so nothing can be derived until both
+    parties' inputs are in. When the payer starts, the payee learns the full
+    set at the moment it contributes, and derives its payment script in the
+    same call. When the PAYEE starts, it posts before the payer exists -- so it
+    cannot derive anything yet and has to come back once someone claims. Hence:
+
+      OPEN         posted by the payee, with its own inputs. No payer.
+      CLAIMED      a contact took it and added theirs. The set is frozen, and
+                   now the payee can derive.
+      CONTRIBUTED  the payee posted its payment script. From here the flow is
+                   identical to the payer-initiated one.
+      PAYER_SIGNED the payer derived change and signed
+      BROADCAST    the payee signed and it went out
+
+    A directed PayJoin still starts at PROPOSED and never passes through OPEN
+    or CLAIMED. One table for both because they converge at CONTRIBUTED and
+    share every endpoint after it.
+    """
+    await db.execute(
+        f"""
+        CREATE TABLE silnt.payjoin_sp_requests_new (
+            id                  TEXT PRIMARY KEY,
+            status              TEXT NOT NULL DEFAULT 'PROPOSED',
+            network             TEXT NOT NULL,
+
+            -- Nullable now: an OPEN offer has no payer until it is claimed.
+            payer_user_id       TEXT,
+            payer_username      TEXT,
+            payer_wallet_id     TEXT,
+            payee_user_id       TEXT,
+            payee_username      TEXT NOT NULL,
+            payee_wallet_id     TEXT,
+
+            amount_sats         {db.big_int} NOT NULL,
+            fee_rate            REAL NOT NULL,
+            payer_in_sats       {db.big_int},
+            payee_in_sats       {db.big_int},
+            payment_sats        {db.big_int},
+            change_sats         {db.big_int},
+            fee_sats            {db.big_int},
+            vsize               {db.big_int},
+
+            payer_inputs        TEXT,
+            payee_inputs        TEXT,
+
+            payment_spk         TEXT,
+            change_spk          TEXT,
+
+            payer_witnesses     TEXT,
+            payee_witnesses     TEXT,
+
+            unsigned_tx         TEXT,
+            tx_hex              TEXT,
+            txid                TEXT,
+
+            -- What the payee wrote on the advertisement. Shown to contacts
+            -- deciding whether to take it; never sent to the network.
+            memo                TEXT,
+
+            reject_reason       TEXT,
+            created_at          TIMESTAMP NOT NULL DEFAULT {db.timestamp_now},
+            updated_at          TIMESTAMP NOT NULL DEFAULT {db.timestamp_now},
+            expires_at          {db.big_int}
+        );
+        """
+    )
+    # Columns named explicitly rather than SELECT *: the new table has memo,
+    # which the old one does not, and a positional copy would silently shift
+    # every column after it.
+    await db.execute(
+        """
+        INSERT INTO silnt.payjoin_sp_requests_new
+            (id, status, network,
+             payer_user_id, payer_username, payer_wallet_id,
+             payee_user_id, payee_username, payee_wallet_id,
+             amount_sats, fee_rate, payer_in_sats, payee_in_sats,
+             payment_sats, change_sats, fee_sats, vsize,
+             payer_inputs, payee_inputs, payment_spk, change_spk,
+             payer_witnesses, payee_witnesses,
+             unsigned_tx, tx_hex, txid,
+             reject_reason, created_at, updated_at, expires_at)
+        SELECT
+             id, status, network,
+             payer_user_id, payer_username, payer_wallet_id,
+             payee_user_id, payee_username, payee_wallet_id,
+             amount_sats, fee_rate, payer_in_sats, payee_in_sats,
+             payment_sats, change_sats, fee_sats, vsize,
+             payer_inputs, payee_inputs, payment_spk, change_spk,
+             payer_witnesses, payee_witnesses,
+             unsigned_tx, tx_hex, txid,
+             reject_reason, created_at, updated_at, expires_at
+        FROM silnt.payjoin_sp_requests
+        """
+    )
+    # The indexes go with the old table, so drop them by name first: SQLite
+    # keeps index names in a schema-wide namespace, so recreating them against
+    # the new table would collide.
+    # Written out rather than looped through an f-string. A loop would read
+    # better and would also be the only interpolation in this file that is not
+    # a db.* attribute — which is the rule tests/test_migrations_fstrings.py
+    # enforces, and the rule is worth more than three saved lines. A guard with
+    # an exception in it stops being a guard.
+    await db.execute("DROP INDEX IF EXISTS idx_payjoin_sp_payee")
+    await db.execute("DROP INDEX IF EXISTS idx_payjoin_sp_payer")
+    await db.execute("DROP INDEX IF EXISTS idx_payjoin_sp_status")
+    await db.execute("DROP TABLE silnt.payjoin_sp_requests")
+    await db.execute(
+        "ALTER TABLE silnt.payjoin_sp_requests_new "
+        "RENAME TO payjoin_sp_requests"
+    )
+    await db.execute(
+        "CREATE INDEX idx_payjoin_sp_payee "
+        "ON silnt.payjoin_sp_requests (payee_user_id, status);"
+    )
+    await db.execute(
+        "CREATE INDEX idx_payjoin_sp_payer "
+        "ON silnt.payjoin_sp_requests (payer_user_id, status);"
+    )
+    await db.execute(
+        "CREATE INDEX idx_payjoin_sp_status "
+        "ON silnt.payjoin_sp_requests (status, expires_at);"
+    )
+    # The offer board: every OPEN row, which is what a contact browses.
+    await db.execute(
+        "CREATE INDEX idx_payjoin_sp_open "
+        "ON silnt.payjoin_sp_requests (status, network, payee_user_id);"
+    )
