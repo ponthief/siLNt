@@ -25,6 +25,7 @@ from .models import (
 )
 
 from .models import PayjoinDescriptor, PayjoinRequest, PayjoinContact
+from .models import PayjoinSpRequest
 from embit.descriptor import Descriptor, Key
 from embit.descriptor.arguments import AllowedDerivation
 from embit.networks import NETWORKS
@@ -3101,3 +3102,163 @@ async def resolve_open_alerts_for(kind: str, key: str) -> int:
         )
         cleared += 1
     return cleared
+
+
+# ── Silent Payments PayJoin ──────────────────────────────────────────────────
+# Rows for the flow in helpers/payjoin_sp.py. Everything stored here is public
+# or about to be on chain: outpoints, x-only public keys, amounts, the two
+# derived scriptPubKeys, witnesses. No scan key, no spend key, no private
+# tweak — each party derives its own output and signs its own inputs on its own
+# device. See migrations.py::m031.
+
+# Non-terminal: a request in one of these still has a claim on its inputs.
+PAYJOIN_SP_LIVE = ("PROPOSED", "CONTRIBUTED", "PAYER_SIGNED", "BROADCAST")
+
+
+async def create_payjoin_sp_request(
+    *,
+    network: str,
+    payer_user_id: str,
+    payer_username: str,
+    payer_wallet_id: str,
+    payee_user_id: str,
+    payee_username: str,
+    amount_sats: int,
+    fee_rate: float,
+    payer_inputs: list,
+    expiry_seconds: int = 86400,
+) -> PayjoinSpRequest:
+    """The payer's proposal. Inputs are not frozen yet — the payee has still to
+    add its own, and only then can either side derive an output."""
+    rid = urlsafe_short_hash()
+    await db.execute(
+        """
+        INSERT INTO silnt.payjoin_sp_requests
+            (id, status, network,
+             payer_user_id, payer_username, payer_wallet_id,
+             payee_user_id, payee_username,
+             amount_sats, fee_rate, payer_in_sats, payer_inputs, expires_at)
+        VALUES
+            (:id, 'PROPOSED', :network,
+             :payer_user_id, :payer_username, :payer_wallet_id,
+             :payee_user_id, :payee_username,
+             :amount_sats, :fee_rate, :payer_in_sats, :payer_inputs, :expires_at)
+        """,
+        {
+            "id": rid,
+            "network": network,
+            "payer_user_id": payer_user_id,
+            "payer_username": payer_username,
+            "payer_wallet_id": payer_wallet_id,
+            "payee_user_id": payee_user_id,
+            "payee_username": payee_username,
+            "amount_sats": amount_sats,
+            "fee_rate": fee_rate,
+            "payer_in_sats": sum(int(i["amount"]) for i in payer_inputs),
+            "payer_inputs": json.dumps(payer_inputs),
+            "expires_at": int(time.time()) + expiry_seconds,
+        },
+    )
+    return await get_payjoin_sp_request(rid)
+
+
+async def get_payjoin_sp_request(rid: str) -> Optional[PayjoinSpRequest]:
+    row = await db.fetchone(
+        "SELECT * FROM silnt.payjoin_sp_requests WHERE id = :id", {"id": rid}
+    )
+    return PayjoinSpRequest(**row) if row else None
+
+
+async def update_payjoin_sp_request(rid: str, **fields) -> Optional[PayjoinSpRequest]:
+    """Generic field updater, always bumping updated_at. Mirrors
+    update_payjoin_request; pass only real columns."""
+    if not fields:
+        return await get_payjoin_sp_request(rid)
+    fields_sql = ", ".join(f"{k} = :{k}" for k in fields)
+    await db.execute(
+        f"UPDATE silnt.payjoin_sp_requests SET {fields_sql}, "
+        f"updated_at = {db.timestamp_now} WHERE id = :id",
+        {**fields, "id": rid},
+    )
+    return await get_payjoin_sp_request(rid)
+
+
+async def list_payjoin_sp_for_payee(user_id: str) -> list[PayjoinSpRequest]:
+    """My incoming queue: proposals waiting on me to contribute, and the ones
+    already under way."""
+    rows = await db.fetchall(
+        "SELECT * FROM silnt.payjoin_sp_requests WHERE payee_user_id = :uid "
+        "ORDER BY created_at DESC",
+        {"uid": user_id},
+    )
+    return [PayjoinSpRequest(**r) for r in rows]
+
+
+async def list_payjoin_sp_for_payer(user_id: str) -> list[PayjoinSpRequest]:
+    rows = await db.fetchall(
+        "SELECT * FROM silnt.payjoin_sp_requests WHERE payer_user_id = :uid "
+        "ORDER BY created_at DESC",
+        {"uid": user_id},
+    )
+    return [PayjoinSpRequest(**r) for r in rows]
+
+
+async def get_reserved_sp_outpoints(user_id: str) -> set:
+    """Outpoints this user has already committed to a live SP PayJoin.
+
+    A coin committed twice makes a transaction that cannot confirm — the second
+    PayJoin spends an input the first already spent — and the two parties would
+    only find out from the network. The coin picker subtracts these, and
+    /propose and /contribute refuse them, because the picker is advisory and
+    the endpoint is not.
+
+    BROADCAST counts as live for the same reason it does in the PSBT flow: the
+    spend is not confirmed yet, so the UTXO can still look available.
+    """
+    placeholders = ", ".join(f"'{s}'" for s in PAYJOIN_SP_LIVE)
+    rows = await db.fetchall(
+        f"""
+        SELECT payer_user_id, payee_user_id, payer_inputs, payee_inputs
+        FROM silnt.payjoin_sp_requests
+        WHERE (payer_user_id = :uid OR payee_user_id = :uid)
+          AND status IN ({placeholders})
+        """,
+        {"uid": user_id},
+    )
+    reserved = set()
+    for r in rows:
+        # Only the caller's OWN side is theirs to reserve. Taking both would
+        # reserve the counterparty's coins in this user's picker, which at best
+        # hides nothing (they are not this user's coins to see) and at worst
+        # collides with a real outpoint of theirs.
+        cols = []
+        if r["payer_user_id"] == user_id:
+            cols.append("payer_inputs")
+        if r["payee_user_id"] == user_id:
+            cols.append("payee_inputs")
+        for col in cols:
+            raw = r[col]
+            if not raw:
+                continue
+            try:
+                for i in json.loads(raw):
+                    reserved.add(f"{i['txid']}:{i['vout']}")
+            except (ValueError, KeyError, TypeError):
+                continue
+    return reserved
+
+
+async def list_expired_payjoin_sp_requests(
+    now_ts: Optional[int] = None,
+) -> list[PayjoinSpRequest]:
+    """Non-terminal requests past their expiry, for the sweep. Only the states
+    before anything is on the network: once BROADCAST, expiry is meaningless —
+    the transaction is either going to confirm or it is not."""
+    now_ts = now_ts if now_ts is not None else int(time.time())
+    rows = await db.fetchall(
+        "SELECT * FROM silnt.payjoin_sp_requests "
+        "WHERE status IN ('PROPOSED','CONTRIBUTED','PAYER_SIGNED') "
+        "AND expires_at IS NOT NULL AND expires_at < :now",
+        {"now": now_ts},
+    )
+    return [PayjoinSpRequest(**r) for r in rows]

@@ -278,3 +278,79 @@ def test_the_coordinator_half_needs_no_secret():
             "seed",
             "mnemonic",
         }, f"{fn.__name__} takes a secret"
+
+
+# ── whose turn it is ─────────────────────────────────────────────────────────
+#
+# Extracted from the endpoints so it can be tested at all. Spread across four
+# handlers these conditions drift, and the failure mode is a party signing out
+# of turn: the signature covers a transaction that is about to change, so it
+# verifies against nothing and the PayJoin dies with nobody able to say why.
+
+
+def test_the_payee_moves_first_then_the_payer_then_the_payee():
+    assert pjsp.whose_turn(pjsp.PROPOSED) == "payee"
+    assert pjsp.whose_turn(pjsp.CONTRIBUTED) == "payer"
+    assert pjsp.whose_turn(pjsp.PAYER_SIGNED) == "payee"
+
+
+def test_nobody_is_waited_on_once_it_is_terminal():
+    assert pjsp.whose_turn(pjsp.BROADCAST) is None
+    assert pjsp.whose_turn(pjsp.CANCELLED) is None
+
+
+@pytest.mark.parametrize(
+    "status,role",
+    [
+        (pjsp.PROPOSED, "payee"),
+        (pjsp.CONTRIBUTED, "payer"),
+        (pjsp.PAYER_SIGNED, "payee"),
+    ],
+)
+def test_require_turn_allows_the_party_whose_turn_it_is(status, role):
+    pjsp.require_turn(status, role)
+
+
+@pytest.mark.parametrize(
+    "status,role",
+    [
+        (pjsp.PROPOSED, "payer"),
+        (pjsp.CONTRIBUTED, "payee"),
+        (pjsp.PAYER_SIGNED, "payer"),
+    ],
+)
+def test_require_turn_refuses_the_other_party(status, role):
+    with pytest.raises(ValueError, match="waiting on the"):
+        pjsp.require_turn(status, role)
+
+
+def test_the_payer_cannot_sign_before_the_payee_has_contributed():
+    """The one that matters most: signing at PROPOSED means signing before the
+    input set is frozen, so every output is still to be derived and the
+    signature could not commit to them."""
+    with pytest.raises(ValueError, match="waiting on the payee"):
+        pjsp.require_turn(pjsp.PROPOSED, "payer")
+
+
+@pytest.mark.parametrize("status", [pjsp.BROADCAST, pjsp.CANCELLED])
+@pytest.mark.parametrize("role", ["payer", "payee"])
+def test_neither_party_may_act_on_a_finished_payjoin(status, role):
+    with pytest.raises(ValueError, match="already"):
+        pjsp.require_turn(status, role)
+
+
+def test_an_unknown_status_stops_everything_rather_than_defaulting():
+    with pytest.raises(ValueError, match="cannot go on"):
+        pjsp.require_turn("SOMETHING_NEW", "payer")
+
+
+def test_a_role_that_is_not_a_party_is_refused():
+    with pytest.raises(ValueError, match="not a party"):
+        pjsp.require_turn(pjsp.PROPOSED, "coordinator")
+
+
+def test_cancelling_is_open_until_broadcast():
+    for s in (pjsp.PROPOSED, pjsp.CONTRIBUTED, pjsp.PAYER_SIGNED):
+        assert pjsp.can_cancel(s)
+    assert not pjsp.can_cancel(pjsp.BROADCAST)
+    assert not pjsp.can_cancel(pjsp.CANCELLED)

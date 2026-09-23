@@ -424,3 +424,58 @@ def finalize(tx: Transaction, witnesses: dict) -> str:
             raise ValueError(f"Input {n} has no signature.")
         tx.vin[n].witness = Witness([sig])
     return tx.serialize().hex()
+
+
+# ── whose turn it is ─────────────────────────────────────────────────────────
+
+# The states, in the order a PayJoin passes through them. CONTRIBUTED exists
+# here and not in the PSBT flow because a key-path signature commits to every
+# output and every SP output depends on the whole input set: inputs must freeze
+# before anything is derived, and every output must exist before anyone signs.
+PROPOSED = "PROPOSED"
+CONTRIBUTED = "CONTRIBUTED"
+PAYER_SIGNED = "PAYER_SIGNED"
+BROADCAST = "BROADCAST"
+CANCELLED = "CANCELLED"
+
+TERMINAL = (BROADCAST, CANCELLED)
+
+# Who acts next, per state. One table rather than an `if` in each handler:
+# spread across four endpoints these conditions drift, and the failure is a
+# party signing out of turn — which produces a signature over a transaction
+# that is about to change, so it verifies against nothing and the PayJoin dies
+# with nobody able to say why.
+_TURN = {
+    PROPOSED: "payee",       # contribute inputs and the derived payment script
+    CONTRIBUTED: "payer",    # derive change, then sign
+    PAYER_SIGNED: "payee",   # sign, which completes and broadcasts it
+}
+
+
+def whose_turn(status: str) -> Optional[str]:
+    """'payer', 'payee', or None when nobody is waited on."""
+    return _TURN.get(status)
+
+
+def require_turn(status: str, role: str) -> None:
+    """Raise unless it is this party's turn to act, with something a person can
+    read. Cancelling is not covered here — either party may walk away at any
+    point before broadcast, which is a different rule."""
+    if role not in ("payer", "payee"):
+        raise ValueError(f"{role!r} is not a party to a PayJoin.")
+    turn = whose_turn(status)
+    if turn == role:
+        return
+    if status in TERMINAL:
+        raise ValueError(f"This PayJoin is already {status.lower()}.")
+    if turn is None:
+        raise ValueError(f"This PayJoin is {status.lower()} and cannot go on.")
+    raise ValueError(
+        f"This PayJoin is waiting on the {turn}, not on you."
+    )
+
+
+def can_cancel(status: str) -> bool:
+    """Either party, right up until it is broadcast. After that there is
+    nothing to cancel — the transaction belongs to the network."""
+    return status not in TERMINAL

@@ -168,6 +168,12 @@ from .crud import (
     list_payjoin_requests_for_receiver, 
     list_payjoin_requests_for_sender,
     get_reserved_outpoints,
+    create_payjoin_sp_request,
+    get_payjoin_sp_request,
+    update_payjoin_sp_request,
+    list_payjoin_sp_for_payee,
+    list_payjoin_sp_for_payer,
+    get_reserved_sp_outpoints,
     create_payjoin_invoice, list_payjoin_invoices_for_payer,
     get_account_id_by_email,
     create_payjoin_contact,
@@ -245,6 +251,9 @@ from .models import (
     InviteRequest,
     ImportDescriptorData,
     CreateInvoiceData,
+    ProposePayjoinSpData,
+    ContributePayjoinSpData,
+    SignPayjoinSpData,
     PayInvoiceData,
     SignPayjoinData,
     CreateContactData,
@@ -4185,3 +4194,571 @@ async def run_health_probes() -> None:
     """Run both service probes once (for the background monitor loop)."""
     await probe_blindbit_health()
     await probe_fulcrum_health()
+
+# ── Silent Payments PayJoin ──────────────────────────────────────────────────
+#
+# A PayJoin where both parties' inputs are Silent Payments coins, coordinated
+# here and SIGNED ON THE PARTIES' OWN DEVICES.
+#
+# What that means precisely, because the imprecise version would be a lie. No
+# request below carries a key, and nothing below uses one:
+#
+#   b_spend  the spend key. Never on this server, for any feature. Without it
+#            nothing here can produce a signature, which is the guarantee that
+#            matters — the witnesses arrive already made.
+#   b_scan   the scan key. Held only for wallets that opted into background
+#            scanning, and not read here: each party derives its own output at
+#            home, so this flow works for a wallet that never uploaded one.
+#   tweak    silnt.utxos.priv_key_tweak IS stored, and has been since the
+#            wallet's first migration — it is the per-output half of a key
+#            whose other half is b_spend, and it cannot sign alone. This flow
+#            neither needs nor reads it: _pj_payjoin_inputs deliberately
+#            leaves PayjoinInput.priv_key_tweak unset, so the coordinator's
+#            copy of an input could not sign for it even by accident.
+#
+# helpers/payjoin_sp.py has the three functions that would need a key —
+# payment_script, change_script, signing_key — and no endpoint here calls any
+# of them.
+#
+# WHY THE FLOW HAS FOUR CALLS. BIP-352 derives every output from the whole
+# input set, and a taproot key-path signature commits to every output. So
+# inputs must be frozen before anything is derived, and every output must exist
+# before anyone signs. That rules out the PSBT flow's "contribute and sign in
+# one go" and forces:
+#
+#   /propose     payer names the payee, the amount and its own inputs
+#   /contribute  payee adds its inputs and, in the same call, the payment
+#                script it just derived — the first moment it can, since the
+#                input set is only now complete. Frozen from here.
+#   /sign        payer posts its derived change script and its own witnesses;
+#                the unsigned transaction now exists
+#   /sign        payee posts its own witnesses; the two sets are combined and
+#                the transaction is broadcast
+#
+# WHAT EACH SIDE CAN CHECK, WHICH IS NOT THE SAME THING. The payee verifies the
+# payment output by its script, because it derived that script. The payer
+# cannot — only the payee holds the scan key it comes from — so the payer
+# verifies that output by its VALUE, and verifies its own change output by
+# script. Between them that covers every satoshi: the client-side guard in
+# services/spPayjoin.ts is where those checks live, and they run before either
+# party signs.
+
+PAYJOIN_SP_EXPIRY_SECONDS = 86400
+
+
+def _pj_inputs(raw: Optional[str]) -> list:
+    """The stored JSON input list, or an empty one."""
+    if not raw:
+        return []
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return []
+
+
+def _pj_payjoin_inputs(rows: list):
+    """Wire rows -> helpers.payjoin_sp.PayjoinInput, public fields only.
+
+    No priv_key_tweak is set, and that is the point: the coordinator's copy of
+    an input cannot sign for it even by accident.
+    """
+    from .helpers.payjoin_sp import PayjoinInput
+
+    return [
+        PayjoinInput(
+            txid=str(i["txid"]).lower(),
+            vout=int(i["vout"]),
+            pub_key=bytes.fromhex(str(i["pub_key"])),
+            amount=int(i["amount"]),
+        )
+        for i in rows
+    ]
+
+
+async def _notify_payjoin_sp(user_id: str, title: str, body: str) -> None:
+    """Tell the other party it is their turn. Best-effort: a push that fails
+    must not fail the state change, which is already committed.
+
+    No amount in either string, the same rule as every other push here — an
+    FCM notification and its data both travel through Google in plaintext.
+    """
+    try:
+        from .crud import list_fcm_tokens_for_user
+        from .helpers.fcm import send_fcm
+
+        tokens = await list_fcm_tokens_for_user(user_id)
+        if tokens:
+            await send_fcm(tokens, title, body, {"type": "payjoin_sp"})
+    except Exception as e:
+        logger.warning(f"payjoin-sp push failed for {user_id}: {e}")
+
+
+async def _pj_own_wallet(wallet_id: str, user_id: str):
+    wallet = await get_silnt_wallet(wallet_id)
+    if not wallet:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
+        )
+    if wallet.user != user_id:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
+    return wallet
+
+
+async def _pj_refuse_reserved(user_id: str, rows: list) -> None:
+    """A coin committed to two PayJoins makes a transaction that cannot
+    confirm, and both parties would hear about it from the network rather than
+    from us."""
+    reserved = await get_reserved_sp_outpoints(user_id)
+    clash = [
+        f"{i['txid']}:{i['vout']}"
+        for i in rows
+        if f"{str(i['txid']).lower()}:{int(i['vout'])}" in reserved
+    ]
+    if clash:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=(
+                f"{'That coin is' if len(clash) == 1 else 'Those coins are'} "
+                f"already committed to another pending PayJoin."
+            ),
+        )
+
+
+async def _pj_validate_inputs(wallet_id: str, rows: list) -> None:
+    """Every contributed input must be a spendable taproot UTXO of that wallet,
+    with the x-only key the wallet's own records give it.
+
+    Taking the key on trust from the request would let a caller name a real
+    outpoint with someone else's key: the derived output would then be one
+    nobody can find, and the money would be gone with nothing to appeal to.
+    """
+    stored = await validate_spendable_utxos(
+        wallet_id,
+        [{"txid": str(i["txid"]), "vout": int(i["vout"])} for i in rows],
+        bool(get_scan_progress(wallet_id).get("active")),
+    )
+    by_outpoint = {
+        (str(u["txid"]).lower(), int(u["vout"])): u
+        for u in (dict(r) for r in stored)
+    }
+    for i in rows:
+        key = (str(i["txid"]).lower(), int(i["vout"]))
+        u = by_outpoint.get(key)
+        if not u:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail=f"{i['txid']}:{i['vout']} is not a spendable coin of this wallet.",
+            )
+        if int(u.get("amount") or 0) != int(i["amount"]):
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail=(
+                    f"{i['txid']}:{i['vout']} is {u.get('amount')} sats, not "
+                    f"{i['amount']}."
+                ),
+            )
+        want = str(u.get("pub_key") or "").lower()
+        if want and want != str(i["pub_key"]).lower():
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail=(
+                    f"The key given for {i['txid']}:{i['vout']} is not the one "
+                    f"this coin was found with."
+                ),
+            )
+
+
+@silnt_api_router.post("/api/v1/payjoin/sp/requests")
+async def api_payjoin_sp_propose(
+    data: ProposePayjoinSpData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """The payer proposes. Inputs are NOT frozen yet — the payee has still to
+    add its own, and no output can be derived until it has."""
+    from .helpers.payjoin_sp import plan
+
+    payer_uid = key_info.wallet.user
+    wallet = await _pj_own_wallet(data.payer_wallet_id, payer_uid)
+
+    payee = await get_account_by_username(data.payee_username)
+    if not payee:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND, detail="That username does not exist."
+        )
+    if payee.id == payer_uid:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="A PayJoin with yourself gains you nothing — both input sets "
+                   "would be yours, so there is no ambiguity to create.",
+        )
+
+    # Consent, as in the PSBT flow: a PayJoin reveals one of your coins to the
+    # other party, so it is not something a stranger gets to start with you.
+    connected = set(await list_accepted_contact_user_ids(payer_uid))
+    if payee.id not in connected:
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN,
+            detail="You can only PayJoin a connected user. Send a connection "
+                   "request first.",
+        )
+
+    rows = [i.dict() for i in data.inputs]
+    await _pj_validate_inputs(data.payer_wallet_id, rows)
+    await _pj_refuse_reserved(payer_uid, rows)
+
+    # Quote the plan now, so the payer is told what it will cost before the
+    # payee is disturbed. It is provisional: the fee depends on how many inputs
+    # the payee adds, and /contribute recomputes it.
+    payer_inputs = _pj_payjoin_inputs(rows)
+    try:
+        plan(payer_inputs, payer_inputs[:1], data.amount_sats, data.fee_rate)
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+
+    payer_acct = await get_account(payer_uid)
+    req = await create_payjoin_sp_request(
+        network=wallet.network,
+        payer_user_id=payer_uid,
+        payer_username=(payer_acct.username if payer_acct else None) or payer_uid,
+        payer_wallet_id=data.payer_wallet_id,
+        payee_user_id=payee.id,
+        payee_username=data.payee_username,
+        amount_sats=data.amount_sats,
+        fee_rate=data.fee_rate,
+        payer_inputs=rows,
+        expiry_seconds=PAYJOIN_SP_EXPIRY_SECONDS,
+    )
+    await _notify_payjoin_sp(
+        payee.id,
+        "PayJoin request",
+        "Someone wants to PayJoin with you. Open WhiSPa to look.",
+    )
+    return req.dict()
+
+
+@silnt_api_router.get("/api/v1/payjoin/sp/requests")
+async def api_payjoin_sp_list(
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """Both queues: what is waiting on me, and what I started."""
+    uid = key_info.wallet.user
+    incoming = await list_payjoin_sp_for_payee(uid)
+    outgoing = await list_payjoin_sp_for_payer(uid)
+    return {
+        "incoming": [r.dict() for r in incoming],
+        "outgoing": [r.dict() for r in outgoing],
+    }
+
+
+@silnt_api_router.get("/api/v1/payjoin/sp/requests/{rid}")
+async def api_payjoin_sp_get(
+    rid: str,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """One request, plus which input positions are the caller's to sign.
+
+    `my_inputs` is computed here rather than left to the client because the
+    frozen order is this side's decision (BIP-69 over the outpoints) and a
+    client that guessed differently would sign the wrong digests.
+    """
+    from .helpers.payjoin_sp import owner_indices
+
+    uid = key_info.wallet.user
+    req = await get_payjoin_sp_request(rid)
+    if not req or uid not in (req.payer_user_id, req.payee_user_id):
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Not found.")
+
+    out = req.dict()
+    out["role"] = "payer" if uid == req.payer_user_id else "payee"
+    payer_rows = _pj_inputs(req.payer_inputs)
+    payee_rows = _pj_inputs(req.payee_inputs)
+    if payer_rows and payee_rows:
+        all_inputs = _pj_payjoin_inputs(payer_rows + payee_rows)
+        mine = payer_rows if out["role"] == "payer" else payee_rows
+        out["my_inputs"] = sorted(
+            owner_indices(all_inputs, _pj_payjoin_inputs(mine))
+        )
+    else:
+        out["my_inputs"] = []
+    return out
+
+
+@silnt_api_router.post("/api/v1/payjoin/sp/requests/{rid}/contribute")
+async def api_payjoin_sp_contribute(
+    rid: str,
+    data: ContributePayjoinSpData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """The payee accepts: its inputs, and the payment script it derived from
+    the now-complete input set.
+
+    The script arrives already derived because only the payee can compute it —
+    it comes from the payee's scan key, which never leaves the payee's device.
+    This endpoint stores it and never checks it, and cannot: the payer is
+    protected by the output's VALUE instead, which /sign pins.
+    """
+    from .helpers.payjoin_sp import plan, require_turn
+
+    uid = key_info.wallet.user
+    req = await get_payjoin_sp_request(rid)
+    if not req or req.payee_user_id != uid:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Not found.")
+    try:
+        require_turn(req.status, "payee")
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.CONFLICT, detail=str(e))
+    if req.expires_at and req.expires_at < int(time.time()):
+        raise HTTPException(
+            status_code=HTTPStatus.GONE, detail="This PayJoin request has expired."
+        )
+
+    wallet = await _pj_own_wallet(data.payee_wallet_id, uid)
+    if wallet.network != req.network:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"This PayJoin is on {req.network}; that wallet is not.",
+        )
+
+    rows = [i.dict() for i in data.inputs]
+    await _pj_validate_inputs(data.payee_wallet_id, rows)
+    await _pj_refuse_reserved(uid, rows)
+
+    payer_rows = _pj_inputs(req.payer_inputs)
+    overlap = {(str(i["txid"]).lower(), int(i["vout"])) for i in rows} & {
+        (str(i["txid"]).lower(), int(i["vout"])) for i in payer_rows
+    }
+    if overlap:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="An input cannot be contributed by both parties.",
+        )
+
+    try:
+        amounts = plan(
+            _pj_payjoin_inputs(payer_rows),
+            _pj_payjoin_inputs(rows),
+            req.amount_sats,
+            req.fee_rate,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+
+    updated = await update_payjoin_sp_request(
+        rid,
+        status="CONTRIBUTED",
+        payee_wallet_id=data.payee_wallet_id,
+        payee_inputs=json.dumps(rows),
+        payee_in_sats=amounts["payee_in"],
+        payment_sats=amounts["payment"],
+        change_sats=amounts["change"],
+        fee_sats=amounts["fee"],
+        vsize=amounts["vsize"],
+        payment_spk=data.payment_spk.lower(),
+    )
+    await _notify_payjoin_sp(
+        req.payer_user_id,
+        "PayJoin accepted",
+        "Your PayJoin was accepted and is waiting for you to sign it.",
+    )
+    return updated.dict()
+
+
+@silnt_api_router.post("/api/v1/payjoin/sp/requests/{rid}/sign")
+async def api_payjoin_sp_sign(
+    rid: str,
+    data: SignPayjoinSpData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """Witnesses for the caller's own inputs. The payer goes first, because its
+    change script is the last piece the transaction needs; the payee's call
+    completes it and broadcasts.
+
+    A witness is a signature, which is public. Every one is verified against
+    the x-only key already in the frozen input set, so a caller cannot sign an
+    input that is not theirs, and a signature made over a different
+    transaction — the coordinator having changed something after they signed —
+    is refused here rather than by the network.
+    """
+    from .helpers.payjoin_sp import (
+        assemble,
+        finalize,
+        owner_indices,
+        require_turn,
+        verify_witnesses,
+    )
+
+    uid = key_info.wallet.user
+    req = await get_payjoin_sp_request(rid)
+    if not req or uid not in (req.payer_user_id, req.payee_user_id):
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Not found.")
+    role = "payer" if uid == req.payer_user_id else "payee"
+
+    try:
+        require_turn(req.status, role)
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.CONFLICT, detail=str(e))
+
+    payer_rows = _pj_inputs(req.payer_inputs)
+    payee_rows = _pj_inputs(req.payee_inputs)
+    all_inputs = _pj_payjoin_inputs(payer_rows + payee_rows)
+    amounts = {
+        "payment": req.payment_sats,
+        "change": req.change_sats,
+        "amount": req.amount_sats,
+        "fee": req.fee_sats,
+    }
+
+    if role == "payer":
+        if not data.change_spk and req.change_sats:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail="This PayJoin has change, so it needs your change script.",
+            )
+        change_spk = data.change_spk.lower() if data.change_spk else None
+    else:
+        change_spk = req.change_spk
+
+    # Rebuilt from the row every time rather than stored and reloaded: the
+    # transaction both parties sign must be a function of the frozen set and
+    # the two scripts, and rebuilding is what makes that true by construction.
+    try:
+        tx = assemble(
+            all_inputs,
+            amounts,
+            bytes.fromhex(req.payment_spk),
+            bytes.fromhex(change_spk) if change_spk else None,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+
+    mine = payer_rows if role == "payer" else payee_rows
+    allowed = owner_indices(all_inputs, _pj_payjoin_inputs(mine))
+    try:
+        checked = verify_witnesses(tx, all_inputs, data.witnesses, allowed)
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+
+    witness_hex = {str(n): sig.hex() for n, sig in checked.items()}
+
+    if role == "payer":
+        updated = await update_payjoin_sp_request(
+            rid,
+            status="PAYER_SIGNED",
+            change_spk=change_spk,
+            payer_witnesses=json.dumps(witness_hex),
+            unsigned_tx=tx.serialize().hex(),
+        )
+        await _notify_payjoin_sp(
+            req.payee_user_id,
+            "PayJoin ready to sign",
+            "The other side has signed. Open WhiSPa to finish it.",
+        )
+        return updated.dict()
+
+    # The payee's call completes it.
+    payer_witnesses = {
+        int(k): bytes.fromhex(v)
+        for k, v in json.loads(req.payer_witnesses or "{}").items()
+    }
+    try:
+        tx_hex = finalize(tx, {**payer_witnesses, **checked})
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+
+    txid = await _pj_broadcast(req.network, tx_hex)
+
+    await update_payjoin_sp_request(
+        rid,
+        status="BROADCAST",
+        payee_witnesses=json.dumps(witness_hex),
+        tx_hex=tx_hex,
+        txid=txid,
+    )
+
+    # Both wallets spent coins here, so both Activity views should show it
+    # without waiting for a rescan. Best-effort, exactly as in /tx/broadcast:
+    # the transaction is already on the network and a bookkeeping failure must
+    # not read as a failed payment.
+    for wallet_id, rows in (
+        (req.payer_wallet_id, payer_rows),
+        (req.payee_wallet_id, payee_rows),
+    ):
+        if not wallet_id:
+            continue
+        try:
+            await mark_utxos_spent_by_tx(
+                wallet_id=wallet_id,
+                input_outpoints=[(str(i["txid"]), int(i["vout"])) for i in rows],
+                spending_txid=txid,
+            )
+        except Exception as e:
+            logger.warning(f"payjoin-sp {rid}: could not mark inputs spent: {e}")
+
+    await _notify_payjoin_sp(
+        req.payer_user_id,
+        "PayJoin broadcast",
+        "Your PayJoin has been broadcast. Open WhiSPa to view it.",
+    )
+    return (await get_payjoin_sp_request(rid)).dict()
+
+
+@silnt_api_router.post("/api/v1/payjoin/sp/requests/{rid}/cancel")
+async def api_payjoin_sp_cancel(
+    rid: str,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """Either party may walk away, right up until it is broadcast. After that
+    there is nothing to cancel — the transaction is the network's."""
+    from .helpers.payjoin_sp import can_cancel
+
+    uid = key_info.wallet.user
+    req = await get_payjoin_sp_request(rid)
+    if not req or uid not in (req.payer_user_id, req.payee_user_id):
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Not found.")
+    if not can_cancel(req.status):
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=f"This PayJoin is already {req.status.lower()}.",
+        )
+    role = "payer" if uid == req.payer_user_id else "payee"
+    updated = await update_payjoin_sp_request(
+        rid, status="CANCELLED", reject_reason=f"cancelled by the {role}"
+    )
+    other = req.payee_user_id if role == "payer" else req.payer_user_id
+    if other:
+        await _notify_payjoin_sp(
+            other, "PayJoin cancelled", "The other side cancelled a PayJoin."
+        )
+    return updated.dict()
+
+
+async def _pj_broadcast(network: str, tx_hex: str) -> str:
+    """Send a finished PayJoin to the network.
+
+    Deliberately separate from the body of /tx/broadcast rather than a shared
+    helper: that endpoint also marks outpoints and records contacts for a
+    single-wallet send, and refactoring the path every ordinary send goes
+    through, for the benefit of a new feature, is a risk with nothing to gain.
+    The two agree on what matters — the mempool URL comes from the same
+    per-network backend config.
+    """
+    cfg = await get_backend_config(network)
+    base = (cfg.mempool_url or "https://mempool.space").rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{base}/api/tx",
+                content=tx_hex,
+                headers={"Content-Type": "text/plain"},
+            )
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_GATEWAY,
+            detail=f"Could not reach {base} to broadcast: {e}",
+        )
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_GATEWAY,
+            detail=f"Broadcast failed: {resp.text}",
+        )
+    return resp.text.strip()
