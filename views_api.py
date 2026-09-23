@@ -4603,6 +4603,7 @@ async def api_payjoin_sp_sign(
     """
     from .helpers.payjoin_sp import (
         assemble,
+        explain_mismatch,
         finalize,
         owner_indices,
         require_turn,
@@ -4660,6 +4661,22 @@ async def api_payjoin_sp_sign(
         )
     except ValueError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+
+    # Compare the transactions BEFORE the signatures. Both sides build this
+    # independently from the same row, and a key-path signature commits to
+    # every byte — so when they differ, signature verification can only say it
+    # failed. That is true and tells nobody what to fix. This names it.
+    difference = explain_mismatch(tx, data.unsigned_tx or "")
+    if difference:
+        logger.warning(
+            f"payjoin-sp {rid}: {role} signed a different transaction. "
+            f"server={tx.serialize().hex()} client={data.unsigned_tx}"
+        )
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"This device and the server disagree about the "
+                   f"transaction. {difference}",
+        )
 
     mine = payer_rows if role == "payer" else payee_rows
     allowed = owner_indices(all_inputs, _pj_payjoin_inputs(mine))

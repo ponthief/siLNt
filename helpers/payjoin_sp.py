@@ -593,3 +593,75 @@ def validate_spk(spk: str, where: str = "script") -> None:
             f"{where}: must be a P2TR scriptPubKey — 5120 followed by 64 hex "
             f"characters."
         )
+
+
+def explain_mismatch(ours: Transaction, theirs_hex: str) -> Optional[str]:
+    """Why two assemblies of one PayJoin differ, in words.
+
+    Both parties and the coordinator build the transaction independently from
+    the same row. They must agree byte for byte, because a key-path signature
+    commits to every prevout, amount, scriptPubKey and output. When they do
+    not, the only thing signature verification can report is that it failed —
+    which is true, and tells nobody what to fix.
+
+    Returns None when they agree, or a sentence naming the first real
+    difference. Everything compared here is public.
+    """
+    if not theirs_hex:
+        return None
+    mine_hex = ours.serialize().hex()
+    if mine_hex == theirs_hex:
+        return None
+    try:
+        theirs = Transaction.from_string(theirs_hex)
+    except Exception:
+        return "The transaction you signed is not a transaction we can parse."
+
+    if len(theirs.vin) != len(ours.vin):
+        return (
+            f"You signed a transaction with {len(theirs.vin)} inputs; this "
+            f"PayJoin has {len(ours.vin)}."
+        )
+    mine_in = [(v.txid[::-1].hex(), v.vout) for v in ours.vin]
+    their_in = [(v.txid[::-1].hex(), v.vout) for v in theirs.vin]
+    if mine_in != their_in:
+        if sorted(mine_in) == sorted(their_in):
+            return (
+                "You signed the same inputs in a different order. Both sides "
+                "must use BIP-69 order over the outpoints."
+            )
+        return (
+            f"You signed different inputs: {their_in} against {mine_in}."
+        )
+
+    if len(theirs.vout) != len(ours.vout):
+        return (
+            f"You signed {len(theirs.vout)} outputs; this PayJoin has "
+            f"{len(ours.vout)}. A change output absorbed into the fee is the "
+            f"usual cause."
+        )
+    for n, (a, b) in enumerate(zip(ours.vout, theirs.vout)):
+        if a.value != b.value:
+            return (
+                f"Output {n}: you signed {b.value} sats where this PayJoin "
+                f"pays {a.value}."
+            )
+        if bytes(a.script_pubkey.data) != bytes(b.script_pubkey.data):
+            return (
+                f"Output {n}: you signed a different destination than this "
+                f"PayJoin has."
+            )
+
+    if theirs.version != ours.version:
+        return f"You signed version {theirs.version}; this is version {ours.version}."
+    if theirs.locktime != ours.locktime:
+        return f"You signed locktime {theirs.locktime}; this is {ours.locktime}."
+    seq_mine = [v.sequence for v in ours.vin]
+    seq_theirs = [v.sequence for v in theirs.vin]
+    if seq_mine != seq_theirs:
+        return f"You signed sequences {seq_theirs}; this PayJoin uses {seq_mine}."
+
+    return (
+        "The transaction you signed differs from this one in a way this check "
+        "does not name. Yours: " + theirs_hex[:120] + "…"
+    )

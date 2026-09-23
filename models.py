@@ -700,3 +700,13 @@ class SignPayjoinSpData(BaseModel):
     """
     witnesses: dict
     change_spk: Optional[str] = None
+    # The transaction the CLIENT assembled and signed over, hex.
+    #
+    # Both sides build this independently from the same row, and a signature
+    # commits to every byte of it — so if they differ at all, the signature
+    # cannot verify and the only thing the server can say is "the signature
+    # does not match", which is true and useless. Sending it lets the server
+    # compare first and name the difference instead.
+    #
+    # Optional so an older client still works; it just gets the vaguer error.
+    unsigned_tx: Optional[str] = None

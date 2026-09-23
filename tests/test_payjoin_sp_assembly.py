@@ -513,3 +513,71 @@ def test_every_live_state_either_names_a_turn_or_is_open():
             pjsp.PAYER_SIGNED)
     for s in live:
         assert pjsp.whose_turn(s) is not None or pjsp.is_open(s), s
+
+
+# ── when two assemblies differ, say how ──────────────────────────────────────
+#
+# Both parties and the coordinator build the transaction independently from one
+# row, and a key-path signature commits to every byte of it. When they differ,
+# signature verification can only report that it failed — true, and no help at
+# all to whoever has to fix it. explain_mismatch turns that into a sentence.
+
+
+def _hex(tx):
+    return tx.serialize().hex()
+
+
+def test_identical_transactions_are_not_a_mismatch():
+    assert pjsp.explain_mismatch(unsigned(), _hex(unsigned())) is None
+
+
+def test_no_client_transaction_is_not_a_mismatch():
+    """An older client sends nothing and still works — it just gets the vaguer
+    error from signature verification."""
+    assert pjsp.explain_mismatch(unsigned(), "") is None
+
+
+def test_unparseable_is_reported_as_such():
+    assert "not a transaction" in pjsp.explain_mismatch(unsigned(), "not hex")
+
+
+def test_a_different_output_value_is_named():
+    a = amounts()
+    other = pjsp.assemble(ALL_INPUTS, {**a, "payment": a["payment"] + 1},
+                          PAYMENT_SPK, CHANGE_SPK)
+    msg = pjsp.explain_mismatch(unsigned(), _hex(other))
+    assert "sats where this PayJoin pays" in msg, msg
+
+
+def test_a_different_destination_is_named():
+    other = pjsp.assemble(ALL_INPUTS, amounts(),
+                          bytes([0x51, 0x20]) + bytes([0x99]) * 32, CHANGE_SPK)
+    msg = pjsp.explain_mismatch(unsigned(), _hex(other))
+    assert "different destination" in msg, msg
+
+
+def test_a_different_output_count_is_named():
+    one = pjsp.assemble(ALL_INPUTS,
+                        pjsp.plan(PAYER_INPUTS, PAYEE_INPUTS, 199_400, 2.0),
+                        PAYMENT_SPK, None)
+    msg = pjsp.explain_mismatch(unsigned(), _hex(one))
+    assert "outputs" in msg and "absorbed into the fee" in msg, msg
+
+
+def test_a_different_input_set_is_named():
+    extra = [*ALL_INPUTS, utxo(0x44, 9, 10_000, PAYER_SECRET)]
+    other = pjsp.assemble(extra, amounts(), PAYMENT_SPK, CHANGE_SPK)
+    msg = pjsp.explain_mismatch(unsigned(), _hex(other))
+    assert "inputs" in msg, msg
+
+
+def test_the_same_inputs_in_a_different_order_says_so():
+    """The failure mode worth naming precisely: both sides agree on which
+    coins, and disagree on BIP-69. Every signature is then over the wrong
+    position, and 'signature does not match' is the least useful way to learn
+    it."""
+    tx = unsigned()
+    reordered = pjsp.assemble(ALL_INPUTS, amounts(), PAYMENT_SPK, CHANGE_SPK)
+    reordered.vin = list(reversed(reordered.vin))
+    msg = pjsp.explain_mismatch(tx, _hex(reordered))
+    assert "different order" in msg and "BIP-69" in msg, msg
