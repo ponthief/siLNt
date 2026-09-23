@@ -118,6 +118,19 @@ def label_pub(scan_hex: str, m: int = 0) -> str:
     ).hex()
 
 
+def txid_for(seed: int) -> str:
+    """A txid that is NOT its own reverse.
+
+    This matters more than it looks. The fixtures used bytes([n]).hex() * 32 —
+    "ee" thirty-two times — and a string of one repeated byte is identical to
+    its own reversal. So every check here passed while helpers/payjoin_sp.py
+    was writing txids to the wire backwards: the transaction was wrong, the
+    sighashes were wrong, and nothing could see it. Real txids are not
+    palindromes, and neither are these.
+    """
+    return (f"{seed:02x}" + "11" * 30 + f"{(seed ^ 0xFF):02x}")
+
+
 def utxo(spend_hex: str, tweak_hex: str, txid: str, vout: int, amount: int) -> dict:
     """One party's coin, in the shape the wire uses plus the tweak its owner
     holds. pub_key is derived the way the scanner recorded it: b_spend + tweak,
@@ -226,10 +239,10 @@ def cases() -> list:
         "amount": 100_000,
         "fee_rate": 2,
         "payer": party(PAYER_SCAN, PAYER_SPEND, [
-            utxo(PAYER_SPEND, "c0" * 32, "ee" * 32, 1, 250_000),
+            utxo(PAYER_SPEND, "c0" * 32, txid_for(0xee), 1, 250_000),
         ]),
         "payee": party(PAYEE_SCAN, PAYEE_SPEND, [
-            utxo(PAYEE_SPEND, "d0" * 32, "11" * 32, 0, 60_000),
+            utxo(PAYEE_SPEND, "d0" * 32, txid_for(0x11), 0, 60_000),
         ]),
     })
 
@@ -241,12 +254,12 @@ def cases() -> list:
         "amount": 150_000,
         "fee_rate": 5,
         "payer": party(PAYER_SCAN, PAYER_SPEND, [
-            utxo(PAYER_SPEND, "c1" * 32, "aa" * 32, 0, 120_000),
-            utxo(PAYER_SPEND, "c2" * 32, "22" * 32, 3, 140_000),
+            utxo(PAYER_SPEND, "c1" * 32, txid_for(0xaa), 0, 120_000),
+            utxo(PAYER_SPEND, "c2" * 32, txid_for(0x22), 3, 140_000),
         ]),
         "payee": party(PAYEE_SCAN, PAYEE_SPEND, [
-            utxo(PAYEE_SPEND, "d1" * 32, "33" * 32, 1, 40_000),
-            utxo(PAYEE_SPEND, "d2" * 32, "bb" * 32, 2, 25_000),
+            utxo(PAYEE_SPEND, "d1" * 32, txid_for(0x33), 1, 40_000),
+            utxo(PAYEE_SPEND, "d2" * 32, txid_for(0xbb), 2, 25_000),
         ]),
     })
 
@@ -260,10 +273,10 @@ def cases() -> list:
         "amount": payer_in - fee_1out - 100,
         "fee_rate": 2,
         "payer": party(PAYER_SCAN, PAYER_SPEND, [
-            utxo(PAYER_SPEND, "c3" * 32, "ee" * 32, 7, payer_in),
+            utxo(PAYER_SPEND, "c3" * 32, txid_for(0xc3), 7, payer_in),
         ]),
         "payee": party(PAYEE_SCAN, PAYEE_SPEND, [
-            utxo(PAYEE_SPEND, "d3" * 32, "44" * 32, 0, 30_000),
+            utxo(PAYEE_SPEND, "d3" * 32, txid_for(0x44), 0, 30_000),
         ]),
     })
 
@@ -274,12 +287,12 @@ def cases() -> list:
         "amount": 200_000,
         "fee_rate": 11,
         "payer": party(PAYER_SCAN, PAYER_SPEND, [
-            utxo(PAYER_SPEND, "c4" * 32, "55" * 32, 0, 90_000),
-            utxo(PAYER_SPEND, "c5" * 32, "66" * 32, 1, 95_000),
-            utxo(PAYER_SPEND, "c6" * 32, "77" * 32, 2, 100_000),
+            utxo(PAYER_SPEND, "c4" * 32, txid_for(0x55), 0, 90_000),
+            utxo(PAYER_SPEND, "c5" * 32, txid_for(0x66), 1, 95_000),
+            utxo(PAYER_SPEND, "c6" * 32, txid_for(0x77), 2, 100_000),
         ]),
         "payee": party(PAYEE_SCAN, PAYEE_SPEND, [
-            utxo(PAYEE_SPEND, "d4" * 32, "88" * 32, 4, 70_000),
+            utxo(PAYEE_SPEND, "d4" * 32, txid_for(0x88), 4, 70_000),
         ]),
     })
 

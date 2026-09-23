@@ -323,9 +323,17 @@ def assemble(inputs: list[PayjoinInput], amounts: dict, payment_spk: bytes,
     would produce signatures that verify against nothing.
     """
     ordered = canonical(inputs)
-    vin = [
-        TransactionInput(bytes.fromhex(i.txid)[::-1], i.vout) for i in ordered
-    ]
+    # NO [::-1] here. embit's TransactionInput takes the txid in DISPLAY order
+    # and reverses it itself when serialising, which is what wallet.py has
+    # always done for ordinary sends. Reversing first put every txid on the
+    # wire backwards, so the coordinator's transaction — and every sighash
+    # computed over it — described inputs that do not exist.
+    #
+    # Every test missed it for one reason: the fixture txids were bytes like
+    # "ee" repeated 32 times, which are their own reverse. A palindrome cannot
+    # tell you which way round you are. The generator now uses txids that are
+    # not.
+    vin = [TransactionInput(bytes.fromhex(i.txid), i.vout) for i in ordered]
     tx = Transaction(vin=vin, vout=outputs_for(amounts, payment_spk, change_spk))
     return tx
 

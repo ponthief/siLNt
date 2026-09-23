@@ -72,9 +72,23 @@ def even_secret(secret: bytes) -> bytes:
     return ((n - int.from_bytes(secret, "big")) % n).to_bytes(32, "big")
 
 
+def txid_for(seed: int) -> str:
+    """A txid that is NOT its own reverse.
+
+    These used to be bytes([n]).hex() * 32 — one byte repeated — and a string
+    of one repeated byte equals its own reversal. That is how a real bug lived
+    here undetected: assemble() was reversing the txid before handing it to
+    embit, which reverses again when it serialises, so every txid went onto the
+    wire backwards. The transaction was wrong, every sighash over it was wrong,
+    and no test could tell, because the fixtures could be read either way
+    round. Real txids are not palindromes.
+    """
+    return f"{seed:02x}" + "11" * 30 + f"{(seed ^ 0xFF):02x}"
+
+
 def utxo(txid_byte: int, vout: int, amount: int, secret: bytes):
     return pjsp.PayjoinInput(
-        txid=bytes([txid_byte]).hex() * 32,
+        txid=txid_for(txid_byte),
         vout=vout,
         pub_key=xonly(secret),
         amount=amount,
@@ -117,7 +131,12 @@ def sign(secret: bytes, indices, tx):
 
 def test_inputs_are_in_canonical_order_not_submission_order():
     tx = unsigned()
-    got = [(vin.txid[::-1].hex(), vin.vout) for vin in tx.vin]
+    # vin.txid.hex(), NOT reversed. embit holds the txid in display order and
+    # reverses only when serialising. This line used to un-reverse it, which
+    # was consistent with assemble() reversing on the way in — the test agreed
+    # with the bug and both were wrong. With palindromic txids it made no
+    # difference either way, which is precisely why nothing caught it.
+    got = [(vin.txid.hex(), vin.vout) for vin in tx.vin]
     want = [(i.txid, i.vout) for i in pjsp.canonical(ALL_INPUTS)]
     assert got == want
     # And that really is a reordering, or this test proves nothing.
@@ -581,3 +600,46 @@ def test_the_same_inputs_in_a_different_order_says_so():
     reordered.vin = list(reversed(reordered.vin))
     msg = pjsp.explain_mismatch(tx, _hex(reordered))
     assert "different order" in msg and "BIP-69" in msg, msg
+
+
+
+# ── byte order ───────────────────────────────────────────────────────────────
+
+
+def test_no_txid_in_these_tests_is_its_own_reverse():
+    """The guard for the blind spot itself. A palindromic txid cannot tell you
+    which way round you are, and every fixture here used to be one."""
+    for i in ALL_INPUTS:
+        assert bytes.fromhex(i.txid)[::-1].hex() != i.txid, i.txid
+
+
+def test_the_txid_goes_onto_the_wire_reversed():
+    """Bitcoin serialises a prevout's txid in internal order — the display
+    txid, byte-reversed. embit's TransactionInput takes it in DISPLAY order
+    and reverses when it serialises, which is what wallet.py relies on for
+    every ordinary send; reversing before handing it over does it twice.
+    """
+    tx = unsigned()
+    raw = tx.serialize().hex()
+    first = pjsp.canonical(ALL_INPUTS)[0].txid
+    # version(4B) + varint input count(1B) = 5 bytes = 10 hex characters.
+    assert raw[10:10 + 64] == bytes.fromhex(first)[::-1].hex(), (
+        "the txid is on the wire in display order, so this transaction names "
+        "inputs that do not exist"
+    )
+
+
+def test_the_fixtures_shipped_to_the_client_are_not_palindromic():
+    """fixtures/payjoin-sp.json is what holds services/spPayjoin.ts to this
+    implementation. Palindromic txids there made the two agree on a
+    transaction neither could have broadcast."""
+    import json
+
+    data = json.loads((ROOT / "fixtures" / "payjoin-sp.json").read_text())
+    seen = 0
+    for case in data["cases"]:
+        for side in ("payer", "payee"):
+            for i in case[side]["inputs"]:
+                assert bytes.fromhex(i["txid"])[::-1].hex() != i["txid"], i["txid"]
+                seen += 1
+    assert seen >= 8, f"only checked {seen} inputs"
