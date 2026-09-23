@@ -737,9 +737,12 @@ async def m031_payjoin_sp_requests(db):
             fee_sats            {db.big_int},
             vsize               {db.big_int},
 
-            -- The frozen input set: JSON arrays of {txid, vout, pub_key,
-            -- amount}, public data only. Kept per party so each side can be
+            -- The frozen input set: JSON arrays of txid, vout, pub_key and
+            -- amount -- public data only. Kept per party so each side can be
             -- told which inputs are its own without the server guessing.
+            -- (No braces in these comments: the whole statement is an
+            -- f-string, so a brace is an interpolation. A JSON shape written
+            -- out literally here raised NameError at migration time.)
             payer_inputs        TEXT,
             payee_inputs        TEXT,
 
@@ -750,9 +753,10 @@ async def m031_payjoin_sp_requests(db):
             payment_spk         TEXT,
             change_spk          TEXT,
 
-            -- Witnesses, JSON {index: hex}, posted by whoever owns those
-            -- inputs. Two slots rather than one so the two parties cannot
-            -- overwrite each other and the order they sign in does not matter.
+            -- Witnesses, JSON mapping input index to signature hex, posted by
+            -- whoever owns those inputs. Two slots rather than one so the two
+            -- parties cannot overwrite each other, and the order they sign in
+            -- does not matter.
             payer_witnesses     TEXT,
             payee_witnesses     TEXT,
 
