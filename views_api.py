@@ -178,6 +178,7 @@ from .crud import (
     get_account_id_by_email,
     create_payjoin_contact,
     get_payjoin_contact,
+    get_payjoin_contact_between,
     set_payjoin_contact_status,
     delete_payjoin_contact,
     list_payjoin_contacts,
@@ -3351,6 +3352,21 @@ async def api_payjoin_contact_request(
             status_code=HTTPStatus.NOT_FOUND,
             detail=f"No account here is called '{username}'. Check the spelling.",
         )
+
+    # IS THERE ALREADY SOMETHING BETWEEN US? create_payjoin_contact returns the
+    # existing row when one exists, in either direction and in any status, and
+    # this endpoint used to answer "sent" regardless — so asking again someone
+    # who had declined, or someone who had asked YOU, reported success and did
+    # nothing. Two requests, one new pending row, no way to tell which landed.
+    from .helpers.connections import refusal_for_existing
+
+    existing = await get_payjoin_contact_between(uid, target_id)
+    if existing:
+        why = refusal_for_existing(
+            existing.status, existing.requester_user_id == uid, username
+        )
+        if why:
+            raise HTTPException(status_code=HTTPStatus.CONFLICT, detail=why)
 
     # AND THEY HAVE TO BE ON THE NETWORK YOU ARE ON. An LNbits account is
     # global; a siLNt wallet belongs to one network. A connection to somebody

@@ -2480,6 +2480,24 @@ async def create_payjoin_contact(requester_user_id: str, target_user_id: str) ->
     return await get_payjoin_contact(cid)
 
 
+async def get_payjoin_contact_between(
+    a_user_id: str, b_user_id: str
+) -> Optional["PayjoinContact"]:
+    """The connection row between two users, whichever way round it was made.
+
+    A connection is mutual, so there is at most one row per pair; the endpoint
+    needs to see its status before deciding whether a fresh request means
+    anything.
+    """
+    row = await db.fetchone(
+        """SELECT * FROM silnt.payjoin_contacts
+           WHERE (requester_user_id = :a AND target_user_id = :b)
+              OR (requester_user_id = :b AND target_user_id = :a)""",
+        {"a": a_user_id, "b": b_user_id},
+    )
+    return PayjoinContact(**row) if row else None
+
+
 async def get_payjoin_contact(cid: str) -> Optional["PayjoinContact"]:
     row = await db.fetchone("SELECT * FROM silnt.payjoin_contacts WHERE id = :id", {"id": cid})
     return PayjoinContact(**row) if row else None
