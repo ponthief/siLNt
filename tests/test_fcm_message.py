@@ -100,3 +100,91 @@ def test_every_push_text_was_found():
 def test_no_push_text_carries_a_number():
     for text in _push_text_literals():
         assert not re.search(r"\d", text), f"push text names a figure: {text!r}"
+
+
+# ── which rejections kill a token ────────────────────────────────────────────
+#
+# A token FCM will never accept again has to be deleted, because nothing else
+# ever will: the row sits in fcm_tokens and every push to that user retries it
+# and logs the same failure. The 403 was missing from this list, which is what
+# a service-account swap leaves behind — every token registered before the swap
+# belongs to the old Firebase project, and no retry fixes one.
+
+# Real FCM v1 bodies, trimmed. Both spellings of the sender condition appear in
+# the same response, which is the reason the match ignores punctuation.
+MISMATCH = (
+    '{"error":{"code":403,"message":"SenderId mismatch","status":'
+    '"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/'
+    'google.firebase.fcm.v1.FcmError","errorCode":"SENDER_ID_MISMATCH"}]}}'
+)
+UNREGISTERED = (
+    '{"error":{"code":404,"message":"Requested entity was not found.",'
+    '"status":"NOT_FOUND","details":[{"@type":"type.googleapis.com/'
+    'google.firebase.fcm.v1.FcmError","errorCode":"UNREGISTERED"}]}}'
+)
+BAD_TOKEN = (
+    '{"error":{"code":400,"message":"The registration token is not a valid '
+    'FCM registration token","status":"INVALID_ARGUMENT","details":[{"@type":'
+    '"type.googleapis.com/google.firebase.fcm.v1.FcmError","errorCode":'
+    '"INVALID_ARGUMENT"}]}}'
+)
+NO_PERMISSION = (
+    '{"error":{"code":403,"message":"Firebase Cloud Messaging API has not '
+    'been used in project 123 before or it is disabled.","status":'
+    '"PERMISSION_DENIED"}}'
+)
+RATE_LIMITED = (
+    '{"error":{"code":429,"message":"Quota exceeded","status":'
+    '"RESOURCE_EXHAUSTED"}}'
+)
+
+
+def test_a_sender_id_mismatch_kills_the_token():
+    """The one this was written for. Every push to a device registered before a
+    project swap answers this, forever, until the row goes."""
+    assert fcm.token_is_dead(403, MISMATCH)
+
+
+def test_unregistered_and_malformed_still_kill_it():
+    assert fcm.token_is_dead(404, UNREGISTERED)
+    assert fcm.token_is_dead(400, BAD_TOKEN)
+
+
+def test_a_403_about_the_project_does_not_kill_the_token():
+    """A service account without the FCM scope, or an API not enabled, answers
+    403 for EVERY token. Pruning on the status alone would empty the table over
+    a server misconfiguration and leave nobody reachable once it was fixed."""
+    assert not fcm.token_is_dead(403, NO_PERMISSION)
+
+
+def test_a_transient_failure_does_not_kill_the_token():
+    assert not fcm.token_is_dead(429, RATE_LIMITED)
+    assert not fcm.token_is_dead(500, '{"error":{"code":500}}')
+    assert not fcm.token_is_dead(200, "")
+
+
+def test_the_right_code_with_the_wrong_status_is_not_enough():
+    """Status and reason both have to agree, so a stray word in an unrelated
+    message cannot delete somebody's device."""
+    assert not fcm.token_is_dead(500, MISMATCH)
+    assert not fcm.token_is_dead(403, UNREGISTERED)
+
+
+def test_the_reason_given_for_a_403_names_the_cause():
+    """It goes in the test-push report, where the person reading it needs to
+    know this is their own project change and not a broken device."""
+    reason = fcm.dead_token_reason(403)
+    assert "different Firebase project" in reason
+    assert "re-opening the app" in reason
+
+
+def test_both_senders_share_one_classifier():
+    """send_fcm used to duplicate the classification instead of delegating, and
+    the two copies were identical until they were not — the 403 was missing
+    from both, and fixing one would have left the other retrying forever."""
+    src = (ROOT / "helpers" / "fcm.py").read_text()
+    body = src[src.index("async def send_fcm("):src.index("async def send_fcm_report(")]
+    assert "send_fcm_report(" in body
+    assert "remove_fcm_token" not in body
+    # One call site for the rule, in the reporting sender only.
+    assert src.count("token_is_dead(") == 2   # the def, and the one use

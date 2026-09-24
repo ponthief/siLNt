@@ -224,50 +224,70 @@ def _build_message(token: str, title: str, body: str, payload_data: dict) -> dic
     }
 
 
+# ── what a rejection means ───────────────────────────────────────────────────
+
+# A device token FCM will never accept again, whatever we do. Google's own
+# instruction for each of these is to delete it from the store, and the reason
+# it matters here is that nothing else ever will: the row sits in fcm_tokens
+# and every push to that user retries it and logs the same failure.
+#
+#   404 UNREGISTERED          the app was uninstalled, or the token rotated
+#   400 INVALID_ARGUMENT      the token is malformed
+#   403 SENDER_ID_MISMATCH    the token was minted by an app configured for a
+#                             DIFFERENT Firebase project than the service
+#                             account sending. This is what a project or
+#                             service-account swap leaves behind: every token
+#                             registered before the swap belongs to the old
+#                             project, and no retry will fix one. It was
+#                             missing from this list, so those rows stayed
+#                             forever and produced a 403 on every send.
+#
+# Matched on the status AND the reason text. A bare 403 can also mean the
+# service account lacks the FCM scope or the API is disabled on the project —
+# which is a server misconfiguration affecting every token, and deleting the
+# whole table over it would be the wrong move entirely.
+
+# Matched on letters and digits only. FCM writes the same condition two ways in
+# one response — "SENDER_ID_MISMATCH" in errorCode and "SenderId mismatch" in
+# message — so anything matching the punctuation as written would catch one
+# wording and miss the other.
+_DEAD_TOKEN = {
+    404: ("unregistered", "notregistered"),
+    400: ("invalidargument", "invalidregistration"),
+    403: ("senderidmismatch", "mismatchedsender"),
+}
+
+
+def token_is_dead(status: int, text: str) -> bool:
+    """Whether this rejection means the token should be deleted."""
+    squashed = "".join(ch for ch in (text or "").lower() if ch.isalnum())
+    return any(n in squashed for n in _DEAD_TOKEN.get(status, ()))
+
+
+def dead_token_reason(status: int) -> str:
+    if status == 403:
+        return (
+            "registered against a different Firebase project — this device "
+            "signed up under the previous service account, and re-opening the "
+            "app registers it again under the current one"
+        )
+    return "invalid or unregistered"
+
+
 async def send_fcm(
     tokens: list, title: str, body: str, data: Optional[dict] = None
 ) -> None:
     """Send a notification to each token via FCM HTTP v1. Best-effort — never
-    raises. Tokens FCM reports as unregistered/invalid are pruned from the DB."""
-    creds = _get_credentials()
-    if not creds or not tokens:
-        return
-    try:
-        loop = asyncio.get_event_loop()
-        access_token = await loop.run_in_executor(None, _fresh_access_token, creds)
-        project_id = creds.project_id
-    except Exception as e:
-        logger.warning(f"FCM: token refresh failed: {e}")
-        return
+    raises. Tokens FCM reports as dead are pruned from the DB.
 
-    from ..crud import remove_fcm_token
-
-    url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-    }
-    payload_data = {str(k): str(v) for k, v in (data or {}).items()}
-
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        for token in tokens:
-            msg = _build_message(token, title, body, payload_data)
-            try:
-                r = await client.post(url, headers=headers, json=msg)
-                if r.status_code == 200:
-                    continue
-                txt = r.text.lower()
-                if r.status_code in (400, 404) and (
-                    "unregistered" in txt
-                    or "not-registered" in txt
-                    or "invalid-argument" in txt
-                    or "invalid registration" in txt
-                ):
-                    await remove_fcm_token(token)
-                else:
-                    logger.warning(f"FCM send {r.status_code}: {r.text[:200]}")
-            except Exception as e:
-                logger.warning(f"FCM send error: {e}")
+    Delegates to send_fcm_report so there is ONE place that decides what a
+    rejection means. There used to be two, identical until they were not: the
+    403 that a service-account swap produces was missing from both, and adding
+    it to one would have left the other retrying those tokens forever.
+    """
+    report = await send_fcm_report(tokens, title, body, data)
+    for err in report.get("errors", []):
+        logger.warning(f"FCM: {err}")
 
 
 async def send_fcm_report(
@@ -323,17 +343,12 @@ async def send_fcm_report(
                 if r.status_code == 200:
                     report["sent"] += 1
                     continue
-                txt = r.text.lower()
-                if r.status_code in (400, 404) and (
-                    "unregistered" in txt
-                    or "not-registered" in txt
-                    or "invalid-argument" in txt
-                    or "invalid registration" in txt
-                ):
+                if token_is_dead(r.status_code, r.text):
                     await remove_fcm_token(token)
                     report["pruned"] += 1
                     report["errors"].append(
-                        f"Token …{token[-8:]} was invalid/unregistered (pruned)."
+                        f"Token …{token[-8:]} pruned: "
+                        f"{dead_token_reason(r.status_code)}."
                     )
                 else:
                     report["errors"].append(
