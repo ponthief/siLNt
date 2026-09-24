@@ -3279,27 +3279,28 @@ async def list_tango_rounds_awaiting_change_label(
     return [TangoRound(**r) for r in rows]
 
 
-async def label_utxo_by_pubkey(
-    wallet_id: str, pub_key: str, label: str, replaces: tuple = ()
+async def label_utxo_at_outpoint(
+    wallet_id: str, txid: str, vout: int, label: str, replaces: tuple = ()
 ) -> int:
-    """Label a coin the scanner has found, by its on-chain key.
+    """Label a coin the scanner has found, BY ITS OUTPOINT.
 
-    Used to mark a Tango's two coins the moment they turn up, so the owner can
-    see which is the share and which is the change without reconstructing the
-    round — and so the send flow can refuse the combination that undoes it.
+    The outpoint is what identifies a coin: (txid, vout, wallet_id) is this
+    table's primary key, since m009. Labelling by pub_key instead — which is
+    what this did first — asks the database a question it does not promise to
+    answer uniquely, and a Tango pays TWO outputs to the same wallet in the
+    same transaction, so the one place it matters is the one place it was used.
 
-    Writes where there is no label, and where the existing one begins with a
-    prefix in `replaces`. That second case is how a coin labelled by an earlier
-    wording of ours gets the current one; it is a tuple of OUR prefixes only,
-    never a wildcard, because a label the user typed has to survive. Passing
-    nothing keeps the original behaviour of never overwriting.
-
-    Returns how many rows now carry this label: 0 means the scanner has not
-    found the coin yet, which is the normal case for the first minutes after a
-    broadcast.
+    Everything else is as below: writes where there is no label, and where the
+    existing one starts with a prefix in `replaces` — a tuple of OUR prefixes
+    only, so a label the user typed survives.
     """
     clauses = ["label IS NULL", "label = ''"]
-    params = {"wid": wallet_id, "pub": pub_key, "label": label}
+    params = {
+        "wid": wallet_id,
+        "txid": str(txid).lower(),
+        "vout": int(vout),
+        "label": label,
+    }
     for n, prefix in enumerate(replaces):
         key = f"pfx{n}"
         clauses.append(f"label LIKE :{key}")
@@ -3307,14 +3308,19 @@ async def label_utxo_by_pubkey(
     await db.execute(
         f"""
         UPDATE silnt.utxos SET label = :label
-        WHERE wallet_id = :wid AND pub_key = :pub
+        WHERE wallet_id = :wid AND txid = :txid AND vout = :vout
           AND ({" OR ".join(clauses)})
         """,
         params,
     )
     rows = await db.fetchall(
-        "SELECT txid FROM silnt.utxos WHERE wallet_id = :wid AND pub_key = :pub "
-        "AND label = :label",
-        {"wid": wallet_id, "pub": pub_key, "label": label},
+        "SELECT txid FROM silnt.utxos WHERE wallet_id = :wid AND txid = :txid "
+        "AND vout = :vout AND label = :label",
+        {
+            "wid": wallet_id,
+            "txid": str(txid).lower(),
+            "vout": int(vout),
+            "label": label,
+        },
     )
     return len(rows)

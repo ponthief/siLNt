@@ -198,3 +198,34 @@ def test_m034_clears_the_label_flag_on_broadcast_rounds_only():
     assert "WHERE status = 'BROADCAST'" in joined
     # Never a DELETE: the point is to redo work, not to drop rounds.
     assert "DELETE" not in joined.upper()
+
+
+def test_m035_clears_the_label_flag_again():
+    """m034's pass wrote labels from the wrong source — the columns rather than
+    the transaction, and pub_key rather than the outpoint. This one exists to
+    redo it, so it has to be as narrow as m034 was."""
+    mod = _load_migrations()
+    db = _FakeDB()
+    asyncio.run(mod.m035_relabel_tango_coins_again(db))
+    joined = " ".join(" ".join(db.sql).split())
+    assert "UPDATE silnt.tango_rounds" in joined
+    assert "change_labelled = FALSE" in joined
+    assert "WHERE status = 'BROADCAST'" in joined
+    assert "DELETE" not in joined.upper()
+
+
+def test_tango_coins_are_labelled_by_outpoint_not_pubkey():
+    """A Tango pays two outputs to one wallet in one transaction. pub_key is
+    not what silnt.utxos promises is unique — (txid, vout, wallet_id) is, since
+    m009 — and labelling by the wrong one put a share's name on a change coin.
+    Asserted against the source because there is no database here to prove it
+    on."""
+    src = (ROOT / "views_api.py").read_text()
+    body = src[src.index("async def _tango_label_change"):
+               src.index("async def _notify_tango")]
+    assert "label_utxo_at_outpoint(" in body
+    assert "label_utxo_by_pubkey" not in body
+    # And the share/change decision comes off the chain, not the columns.
+    assert "coin_labels(" in body
+    crud = (ROOT / "crud.py").read_text()
+    assert "async def label_utxo_by_pubkey" not in crud

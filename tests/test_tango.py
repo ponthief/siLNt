@@ -543,3 +543,105 @@ def test_a_coin_the_user_named_is_left_alone():
     assert tango.undoes_a_round(
         ["Tango mix money for alice", "Tango change - alice"]
     ) is None
+
+
+# ── which coin is which, read off the chain ──────────────────────────────────
+# The label decides whether the send guard refuses a selection, so a label on
+# the wrong coin is worse than none: it would refuse the safe pair and allow
+# the dangerous one while reading plausibly throughout. a_mix_spk says which
+# scripts belong to which side; only the transaction says what they received.
+
+MIX_A = "51" + "20" + "aa" * 32
+CHG_A = "51" + "20" + "bb" * 32
+MIX_B = "51" + "20" + "cc" * 32
+CHG_B = "51" + "20" + "dd" * 32
+
+# The real shape: two shares at the denomination, two unequal changes.
+OUTS = {MIX_A: 4000, MIX_B: 4000, CHG_A: 1702, CHG_B: 4024}
+
+
+def test_the_share_is_the_output_worth_the_denomination():
+    got = tango.coin_labels(OUTS, 4000, [MIX_A, CHG_A], "bob", "fagk0001")
+    assert got[MIX_A] == "Tango mix - bob #fagk"
+    assert got[CHG_A] == "Tango change - bob #fagk"
+
+
+def test_swapped_columns_still_produce_the_right_labels():
+    """The case this was written for. Whatever order the caller passes the two
+    scripts in, the values decide — so a client or a column that had them the
+    wrong way round cannot make the wallet call a change coin a share."""
+    got = tango.coin_labels(OUTS, 4000, [CHG_A, MIX_A], "bob", "fagk0001")
+    assert got[MIX_A] == "Tango mix - bob #fagk"
+    assert got[CHG_A] == "Tango change - bob #fagk"
+
+
+def test_a_clean_round_has_only_a_share_to_name():
+    got = tango.coin_labels({MIX_A: 4000, MIX_B: 4000}, 4000, [MIX_A], "bob", "x")
+    assert got == {MIX_A: "Tango mix - bob #x"}
+
+
+def test_a_script_that_is_not_an_output_is_left_out():
+    """The caller counts what it asked for, so a missing one is reported rather
+    than guessed at. A label written past this would be fiction."""
+    got = tango.coin_labels(OUTS, 4000, [MIX_A, "51" + "20" + "ee" * 32],
+                            "bob", "x")
+    assert list(got) == [MIX_A]
+
+
+def test_case_and_padding_do_not_matter():
+    got = tango.coin_labels(
+        {MIX_A.upper(): 4000}, 4000, ["  " + MIX_A.upper() + " "], "bob", "x"
+    )
+    assert got[MIX_A] == "Tango mix - bob #x"
+
+
+def test_change_that_happens_to_equal_the_denomination_reads_as_a_share():
+    """An honest limit of deciding by value, and harmless. A change output of
+    exactly denom means that side put in 2*denom plus its fee share, and the
+    coin is then indistinguishable from a share on chain too — so calling it
+    one is not a lie, and the guard still refuses it beside a change coin."""
+    outs = {MIX_A: 4000, CHG_A: 4000}
+    got = tango.coin_labels(outs, 4000, [MIX_A, CHG_A], "bob", "x")
+    assert got[CHG_A] == "Tango mix - bob #x"
+
+
+# ── the round that was labelled wrongly, as it happened ──────────────────────
+# Signet ddec1aeafefbd146737eba3e60982e8265072e20164b1c19108caab2cf0a8b22:
+# 8322 + 6000 in, 4000 + 4000 + 1702 + 4024 out at 2 sat/vB. The initiator put
+# in 6000 and took a 4000 share plus 1702 change; the wallet showed that 1702
+# labelled as a SHARE, which is the label that makes the send guard refuse the
+# safe selection and allow the one that undoes the round.
+
+REAL_OUTS = {
+    "512085f3628e9f18b3ac4ba72937163585127ab38d0718e31a69d2b84cf948572bda": 1702,
+    "51201a08dea43d883e55dc81d941a9cb7608981475cadf917b7604be4ae6892c2ed2": 4000,
+    "51205f11824a325d0059d003d0497b4f02167a00fa042ee82286bca784bf9b0f6216": 4000,
+    "51203a8874d97eb8254b1a2b1fe012f6ffc4df6dc97a5feabdd3b9d7fea1887acbd5": 4024,
+}
+REAL_A_MIX = "51201a08dea43d883e55dc81d941a9cb7608981475cadf917b7604be4ae6892c2ed2"
+REAL_A_CHANGE = "512085f3628e9f18b3ac4ba72937163585127ab38d0718e31a69d2b84cf948572bda"
+
+
+def test_the_real_round_labels_its_1702_as_change():
+    got = tango.coin_labels(
+        REAL_OUTS, 4000, [REAL_A_MIX, REAL_A_CHANGE], "bob", "fagk0001"
+    )
+    assert got[REAL_A_CHANGE] == "Tango change - bob #fagk"
+    assert got[REAL_A_MIX] == "Tango mix - bob #fagk"
+
+
+def test_and_still_does_with_the_scripts_the_wrong_way_round():
+    """Whatever put a share's name on that 1702, the value decides now."""
+    got = tango.coin_labels(
+        REAL_OUTS, 4000, [REAL_A_CHANGE, REAL_A_MIX], "bob", "fagk0001"
+    )
+    assert got[REAL_A_CHANGE] == "Tango change - bob #fagk"
+    assert got[REAL_A_MIX] == "Tango mix - bob #fagk"
+
+
+def test_the_two_coins_of_that_round_are_refused_together():
+    """Which is the point of getting the labels right."""
+    got = tango.coin_labels(
+        REAL_OUTS, 4000, [REAL_A_MIX, REAL_A_CHANGE], "bob", "fagk0001"
+    )
+    assert tango.undoes_a_round(list(got.values())) == "bob"

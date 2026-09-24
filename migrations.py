@@ -1059,3 +1059,30 @@ async def m034_relabel_tango_coins(db):
         WHERE status = 'BROADCAST'
         """
     )
+
+
+async def m035_relabel_tango_coins_again(db):
+    """Clear the flag once more, because the labels m034 caused were wrong.
+
+    m034 had the sweeper relabel every broadcast round, and it did — using the
+    a_mix_spk / a_change_spk columns to decide which coin was which, and
+    pub_key to find the row. Both were the wrong source. A Tango pays two
+    outputs to the same wallet in one transaction, and pub_key is not what this
+    table promises is unique; the outpoint is. A change coin came out labelled
+    as a share, which is worse than unlabelled — the send guard reads these
+    labels, so it would have refused the safe selection and allowed the one
+    that undoes the round.
+
+    _tango_label_change now reads both facts off the broadcast transaction: the
+    value says which coin is the share, since both shares are worth the
+    denomination, and the vout says which row to write. This clears the flag so
+    it runs again over everything with the correct answer, and it may overwrite
+    a wrong label because the labeller replaces our own prefixes.
+    """
+    await db.execute(
+        """
+        UPDATE silnt.tango_rounds
+        SET change_labelled = FALSE
+        WHERE status = 'BROADCAST'
+        """
+    )

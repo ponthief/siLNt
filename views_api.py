@@ -173,7 +173,7 @@ from .crud import (
     update_tango_round,
     list_tango_rounds_for_user,
     get_reserved_tango_outpoints,
-    label_utxo_by_pubkey,
+    label_utxo_at_outpoint,
     create_payjoin_invoice, list_payjoin_invoices_for_payer,
     get_account_id_by_email,
     create_payjoin_contact,
@@ -4460,64 +4460,110 @@ def _tango_assemble(rnd):
 
 
 async def _tango_label_change(rnd) -> None:
-    """Name BOTH of each side's coins once the scanner has found them.
+    """Name both of each side's coins once the scanner has found them.
 
     The share as well as the change, and the share is the one that makes this
-    worth doing. A round's change and its share add up to what that side put
-    in. On chain the two shares are identical, so which is yours is a coin
-    flip — until you spend your change together with your share. That one
-    transaction says "same owner", the arithmetic then says which input total
-    that owner had, and the coin flip becomes a certainty. It does not weaken
-    the round, it undoes it, and no later mix puts it back.
+    worth doing. A Tango change coin is attributable by construction: its value
+    plus a share equals an input total. A share is the coin that history was
+    cut off from. Spending the two together repairs the cut, so the clients
+    refuse that pairing — and they decide it from these labels, which is why a
+    label that names the wrong coin is worse than no label at all. It would
+    have the send guard refuse the safe combination and allow the dangerous
+    one, while reading plausibly the whole time.
 
-    Labelling only the change told the user which coin was dangerous but not
-    what it was dangerous WITH, which is half an answer. With both named, the
-    clients can refuse the pairing outright — see helpers/tango.py's
-    undoes_a_round, which both of them mirror.
+    So WHICH COIN IS WHICH IS READ OFF THE TRANSACTION, not off a_mix_spk and
+    a_change_spk. Both shares are worth the denomination — the whole privacy
+    claim, checked on both devices before either signs — so an output worth
+    exactly denom is a share and anything else is change. The columns only say
+    which scripts belong to which side; the chain says what they received.
 
-    Each coin is named after the OTHER party, because that is what tells one
-    round's coins from another's.
+    Each coin is named after the OTHER party, with four characters of the round
+    id, so two rounds with one person do not produce two identical labels.
 
     Best-effort and idempotent. Called after broadcast — when the coins almost
     certainly do not exist yet — again whenever the round is fetched, and by
     the sweeper, which is what actually catches them: a finished round is the
-    one thing nobody reopens, so waiting for a fetch meant waiting forever.
-    The `change_labelled` column stops it retrying once every coin is named;
-    it predates the share being labelled too, and the name stayed rather than
-    spend a migration on it.
+    one thing nobody reopens. The `change_labelled` column stops it retrying
+    once every coin is named; it predates the share being labelled too, and the
+    name stayed rather than spend a migration on it.
     """
-    from .helpers.tango import CHANGE_LABEL, MIX_LABEL, change_label, mix_label
+    from .helpers.tango import CHANGE_LABEL, MIX_LABEL, coin_labels
 
     # Labels this code wrote before, which it may replace. A coin already
-    # carrying an older wording of ours — the change-only scheme, or a name
-    # with no round marker — should end up with the current one, and a label
-    # the USER typed must survive untouched.
-    OUR_LABELS = (MIX_LABEL, CHANGE_LABEL)
+    # carrying an older wording of ours should end up with the current one, and
+    # a label the USER typed must survive untouched.
+    our_labels = (MIX_LABEL, CHANGE_LABEL)
 
     if rnd.status != "BROADCAST" or rnd.change_labelled:
         return
+
+    values, vouts = _tango_outputs(rnd)
+    if not values:
+        # No transaction to read, so there is nothing to be sure about. Left
+        # unlabelled rather than guessed at; the sweeper tries again.
+        logger.warning(f"tango {rnd.id}: no broadcast tx to read outputs from")
+        return
+
     done = True
-    for wallet_id, spk, other, naming in (
-        (rnd.a_wallet_id, rnd.a_mix_spk, rnd.b_username, mix_label),
-        (rnd.b_wallet_id, rnd.b_mix_spk, rnd.a_username, mix_label),
-        (rnd.a_wallet_id, rnd.a_change_spk, rnd.b_username, change_label),
-        (rnd.b_wallet_id, rnd.b_change_spk, rnd.a_username, change_label),
+    for wallet_id, mix_spk, change_spk, other in (
+        (rnd.a_wallet_id, rnd.a_mix_spk, rnd.a_change_spk, rnd.b_username),
+        (rnd.b_wallet_id, rnd.b_mix_spk, rnd.b_change_spk, rnd.a_username),
     ):
-        if not spk or not wallet_id:
+        if not wallet_id:
             continue
-        try:
-            # The scriptPubKey is OP_1 <32-byte key>; the utxos table stores the
-            # key, not the script.
-            found = await label_utxo_by_pubkey(
-                wallet_id, spk[4:], naming(other, rnd.id), replaces=OUR_LABELS
+        wanted = [s for s in (mix_spk, change_spk) if s]
+        labels = coin_labels(values, rnd.denom_sats, wanted, other, rnd.id)
+        if len(labels) != len(wanted):
+            # A script this side derived is not in the transaction it signed.
+            # That is a real disagreement, not a slow scanner, and a label
+            # written past it would be a guess.
+            logger.warning(
+                f"tango {rnd.id}: {len(wanted) - len(labels)} of this side's "
+                f"scripts are not outputs of {rnd.txid}"
             )
-            if not found:
-                done = False
-        except Exception as e:
-            logger.warning(f"tango {rnd.id}: could not label coins: {e}")
             done = False
+            continue
+        for spk, label in labels.items():
+            try:
+                # By outpoint, not by key. A Tango pays two outputs to the same
+                # wallet in one transaction, and (txid, vout, wallet_id) is what
+                # this table promises is unique — pub_key is not.
+                found = await label_utxo_at_outpoint(
+                    wallet_id, rnd.txid, vouts[spk], label, replaces=our_labels
+                )
+                if not found:
+                    done = False
+            except Exception as e:
+                logger.warning(f"tango {rnd.id}: could not label coins: {e}")
+                done = False
     if done:
         await update_tango_round(rnd.id, change_labelled=True)
+
+
+def _tango_outputs(rnd) -> tuple:
+    """({scriptPubKey hex: value}, {scriptPubKey hex: vout}) from the broadcast
+    transaction, or two empty dicts.
+
+    The value says which of a side's two coins is its share; the vout says
+    which row to label. Both come from the transaction, which is the only thing
+    that cannot be wrong about either.
+    """
+    raw = rnd.tx_hex or rnd.unsigned_tx
+    if not raw:
+        return {}, {}
+    try:
+        from embit.transaction import Transaction
+
+        tx = Transaction.parse(bytes.fromhex(raw))
+    except Exception as e:
+        logger.warning(f"tango {rnd.id}: could not parse its transaction: {e}")
+        return {}, {}
+    values, vouts = {}, {}
+    for n, o in enumerate(tx.vout):
+        spk = bytes(o.script_pubkey.data).hex().lower()
+        values[spk] = int(o.value)
+        vouts[spk] = n
+    return values, vouts
 
 
 async def _notify_tango(user_id: str, title: str, body: str) -> None:

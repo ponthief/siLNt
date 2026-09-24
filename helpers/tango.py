@@ -181,6 +181,49 @@ def _party(label: str, prefix: str) -> Optional[str]:
     return rest
 
 
+def coin_labels(
+    tx_outputs: dict,
+    denom: int,
+    scripts,
+    other_username: Optional[str],
+    round_id: Optional[str] = None,
+) -> dict:
+    """Which of this side's coins is the share and which is the change, decided
+    by what each one is WORTH in the broadcast transaction.
+
+    WHY NOT JUST TRUST THE COLUMNS. a_mix_spk and a_change_spk say which is
+    which, and a label written from them is wrong in exactly the way that is
+    hardest to notice if either the client or the server ever puts them the
+    wrong way round: the wallet then calls the change coin a share, the send
+    guard refuses the safe pair and allows the dangerous one, and the label
+    reads plausibly throughout.
+
+    The transaction cannot be wrong about it. Both shares are worth the
+    denomination — that is the whole privacy claim, checked on both devices
+    before either signs — so an output of this side's worth exactly `denom` is
+    its share and anything else is its change. Reading it off the chain makes
+    the label true whatever the columns say, and disagreement becomes visible
+    rather than silent.
+
+    `tx_outputs` maps scriptPubKey hex to value; case and surrounding space are
+    ignored on both sides, since one comes off the wire and the other out of a
+    column. Scripts not in it are left out: the caller knows how many it asked
+    about and can say so.
+    """
+    outs = {
+        (k or "").strip().lower(): v for k, v in (tx_outputs or {}).items()
+    }
+    out = {}
+    for spk in scripts:
+        key = (spk or "").strip().lower()
+        if not key or key not in outs:
+            continue
+        value = int(outs[key])
+        naming = mix_label if value == int(denom) else change_label
+        out[key] = naming(other_username, round_id)
+    return out
+
+
 def undoes_a_round(labels) -> Optional[str]:
     """The round(s) a selection of coins would undo, named, or None.
 
