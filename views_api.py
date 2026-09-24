@@ -4803,11 +4803,28 @@ async def api_tango_propose(
 
 @silnt_api_router.get("/api/v1/tango/rounds")
 async def api_tango_list(
+    network: Optional[str] = None,
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
-    """Every round this user is in, either side."""
+    """Every round this user is in, either side, ON ONE NETWORK.
+
+    Scoped because everything reads this list: the Rounds and Past tabs, the
+    tab badge and the watcher's toasts. Unscoped it put signet rounds in the
+    mainnet app under Past, and would have badged it for a signet turn.
+
+    Without `network`, every network the caller has a wallet on — for an older
+    client, which is what it already got.
+    """
     uid = key_info.wallet.user
-    rounds = await list_tango_rounds_for_user(uid)
+    asked = (network or "").strip().lower() or None
+    if asked:
+        rounds = await list_tango_rounds_for_user(uid, asked)
+    else:
+        rounds = []
+        for net in sorted(
+            {w.network for w in await get_silnt_wallets(uid) if w.network}
+        ):
+            rounds.extend(await list_tango_rounds_for_user(uid, net))
     out = []
     for r in rounds:
         row = r.dict()

@@ -3240,15 +3240,22 @@ async def update_tango_round(rid: str, **fields) -> Optional[TangoRound]:
     return await get_tango_round(rid)
 
 
-async def list_tango_rounds_for_user(user_id: str) -> list[TangoRound]:
-    """Every round this user is in, either side. One list rather than two:
-    neither party pays the other, so "mine" and "theirs" is not a distinction
-    worth making in the UI."""
+async def list_tango_rounds_for_user(
+    user_id: str, network: str
+) -> list[TangoRound]:
+    """Every round this user is in ON ONE NETWORK, either side. One list rather
+    than two: neither party pays the other, so "mine" and "theirs" is not a
+    distinction worth making in the UI.
+
+    `network` is required and has no default. Unscoped, this listed a signet
+    round in the mainnet app — under Past, and in the badge and the toasts,
+    since every one of those reads this list.
+    """
     rows = await db.fetchall(
         "SELECT * FROM silnt.tango_rounds "
-        "WHERE a_user_id = :uid OR b_user_id = :uid "
+        "WHERE network = :net AND (a_user_id = :uid OR b_user_id = :uid) "
         "ORDER BY created_at DESC",
-        {"uid": user_id},
+        {"uid": user_id, "net": network},
     )
     return [TangoRound(**r) for r in rows]
 
