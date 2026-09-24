@@ -223,6 +223,35 @@ def cases() -> list:
     return out
 
 
+def labels() -> dict:
+    """The coin labels, and the selections a client must refuse.
+
+    Here for the same reason the amounts are: the clients re-implement this,
+    and a prefix that drifted by one character would stop refusing anything
+    while every other test still passed.
+    """
+    return {
+        "mix": _t.mix_label("alice"),
+        "change": _t.change_label("alice"),
+        "bare_mix": _t.mix_label(None),
+        "bare_change": _t.change_label(""),
+        "cases": [
+            {"labels": ls, "undoes": _t.undoes_a_round(ls)}
+            for ls in (
+                ["Tango mix - alice", "Tango change - alice"],
+                ["Tango mix - alice", "Tango change - alice", "rent"],
+                ["Tango mix - alice", "Tango mix - bob"],
+                ["Tango change - alice", "Tango change - bob"],
+                ["Tango mix - alice", "Tango change - bob"],
+                ["Tango mix", "Tango change"],
+                ["my Tango mix - alice", "Tango change - alice"],
+                ["salary", "Tango", ""],
+                [],
+            )
+        ],
+    }
+
+
 if __name__ == "__main__":
     data = {
         "_comment": (
@@ -234,6 +263,7 @@ if __name__ == "__main__":
             "reverse -- palindromic txids hid a byte-order bug once already."
         ),
         "cases": cases(),
+        "labels": labels(),
     }
     json.dump(data, sys.stdout, indent=2)
     sys.stdout.write("\n")

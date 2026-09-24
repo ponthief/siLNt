@@ -327,5 +327,75 @@
         ]
       }
     }
-  ]
+  ],
+  "labels": {
+    "mix": "Tango mix - alice",
+    "change": "Tango change - alice",
+    "bare_mix": "Tango mix",
+    "bare_change": "Tango change",
+    "cases": [
+      {
+        "labels": [
+          "Tango mix - alice",
+          "Tango change - alice"
+        ],
+        "undoes": "alice"
+      },
+      {
+        "labels": [
+          "Tango mix - alice",
+          "Tango change - alice",
+          "rent"
+        ],
+        "undoes": "alice"
+      },
+      {
+        "labels": [
+          "Tango mix - alice",
+          "Tango mix - bob"
+        ],
+        "undoes": null
+      },
+      {
+        "labels": [
+          "Tango change - alice",
+          "Tango change - bob"
+        ],
+        "undoes": null
+      },
+      {
+        "labels": [
+          "Tango mix - alice",
+          "Tango change - bob"
+        ],
+        "undoes": null
+      },
+      {
+        "labels": [
+          "Tango mix",
+          "Tango change"
+        ],
+        "undoes": "someone"
+      },
+      {
+        "labels": [
+          "my Tango mix - alice",
+          "Tango change - alice"
+        ],
+        "undoes": null
+      },
+      {
+        "labels": [
+          "salary",
+          "Tango",
+          ""
+        ],
+        "undoes": null
+      },
+      {
+        "labels": [],
+        "undoes": null
+      }
+    ]
+  }
 }
