@@ -2458,42 +2458,56 @@ async def get_account_id_by_email(email: str):
     return (None, None)
 
 
-async def create_payjoin_contact(requester_user_id: str, target_user_id: str) -> "PayjoinContact":
-    """Create a PENDING connection request (or return the existing row if one
-    already exists between these two users in either direction). Stores only
-    user_ids — usernames are resolved on demand for display."""
-    existing = await db.fetchone(
-        """SELECT * FROM silnt.payjoin_contacts
-           WHERE (requester_user_id = :a AND target_user_id = :b)
-              OR (requester_user_id = :b AND target_user_id = :a)""",
-        {"a": requester_user_id, "b": target_user_id},
+async def create_payjoin_contact(
+    requester_user_id: str, target_user_id: str, network: str
+) -> "PayjoinContact":
+    """Create a PENDING connection request on one network (or return the
+    existing row if one already exists between these two users there, in either
+    direction). Stores only user_ids — usernames are resolved on demand for
+    display.
+
+    `network` is required and has no default. A caller that forgot it used to
+    make a row that belonged to every network at once, which is the leak m037
+    exists to close, and a silent leak is worse than a TypeError.
+    """
+    existing = await get_payjoin_contact_between(
+        requester_user_id, target_user_id, network
     )
     if existing:
-        return PayjoinContact(**existing)
+        return existing
     cid = urlsafe_short_hash()
     await db.execute(
         """INSERT INTO silnt.payjoin_contacts
-           (id, status, requester_user_id, target_user_id)
-           VALUES (:id, 'PENDING', :ruid, :tuid)""",
-        {"id": cid, "ruid": requester_user_id, "tuid": target_user_id},
+           (id, status, requester_user_id, target_user_id, network)
+           VALUES (:id, 'PENDING', :ruid, :tuid, :net)""",
+        {
+            "id": cid,
+            "ruid": requester_user_id,
+            "tuid": target_user_id,
+            "net": network,
+        },
     )
     return await get_payjoin_contact(cid)
 
 
 async def get_payjoin_contact_between(
-    a_user_id: str, b_user_id: str
+    a_user_id: str, b_user_id: str, network: str
 ) -> Optional["PayjoinContact"]:
-    """The connection row between two users, whichever way round it was made.
+    """The connection row between two users on one network, whichever way round
+    it was made.
 
-    A connection is mutual, so there is at most one row per pair; the endpoint
-    needs to see its status before deciding whether a fresh request means
-    anything.
+    A connection is mutual, so there is at most one row per pair per network;
+    the endpoint needs to see its status before deciding whether a fresh
+    request means anything. Per NETWORK since m037: the same two people may be
+    connected on signet and strangers on mainnet, and a request on one must not
+    read the other's answer.
     """
     row = await db.fetchone(
         """SELECT * FROM silnt.payjoin_contacts
-           WHERE (requester_user_id = :a AND target_user_id = :b)
-              OR (requester_user_id = :b AND target_user_id = :a)""",
-        {"a": a_user_id, "b": b_user_id},
+           WHERE network = :net
+             AND ((requester_user_id = :a AND target_user_id = :b)
+               OR (requester_user_id = :b AND target_user_id = :a))""",
+        {"a": a_user_id, "b": b_user_id, "net": network},
     )
     return PayjoinContact(**row) if row else None
 
@@ -2574,15 +2588,16 @@ async def get_payjoin_contact_labels(labeler_user_id: str) -> dict:
     return {r["contact_id"]: r["label"] for r in rows}
 
 
-async def list_payjoin_contacts(user_id: str) -> dict:
-    """All connections touching this user, grouped. Returns raw rows with the
-    counterparty_user_id annotated; the endpoint resolves usernames for display
-    (so usernames are never stored, only resolved on demand)."""
+async def list_payjoin_contacts(user_id: str, network: str) -> dict:
+    """This user's connections ON ONE NETWORK, grouped. Returns raw rows with
+    the counterparty_user_id annotated; the endpoint resolves usernames for
+    display (so usernames are never stored, only resolved on demand)."""
     rows = await db.fetchall(
         """SELECT * FROM silnt.payjoin_contacts
-           WHERE requester_user_id = :uid OR target_user_id = :uid
+           WHERE network = :net
+             AND (requester_user_id = :uid OR target_user_id = :uid)
            ORDER BY updated_at DESC""",
-        {"uid": user_id},
+        {"uid": user_id, "net": network},
     )
     accepted, incoming, outgoing, declined = [], [], [], []
     for r in rows:
@@ -2601,13 +2616,17 @@ async def list_payjoin_contacts(user_id: str) -> dict:
     return {"accepted": accepted, "incoming": incoming, "outgoing": outgoing, "declined": declined}
 
 
-async def list_accepted_contacts_with_ids(user_id: str) -> list[dict]:
-    """ACCEPTED connections: [{contact_id, user_id}] where user_id is the
-    counterparty. Lets the endpoint attach this user's private label + username."""
+async def list_accepted_contacts_with_ids(
+    user_id: str, network: str
+) -> list[dict]:
+    """ACCEPTED connections ON ONE NETWORK: [{contact_id, user_id}] where
+    user_id is the counterparty. Lets the endpoint attach this user's private
+    label + username."""
     rows = await db.fetchall(
         """SELECT * FROM silnt.payjoin_contacts
-           WHERE status = 'ACCEPTED' AND (requester_user_id = :uid OR target_user_id = :uid)""",
-        {"uid": user_id},
+           WHERE status = 'ACCEPTED' AND network = :net
+             AND (requester_user_id = :uid OR target_user_id = :uid)""",
+        {"uid": user_id, "net": network},
     )
     out = []
     for r in rows:
@@ -2617,12 +2636,19 @@ async def list_accepted_contacts_with_ids(user_id: str) -> list[dict]:
     return out
 
 
-async def list_accepted_contact_user_ids(user_id: str) -> list[str]:
-    """user_ids of this user's ACCEPTED connections (counterparties)."""
+async def list_accepted_contact_user_ids(user_id: str, network: str) -> list[str]:
+    """user_ids of this user's ACCEPTED connections (counterparties) ON ONE
+    NETWORK.
+
+    This is the consent check a Tango and a PayJoin invoice are gated on, so
+    the network is required rather than optional: unscoped, it let a signet
+    connection authorise a mainnet round.
+    """
     rows = await db.fetchall(
         """SELECT * FROM silnt.payjoin_contacts
-           WHERE status = 'ACCEPTED' AND (requester_user_id = :uid OR target_user_id = :uid)""",
-        {"uid": user_id},
+           WHERE status = 'ACCEPTED' AND network = :net
+             AND (requester_user_id = :uid OR target_user_id = :uid)""",
+        {"uid": user_id, "net": network},
     )
     out = []
     for r in rows:

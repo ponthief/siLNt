@@ -240,3 +240,24 @@ def test_m036_clears_the_label_flag_for_the_date_marker():
     assert "change_labelled = FALSE" in joined
     assert "WHERE status = 'BROADCAST'" in joined
     assert "DELETE" not in joined.upper()
+
+
+def test_m037_scopes_connections_per_network():
+    """One row per pair per network, not one row in total. Without this a
+    signet connection was a connection on mainnet too, and removing it on
+    either removed it on both."""
+    mod = _load_migrations()
+    db = _FakeDB()
+    asyncio.run(mod.m037_payjoin_contacts_network(db))
+    joined = " ".join(" ".join(db.sql).split())
+    assert "ALTER TABLE silnt.payjoin_contacts ADD COLUMN network" in joined
+    # Existing rows have to land somewhere; signet is the documented guess.
+    assert "DEFAULT 'signet'" in joined
+    # The lookups are all per-user-per-network, so the index carries it.
+    for idx in ("idx_payjoin_contacts_req", "idx_payjoin_contacts_tgt"):
+        assert f"CREATE INDEX {idx}" in joined, idx
+        assert f"DROP INDEX IF EXISTS silnt.{idx}" in joined, idx
+    assert "network, status" in joined
+    # Never destructive: connections are not rebuilt, only labelled.
+    assert "DELETE" not in joined.upper()
+    assert "DROP TABLE" not in joined.upper()

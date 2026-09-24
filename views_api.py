@@ -3313,6 +3313,34 @@ async def api_payjoin_utxos(
 
 
 # ── propose (sender) ──────────────────────────────────────────────────────────
+async def _contacts_across(uid: str, network: Optional[str]) -> dict:
+    """This user's connections, on one network or on all of them.
+
+    The "all" case is only for a client too old to say which network it is on.
+    Rows are per-network since m037, so the union is a view no screen should
+    want: it is what showed signet accounts in the mainnet app.
+    """
+    if network:
+        return await list_payjoin_contacts(uid, network)
+    merged = {"accepted": [], "incoming": [], "outgoing": [], "declined": []}
+    for net in sorted({w.network for w in await get_silnt_wallets(uid) if w.network}):
+        part = await list_payjoin_contacts(uid, net)
+        for key, rows in part.items():
+            merged.setdefault(key, []).extend(rows)
+    return merged
+
+
+async def _accepted_across(uid: str, network: Optional[str]) -> list:
+    """Accepted connections, on one network or on all of them. Same reasoning
+    as _contacts_across."""
+    if network:
+        return await list_accepted_contacts_with_ids(uid, network)
+    out = []
+    for net in sorted({w.network for w in await get_silnt_wallets(uid) if w.network}):
+        out.extend(await list_accepted_contacts_with_ids(uid, net))
+    return out
+
+
 @silnt_api_router.post("/api/v1/payjoin/contacts")
 async def api_payjoin_contact_request(
     data: CreateContactData,
@@ -3354,40 +3382,17 @@ async def api_payjoin_contact_request(
             detail=f"No account here is called '{username}'. Check the spelling.",
         )
 
-    # IS THERE ALREADY SOMETHING BETWEEN US? create_payjoin_contact returns the
-    # existing row when one exists, in either direction and in any status, and
-    # this endpoint used to answer "sent" regardless — so asking again someone
-    # who had declined, or someone who had asked YOU, reported success and did
-    # nothing. Two requests, one new pending row, no way to tell which landed.
-    from .helpers.connections import may_reopen, refusal_for_existing
-
-    existing = await get_payjoin_contact_between(uid, target_id)
-    mine_to_reopen = existing and may_reopen(
-        existing.status, existing.requester_user_id == uid
-    )
-    if existing and not mine_to_reopen:
-        why = refusal_for_existing(
-            existing.status, existing.requester_user_id == uid, username
-        )
-        if why:
-            raise HTTPException(status_code=HTTPStatus.CONFLICT, detail=why)
-
-    # AND THEY HAVE TO BE ON THE NETWORK YOU ARE ON. An LNbits account is
-    # global; a siLNt wallet belongs to one network. A connection to somebody
-    # whose only wallet is on another network looks exactly like a working one
-    # — it sits pending, they can approve it, they appear in the partner picker
-    # — and then every Tango with them is refused, because /accept requires
-    # both wallets on the round's network.
+    # WHICH NETWORK IS THIS CONNECTION ON. Settled before anything else is
+    # looked up, because a connection belongs to one network since m037 and
+    # every question below is asked of that network alone: whether a row
+    # already exists between these two, and whether the other person could
+    # take part at all.
     #
-    # WHICH NETWORK IS "YOURS" IS THE WHOLE OF THIS. The first version of this
-    # check took every network the caller had a wallet on, which is wrong for
-    # the case it was written for: an account that has been used for testing
-    # holds a signet wallet and a mainnet wallet at once, so the mainnet app
-    # asking about a signet-only user found signet in that set and allowed it.
-    # The app is network-locked per build even though the account is not, so
-    # the client says which one it is on — and is believed only so far as its
-    # own wallets bear it out, which means naming a network you are not on
-    # gains nothing.
+    # An LNbits account is global; a siLNt wallet belongs to one network. The
+    # app is network-locked per build even though the account is not, so the
+    # client says which one it is on. It is believed only so far as the
+    # caller's own wallets bear it out — naming a network you have no wallet on
+    # is refused rather than trusted, so the claim gains nothing.
     my_networks = {w.network for w in await get_silnt_wallets(uid) if w.network}
     if not my_networks:
         raise HTTPException(
@@ -3400,33 +3405,66 @@ async def api_payjoin_contact_request(
             status_code=HTTPStatus.BAD_REQUEST,
             detail=f"You have no wallet on {asked}.",
         )
-    # No network from the client means an older build; the union is the best it
-    # can do, and it is what that build already got.
-    scope = {asked} if asked else my_networks
-
-    shared = False
-    for net in scope:
-        if target_id in set(await list_silnt_user_ids_for_network(net)):
-            shared = True
-            break
-    if not shared:
-        where = " or ".join(sorted(scope))
+    if asked:
+        on = asked
+    elif len(my_networks) == 1:
+        # An older client, on an account with nowhere else it could mean.
+        on = next(iter(my_networks))
+    else:
+        # An older client on an account with wallets on several networks. There
+        # is no right guess here, and guessing is what produced a connection
+        # that belonged to every network at once.
         raise HTTPException(
-            status_code=HTTPStatus.NOT_FOUND,
+            status_code=HTTPStatus.BAD_REQUEST,
             detail=(
-                f"'{username}' has an account but no wallet on {where}, so a "
-                f"Tango with them could never be built. Ask them to open the "
-                f"app on {where} first."
+                "This app is too old to say which network it is on, and your "
+                "account has wallets on more than one. Update the app."
             ),
         )
 
-    # The network check above has to come first either way: reopening a row
-    # towards somebody off-network would make a pending request that could
-    # never produce a round, which is the thing that check exists to prevent.
+    # IS THERE ALREADY SOMETHING BETWEEN US, ON THIS NETWORK? The same two
+    # people may be connected on signet and strangers on mainnet, so the answer
+    # has to come from this network's row and not the other's.
+    #
+    # create_payjoin_contact returns the existing row when one exists, in
+    # either direction and in any status, and this endpoint used to answer
+    # "sent" regardless — so asking again someone who had declined, or someone
+    # who had asked YOU, reported success and did nothing.
+    from .helpers.connections import may_reopen, refusal_for_existing
+
+    existing = await get_payjoin_contact_between(uid, target_id, on)
+    mine_to_reopen = existing and may_reopen(
+        existing.status, existing.requester_user_id == uid
+    )
+    if existing and not mine_to_reopen:
+        why = refusal_for_existing(
+            existing.status, existing.requester_user_id == uid, username
+        )
+        if why:
+            raise HTTPException(status_code=HTTPStatus.CONFLICT, detail=why)
+
+    # AND THEY HAVE TO BE ON IT TOO. A connection to somebody whose only wallet
+    # is on another network looks exactly like a working one — it sits pending,
+    # they can approve it, they appear in the partner picker — and then every
+    # Tango with them is refused, because /accept requires both wallets on the
+    # round's network.
+    if target_id not in set(await list_silnt_user_ids_for_network(on)):
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail=(
+                f"'{username}' has an account but no wallet on {on}, so a "
+                f"Tango with them could never be built. Ask them to open the "
+                f"app on {on} first."
+            ),
+        )
+
+    # After the network check either way: reopening a row towards somebody
+    # off-network would make a pending request that could never produce a
+    # round, which is the thing that check exists to prevent.
     if mine_to_reopen:
         await reopen_payjoin_contact(existing.id, uid, target_id)
     elif target_id != uid:
-        await create_payjoin_contact(uid, target_id)
+        await create_payjoin_contact(uid, target_id, on)
     return {"status": "sent", "username": username}
 
 
@@ -3439,19 +3477,25 @@ async def api_payjoin_contacts(
     Usernames + this user's private labels resolved here (never stored
     together).
 
-    With `network`, each row also carries `on_network`: whether that person has
-    a wallet there. ANNOTATED, NOT FILTERED, and the difference matters —
-    connections made before the request endpoint started refusing off-network
-    ones are still here, and hiding them would leave the user unable to see or
-    remove the very rows that are getting in their way. The pickers exclude
-    them; this list shows them and says why.
+    SCOPED to `network`: a connection belongs to one network since m037, and
+    listing another network's connections here is what put signet accounts on
+    the mainnet app — where the only honest thing to say about them was "not on
+    mainnet", and removing one removed it on signet too, because there was only
+    ever the one row. Without `network`, every connection, which is what an
+    older client already gets.
+
+    Each row still carries `on_network`: whether that person has a wallet there
+    NOW. A connection is only made when they do, so this is about somebody who
+    has since removed their wallet — annotated rather than filtered, so the
+    user can see why a connection has stopped being useful and remove it. The
+    pickers leave them out.
     """
     uid = key_info.wallet.user
-    res = await list_payjoin_contacts(uid)
+    asked = (network or "").strip().lower() or None
+    res = await _contacts_across(uid, asked)
     labels = await get_payjoin_contact_labels(uid)
 
     on_network = None
-    asked = (network or "").strip().lower() or None
     if asked:
         on_network = set(await list_silnt_user_ids_for_network(asked))
 
@@ -3541,11 +3585,11 @@ async def api_payjoin_payers(
     every connection, which is what older clients already get.
     """
     uid = key_info.wallet.user
-    pairs = await list_accepted_contacts_with_ids(uid)
+    asked = (network or "").strip().lower() or None
+    pairs = await _accepted_across(uid, asked)
     labels = await get_payjoin_contact_labels(uid)
 
     on_network = None
-    asked = (network or "").strip().lower() or None
     if asked:
         on_network = set(await list_silnt_user_ids_for_network(asked))
 
@@ -3584,11 +3628,18 @@ async def api_payjoin_create_invoice(
     if payer.id == payee_uid:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="You can't invoice yourself.")
 
-    # payer must be an accepted connection (consent-based; no invoicing strangers)
-    connected = await list_accepted_contact_user_ids(payee_uid)
+    # payer must be an accepted connection ON THIS DESCRIPTOR'S NETWORK
+    # (consent-based; no invoicing strangers, and no borrowing consent given
+    # for another network).
+    connected = await list_accepted_contact_user_ids(payee_uid, rd.network)
     if payer.id not in set(connected):
-        raise HTTPException(status_code=HTTPStatus.FORBIDDEN,
-                            detail="You can only invoice a connected user. Send a connection request first.")
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN,
+            detail=(
+                f"You can only invoice someone you are connected to on "
+                f"{rd.network}. Send a connection request first."
+            ),
+        )
 
     # A's contributed input must not already be reserved
     reserved = await get_reserved_outpoints(payee_uid)
@@ -4703,11 +4754,15 @@ async def api_tango_propose(
                    "be yours, so there is nothing for anyone to be unsure "
                    "about.",
         )
-    if partner.id not in set(await list_accepted_contact_user_ids(uid)):
+    # On THIS network. A connection is per-network since m037, so a signet
+    # connection no longer authorises a mainnet round.
+    if partner.id not in set(
+        await list_accepted_contact_user_ids(uid, wallet.network)
+    ):
         raise HTTPException(
             status_code=HTTPStatus.FORBIDDEN,
-            detail="You can only Tango with a connected user. Send a "
-                   "connection request first.",
+            detail=f"You can only Tango with someone you are connected to on "
+                   f"{wallet.network}. Send a connection request first.",
         )
 
     rows = [i.dict() for i in data.inputs]

@@ -517,6 +517,11 @@ class PayjoinContact(BaseModel):
     status: str
     requester_user_id: str
     target_user_id: str
+    # Which network this connection is on. Added by m037: there used to be one
+    # row per pair and nothing to say where it belonged, so a connection made
+    # on signet was a connection on mainnet too, and severing it on either
+    # severed it on both. Defaulted for rows read back before the migration.
+    network: str = "signet"
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

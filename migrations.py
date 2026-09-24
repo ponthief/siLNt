@@ -1111,3 +1111,42 @@ async def m036_date_tango_labels(db):
         WHERE status = 'BROADCAST'
         """
     )
+
+
+async def m037_payjoin_contacts_network(db):
+    """Scope connections per network.
+
+    There was one row per pair of users and nothing on it to say which network
+    it belonged to, so a connection made on signet was a connection everywhere.
+    It showed up in the mainnet app — where the only honest thing that could be
+    said about it was "not on mainnet" — and removing it there removed it on
+    signet too, because there was only ever the one row.
+
+    Same fix and the same reasoning as m024 did for the SP address book: add
+    the column, carry the indexes over with it, and let a pair hold one row per
+    network rather than one row in total.
+
+    EXISTING ROWS GO TO SIGNET, and that is a guess. Nothing on a row says
+    where it was made, and every one of them predates this column; the instance
+    has been on signet for all but the last few days of its life, so signet is
+    right for nearly all of them and wrong for any connection made from the
+    mainnet build in between. Those have to be made again on mainnet — which is
+    a request and an approval, not a loss. The alternative, leaving them
+    unscoped and visible everywhere, is the behaviour being fixed.
+    """
+    await db.execute(
+        "ALTER TABLE silnt.payjoin_contacts "
+        "ADD COLUMN network TEXT NOT NULL DEFAULT 'signet';"
+    )
+    # The lookups are all "this user's connections on this network", so the
+    # network belongs in the index rather than beside it.
+    await db.execute("DROP INDEX IF EXISTS silnt.idx_payjoin_contacts_req")
+    await db.execute("DROP INDEX IF EXISTS silnt.idx_payjoin_contacts_tgt")
+    await db.execute(
+        "CREATE INDEX idx_payjoin_contacts_req ON silnt.payjoin_contacts "
+        "(requester_user_id, network, status);"
+    )
+    await db.execute(
+        "CREATE INDEX idx_payjoin_contacts_tgt ON silnt.payjoin_contacts "
+        "(target_user_id, network, status);"
+    )
