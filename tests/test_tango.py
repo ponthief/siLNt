@@ -265,3 +265,98 @@ def test_either_side_may_walk_away_until_it_is_broadcast():
     for s in (tango.PROPOSED, tango.ACCEPTED, tango.A_SIGNED):
         assert tango.can_cancel(s)
     assert not tango.can_cancel(tango.BROADCAST)
+
+
+# ── a whole round, signed by both sides ──────────────────────────────────────
+#
+# The arithmetic tests above say the plan is right. This says the transaction
+# built from it is one the network would accept: real derivations from real
+# scan keys, real BIP-341 signatures, verified the way the endpoint verifies
+# them. It is the closest thing to a live round that runs without a database.
+
+
+def even_secret(secret: bytes) -> bytes:
+    key = coincurve.PrivateKey(secret)
+    if key.public_key.format(compressed=True)[0] == 0x02:
+        return secret
+    return ((N - int.from_bytes(secret, "big")) % N).to_bytes(32, "big")
+
+
+def spend_pub(secret: bytes) -> bytes:
+    return coincurve.PrivateKey(secret).public_key.format(compressed=True)
+
+
+def label_pub(scan: bytes, m: int = 0) -> bytes:
+    tweak = int.from_bytes(
+        wallet.tagged_hash("BIP0352/Label", scan + m.to_bytes(4, "big")), "big"
+    ) % N
+    return coincurve.PublicKey.from_secret(tweak.to_bytes(32, "big")).format(True)
+
+
+A_SCAN, A_SPEND = bytes([0x11]) * 32, bytes([0x12]) * 32
+B_SCAN, B_SPEND = bytes([0x21]) * 32, bytes([0x22]) * 32
+
+
+def test_a_full_round_signs_verifies_and_finalises():
+    a_in = [coin(0xA1, 400_000, A_SECRET)]
+    b_in = [coin(0xB1, 300_000, B_SECRET)]
+    all_in = a_in + b_in
+    amounts = tango.plan(a_in, b_in, 25_000, 2)
+    assert not amounts["clean"], "this case is meant to exercise change"
+
+    # Each side derives its OWN two outputs, from its own scan key and the
+    # shared public input set. Neither could compute the other's.
+    a_mix = tango.payment_script(A_SCAN, spend_pub(A_SPEND), all_in)
+    b_mix = tango.payment_script(B_SCAN, spend_pub(B_SPEND), all_in)
+    a_chg = tango.change_script(A_SCAN, spend_pub(A_SPEND), label_pub(A_SCAN), all_in)
+    b_chg = tango.change_script(B_SCAN, spend_pub(B_SPEND), label_pub(B_SCAN), all_in)
+    assert len({a_mix, b_mix, a_chg, b_chg}) == 4
+
+    tx = tango.assemble(all_in, amounts, a_mix, b_mix, a_chg, b_chg)
+    digests = tango.sighashes(tx, all_in)
+
+    def sign(secret, indices):
+        key = coincurve.PrivateKey(even_secret(secret))
+        return {str(n): key.sign_schnorr(digests[n]).rjust(64, b"\x00").hex()
+                for n in indices}
+
+    a_idx = tango.owner_indices(all_in, a_in)
+    b_idx = tango.owner_indices(all_in, b_in)
+    a_w = tango.verify_witnesses(tx, all_in, sign(A_SECRET, a_idx), a_idx)
+    b_w = tango.verify_witnesses(tx, all_in, sign(B_SECRET, b_idx), b_idx)
+
+    tx_hex = tango.finalize(tx, {**a_w, **b_w})
+    from embit.transaction import Transaction
+
+    parsed = Transaction.from_string(tx_hex)
+    assert all(len(v.witness.items) == 1 for v in parsed.vin)
+    # Two outputs at the denomination, and they are the only equal pair.
+    values = sorted(o.value for o in parsed.vout)
+    assert values.count(amounts["denom"]) == 2
+
+
+def test_a_clean_round_has_exactly_two_outputs():
+    """No change on either side: two inputs, two identical outputs, nothing for
+    an observer to solve. This is the shape Tango is actually for."""
+    rough = tango.plan([coin(0xA1, 400_000, A_SECRET)],
+                       [coin(0xB1, 300_000, B_SECRET)], 25_000, 2)
+    a_in = [coin(0xA1, 25_000 + rough["a_fee"], A_SECRET)]
+    b_in = [coin(0xB1, 25_000 + rough["b_fee"], B_SECRET)]
+    amounts = tango.plan(a_in, b_in, 25_000, 2)
+    assert amounts["clean"], amounts
+
+    all_in = a_in + b_in
+    a_mix = tango.payment_script(A_SCAN, spend_pub(A_SPEND), all_in)
+    b_mix = tango.payment_script(B_SCAN, spend_pub(B_SPEND), all_in)
+    tx = tango.assemble(all_in, amounts, a_mix, b_mix)
+    assert len(tx.vout) == 2
+    assert {o.value for o in tx.vout} == {amounts["denom"]}
+
+
+def test_neither_side_can_derive_the_others_output():
+    """The property the mix depends on. If A could compute B's output, A would
+    know which of the two is B's — and the anonymity set would be one."""
+    all_in = [coin(0xA1, 400_000, A_SECRET), coin(0xB1, 300_000, B_SECRET)]
+    b_mix = tango.payment_script(B_SCAN, spend_pub(B_SPEND), all_in)
+    forged = tango.payment_script(A_SCAN, spend_pub(B_SPEND), all_in)
+    assert forged != b_mix

@@ -710,3 +710,87 @@ class SignPayjoinSpData(BaseModel):
     #
     # Optional so an older client still works; it just gets the vaguer error.
     unsigned_tx: Optional[str] = None
+
+
+# ── Tango ────────────────────────────────────────────────────────────────────
+# A two-party equal-output mix. Same no-Field-constraints rule as the SP
+# PayJoin models above: the shapes are checked by helpers/payjoin_sp.py's
+# validate_wire_inputs and validate_spk, which behave the same under either
+# Pydantic and are tested. gt/ge stay, because both versions enforce them.
+class TangoRound(BaseModel):
+    id: str
+    status: str = "PROPOSED"
+    network: str = "signet"
+    a_user_id: str
+    a_username: str
+    a_wallet_id: str
+    b_user_id: Optional[str] = None
+    b_username: str
+    b_wallet_id: Optional[str] = None
+    denom_sats: int
+    fee_rate: float
+    a_in_sats: Optional[int] = None
+    b_in_sats: Optional[int] = None
+    a_change_sats: Optional[int] = None
+    b_change_sats: Optional[int] = None
+    a_fee_sats: Optional[int] = None
+    b_fee_sats: Optional[int] = None
+    fee_sats: Optional[int] = None
+    vsize: Optional[int] = None
+    clean: Optional[bool] = None
+    a_inputs: Optional[str] = None
+    b_inputs: Optional[str] = None
+    a_mix_spk: Optional[str] = None
+    a_change_spk: Optional[str] = None
+    b_mix_spk: Optional[str] = None
+    b_change_spk: Optional[str] = None
+    a_witnesses: Optional[str] = None
+    b_witnesses: Optional[str] = None
+    unsigned_tx: Optional[str] = None
+    tx_hex: Optional[str] = None
+    txid: Optional[str] = None
+    change_labelled: Optional[bool] = False
+    reject_reason: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    expires_at: Optional[int] = None
+
+
+class ProposeTangoData(BaseModel):
+    """A invites B to mix. A cannot derive anything yet: half the input set
+    does not exist until B accepts."""
+    wallet_id: str
+    partner_username: str
+    denom_sats: int = Field(gt=0)
+    fee_rate: float = Field(gt=0)
+    inputs: List[PayjoinSpInput]
+    network: str = "signet"
+
+
+class AcceptTangoData(BaseModel):
+    """B matches the denomination and, in the same call, derives both of its
+    outputs -- this is the first moment the whole input set exists.
+
+    change_spk is absent when B's coins covered the denomination and its fee
+    share exactly, which is the strongest kind of round.
+    """
+    wallet_id: str
+    inputs: List[PayjoinSpInput]
+    mix_spk: str
+    change_spk: Optional[str] = None
+
+
+class SignTangoData(BaseModel):
+    """Witnesses for the caller's own inputs.
+
+    A sends its two derived scripts with them, for the same reason B sent its
+    at accept time: A could not derive before the set was frozen. B sends only
+    witnesses -- its scripts are already on the row.
+    """
+    witnesses: dict
+    mix_spk: Optional[str] = None
+    change_spk: Optional[str] = None
+    # What this device assembled and signed, so the server can name a
+    # disagreement instead of reporting that a signature failed. See
+    # payjoin_sp.explain_mismatch.
+    unsigned_tx: Optional[str] = None

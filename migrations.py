@@ -933,3 +933,101 @@ async def m032_payjoin_sp_offers(db):
         "CREATE INDEX idx_payjoin_sp_open "
         "ON silnt.payjoin_sp_requests (status, network, payee_user_id);"
     )
+
+
+async def m033_tango_rounds(db):
+    """Tango: a two-party equal-output mix.
+
+    Its own table rather than more columns on payjoin_sp_requests, because
+    almost nothing about the money is the same. A PayJoin has a payer, a payee,
+    a payment and one change; a Tango has two symmetric sides, one denomination
+    paid to BOTH of them, up to two changes and a fee split down the middle.
+    Modelling that as a PayJoin with nullable extras would leave every column
+    meaning one thing in one flow and another in the other.
+
+    The parties are `a` and `b`, not payer and payee, and that is deliberate:
+    neither pays the other. A is whoever proposed the round and B is whoever
+    was invited, which decides turn order and who owes the odd satoshi of fee,
+    and nothing else.
+
+    Both sides' derived scripts are stored: each has a MIX output at the
+    denomination, and a CHANGE output when their coins did not divide evenly.
+    The change is the leak in a two-party mix -- change plus mixed output is
+    that party's input total, and with two inputs an observer can often solve
+    it -- so `clean` records whether this round had any, and the clients say so
+    rather than implying every mix is a clean one.
+
+      PROPOSED   A named a denomination and picked its coins
+      ACCEPTED   B matched it, added coins and derived its two scripts. The
+                 input set is frozen: every SP output depends on all of it.
+      A_SIGNED   A derived its two scripts and signed its own inputs
+      BROADCAST  B signed and it went to the network
+      CANCELLED  either side walked away (terminal)
+    """
+    await db.execute(
+        f"""
+        CREATE TABLE silnt.tango_rounds (
+            id                  TEXT PRIMARY KEY,
+            status              TEXT NOT NULL DEFAULT 'PROPOSED',
+            network             TEXT NOT NULL,
+
+            a_user_id           TEXT NOT NULL,
+            a_username          TEXT NOT NULL,
+            a_wallet_id         TEXT NOT NULL,
+            b_user_id           TEXT,
+            b_username          TEXT NOT NULL,
+            b_wallet_id         TEXT,
+
+            -- What both sides get back. One number, not two, because two
+            -- different numbers would be two outputs an observer can tell
+            -- apart, which is the whole of what this feature sells.
+            denom_sats          {db.big_int} NOT NULL,
+            fee_rate            REAL NOT NULL,
+
+            a_in_sats           {db.big_int},
+            b_in_sats           {db.big_int},
+            a_change_sats       {db.big_int},
+            b_change_sats       {db.big_int},
+            a_fee_sats          {db.big_int},
+            b_fee_sats          {db.big_int},
+            fee_sats            {db.big_int},
+            vsize               {db.big_int},
+            -- True when neither side needed change. The honest measure of how
+            -- much this round actually hid.
+            clean               BOOLEAN,
+
+            a_inputs            TEXT,
+            b_inputs            TEXT,
+
+            a_mix_spk           TEXT,
+            a_change_spk        TEXT,
+            b_mix_spk           TEXT,
+            b_change_spk        TEXT,
+
+            a_witnesses         TEXT,
+            b_witnesses         TEXT,
+
+            unsigned_tx         TEXT,
+            tx_hex              TEXT,
+            txid                TEXT,
+
+            -- Set once the scanner has found a change output and labelled it,
+            -- so the labelling is attempted until it succeeds and not after.
+            change_labelled     BOOLEAN DEFAULT FALSE,
+
+            reject_reason       TEXT,
+            created_at          TIMESTAMP NOT NULL DEFAULT {db.timestamp_now},
+            updated_at          TIMESTAMP NOT NULL DEFAULT {db.timestamp_now},
+            expires_at          {db.big_int}
+        );
+        """
+    )
+    await db.execute(
+        "CREATE INDEX idx_tango_a ON silnt.tango_rounds (a_user_id, status);"
+    )
+    await db.execute(
+        "CREATE INDEX idx_tango_b ON silnt.tango_rounds (b_user_id, status);"
+    )
+    await db.execute(
+        "CREATE INDEX idx_tango_status ON silnt.tango_rounds (status, expires_at);"
+    )

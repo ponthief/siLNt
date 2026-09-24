@@ -174,6 +174,12 @@ from .crud import (
     list_payjoin_sp_for_payee,
     list_payjoin_sp_for_payer,
     get_reserved_sp_outpoints,
+    create_tango_round,
+    get_tango_round,
+    update_tango_round,
+    list_tango_rounds_for_user,
+    get_reserved_tango_outpoints,
+    label_utxo_by_pubkey,
     create_payjoin_sp_offer,
     list_payjoin_sp_offers,
     claim_payjoin_sp_offer,
@@ -259,6 +265,9 @@ from .models import (
     SignPayjoinSpData,
     OfferPayjoinSpData,
     ClaimPayjoinSpData,
+    ProposeTangoData,
+    AcceptTangoData,
+    SignTangoData,
     PayInvoiceData,
     SignPayjoinData,
     CreateContactData,
@@ -5053,4 +5062,502 @@ async def api_payjoin_sp_derive(
         "PayJoin ready",
         "The other side is ready. Open WhiSPa to sign.",
     )
+    return updated.dict()
+
+
+# ── Tango ────────────────────────────────────────────────────────────────────
+#
+# A two-party equal-output mix. Nobody pays anybody: both sides put in the same
+# amount and take the same amount back, so the two outputs are identical and an
+# observer cannot say which belongs to which input.
+#
+# The parties are `a` and `b`, not payer and payee. A proposed the round, B was
+# invited; that decides turn order and who owes the odd satoshi of fee, and
+# nothing else.
+#
+# SAME KEY RULES AS THE PAYJOIN. No request here carries a scan key, a spend
+# key or a tweak, and nothing here reads one. Each side derives its own two
+# outputs on its own device and signs its own inputs there. helpers/tango.py
+# imports the cryptography from payjoin_sp rather than restating it.
+#
+# THE ORDER IS FORCED, as it is for an advertised PayJoin. Every SP output
+# comes from the whole input set, so A cannot derive when it proposes — half
+# the set does not exist yet:
+#
+#   /rounds          A names a denomination and picks coins
+#   /accept          B matches it, adds coins AND derives both its scripts —
+#                    the first moment the complete set exists
+#   /sign  (A)       A derives its two scripts and signs its own inputs
+#   /sign  (B)       B signs; the two witness sets are combined and broadcast
+
+TANGO_EXPIRY_SECONDS = 86400
+TANGO_CHANGE_LABEL = "Tango change"
+
+
+def _tango_role(rnd, uid: str) -> Optional[str]:
+    if rnd.a_user_id == uid:
+        return "a"
+    if rnd.b_user_id == uid:
+        return "b"
+    return None
+
+
+def _tango_amounts(rnd) -> dict:
+    """The stored plan, in the shape helpers/tango.py returns."""
+    return {
+        "denom": rnd.denom_sats,
+        "a_in": rnd.a_in_sats,
+        "b_in": rnd.b_in_sats,
+        "a_change": rnd.a_change_sats or 0,
+        "b_change": rnd.b_change_sats or 0,
+        "a_fee": rnd.a_fee_sats,
+        "b_fee": rnd.b_fee_sats,
+        "fee": rnd.fee_sats,
+        "vsize": rnd.vsize,
+        "clean": bool(rnd.clean),
+    }
+
+
+def _tango_assemble(rnd):
+    """Rebuild the transaction from the row, every time.
+
+    Never stored and reloaded: what both sides sign has to be a function of the
+    frozen input set and the four scripts, and rebuilding is what makes that
+    true by construction rather than by hoping nothing wrote to the column.
+    """
+    from .helpers.tango import assemble
+
+    inputs = _pj_payjoin_inputs(_pj_inputs(rnd.a_inputs) + _pj_inputs(rnd.b_inputs))
+    return assemble(
+        inputs,
+        _tango_amounts(rnd),
+        bytes.fromhex(rnd.a_mix_spk),
+        bytes.fromhex(rnd.b_mix_spk),
+        bytes.fromhex(rnd.a_change_spk) if rnd.a_change_spk else None,
+        bytes.fromhex(rnd.b_change_spk) if rnd.b_change_spk else None,
+    )
+
+
+async def _tango_label_change(rnd) -> None:
+    """Mark each side's change coin once the scanner has found it.
+
+    Change is where a two-party mix leaks: change plus mixed output is that
+    party's input total, and with two inputs an observer can often solve which
+    is which. A user cannot avoid re-spending it carelessly if they cannot tell
+    which coin it is, so it gets a name.
+
+    Best-effort and idempotent. Called after broadcast — when the coin almost
+    certainly does not exist yet — and again whenever the round is fetched,
+    which is what eventually catches it. `change_labelled` stops it retrying
+    forever once both sides are done.
+    """
+    if rnd.status != "BROADCAST" or rnd.change_labelled:
+        return
+    done = True
+    for wallet_id, spk in (
+        (rnd.a_wallet_id, rnd.a_change_spk),
+        (rnd.b_wallet_id, rnd.b_change_spk),
+    ):
+        if not spk or not wallet_id:
+            continue
+        try:
+            # The scriptPubKey is OP_1 <32-byte key>; the utxos table stores the
+            # key, not the script.
+            found = await label_utxo_by_pubkey(
+                wallet_id, spk[4:], TANGO_CHANGE_LABEL
+            )
+            if not found:
+                done = False
+        except Exception as e:
+            logger.warning(f"tango {rnd.id}: could not label change: {e}")
+            done = False
+    if done:
+        await update_tango_round(rnd.id, change_labelled=True)
+
+
+async def _notify_tango(user_id: str, title: str, body: str) -> None:
+    """No amount, the same rule as every other push here."""
+    try:
+        from .crud import list_fcm_tokens_for_user
+        from .helpers.fcm import send_fcm
+
+        tokens = await list_fcm_tokens_for_user(user_id)
+        if tokens:
+            await send_fcm(tokens, title, body, {"type": "tango"})
+    except Exception as e:
+        logger.warning(f"tango push failed for {user_id}: {e}")
+
+
+async def _tango_refuse_reserved(user_id: str, rows: list) -> None:
+    reserved = await get_reserved_tango_outpoints(user_id)
+    reserved |= await get_reserved_sp_outpoints(user_id)
+    clash = [
+        f"{i['txid']}:{i['vout']}"
+        for i in rows
+        if f"{str(i['txid']).lower()}:{int(i['vout'])}" in reserved
+    ]
+    if clash:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=(
+                f"{'That coin is' if len(clash) == 1 else 'Those coins are'} "
+                f"already committed to another pending Tango or PayJoin."
+            ),
+        )
+
+
+@silnt_api_router.post("/api/v1/tango/rounds")
+async def api_tango_propose(
+    data: ProposeTangoData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """A invites B to mix at a chosen denomination."""
+    from .helpers.payjoin_sp import validate_wire_inputs
+    from .helpers.tango import plan
+
+    uid = key_info.wallet.user
+    wallet = await _pj_own_wallet(data.wallet_id, uid)
+
+    partner = await get_account_by_username(data.partner_username)
+    if not partner:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND, detail="That username does not exist."
+        )
+    if partner.id == uid:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Mixing with yourself changes nothing: both outputs would "
+                   "be yours, so there is nothing for anyone to be unsure "
+                   "about.",
+        )
+    if partner.id not in set(await list_accepted_contact_user_ids(uid)):
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN,
+            detail="You can only Tango with a connected user. Send a "
+                   "connection request first.",
+        )
+
+    rows = [i.dict() for i in data.inputs]
+    try:
+        validate_wire_inputs(rows, "inputs")
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+    await _pj_validate_inputs(data.wallet_id, rows)
+    await _tango_refuse_reserved(uid, rows)
+
+    # Priced against A's own coins standing in for B's, so an impossible
+    # denomination is refused now rather than by the person invited.
+    # Provisional: the real fee depends on how many coins B brings.
+    mine = _pj_payjoin_inputs(rows)
+    try:
+        plan(mine, mine, data.denom_sats, data.fee_rate)
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+
+    acct = await get_account(uid)
+    rnd = await create_tango_round(
+        network=wallet.network,
+        a_user_id=uid,
+        a_username=(acct.username if acct else None) or uid,
+        a_wallet_id=data.wallet_id,
+        b_user_id=partner.id,
+        b_username=data.partner_username,
+        denom_sats=data.denom_sats,
+        fee_rate=data.fee_rate,
+        a_inputs=rows,
+        expiry_seconds=TANGO_EXPIRY_SECONDS,
+    )
+    await _notify_tango(
+        partner.id, "Tango", "Someone wants to mix with you. Open WhiSPa to look."
+    )
+    return rnd.dict()
+
+
+@silnt_api_router.get("/api/v1/tango/rounds")
+async def api_tango_list(
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """Every round this user is in, either side."""
+    uid = key_info.wallet.user
+    rounds = await list_tango_rounds_for_user(uid)
+    out = []
+    for r in rounds:
+        row = r.dict()
+        row["role"] = _tango_role(r, uid)
+        out.append(row)
+    return {"rounds": out}
+
+
+@silnt_api_router.get("/api/v1/tango/rounds/{rid}")
+async def api_tango_get(
+    rid: str,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """One round, with which input positions are the caller's to sign.
+
+    Also the opportunistic moment to label a change coin: by the time someone
+    opens a finished round, the scanner has usually found it.
+    """
+    from .helpers.payjoin_sp import owner_indices
+
+    uid = key_info.wallet.user
+    rnd = await get_tango_round(rid)
+    role = _tango_role(rnd, uid) if rnd else None
+    if not rnd or not role:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Not found.")
+
+    await _tango_label_change(rnd)
+    rnd = await get_tango_round(rid)
+
+    out = rnd.dict()
+    out["role"] = role
+    a_rows = _pj_inputs(rnd.a_inputs)
+    b_rows = _pj_inputs(rnd.b_inputs)
+    if a_rows and b_rows:
+        all_inputs = _pj_payjoin_inputs(a_rows + b_rows)
+        mine = a_rows if role == "a" else b_rows
+        out["my_inputs"] = sorted(
+            owner_indices(all_inputs, _pj_payjoin_inputs(mine))
+        )
+    else:
+        out["my_inputs"] = []
+    return out
+
+
+@silnt_api_router.post("/api/v1/tango/rounds/{rid}/accept")
+async def api_tango_accept(
+    rid: str,
+    data: AcceptTangoData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """B matches the denomination and derives both of its outputs.
+
+    Both scripts arrive already derived because only B can compute them, and
+    this is the first moment it could: the input set is complete as of this
+    request and must not change afterwards.
+    """
+    from .helpers.payjoin_sp import validate_spk, validate_wire_inputs
+    from .helpers.tango import plan, require_turn
+
+    uid = key_info.wallet.user
+    rnd = await get_tango_round(rid)
+    if not rnd or rnd.b_user_id != uid:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Not found.")
+    try:
+        require_turn(rnd.status, "b")
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.CONFLICT, detail=str(e))
+    if rnd.expires_at and rnd.expires_at < int(time.time()):
+        raise HTTPException(
+            status_code=HTTPStatus.GONE, detail="This Tango has expired."
+        )
+
+    wallet = await _pj_own_wallet(data.wallet_id, uid)
+    if wallet.network != rnd.network:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"This Tango is on {rnd.network}; that wallet is not.",
+        )
+
+    rows = [i.dict() for i in data.inputs]
+    try:
+        validate_wire_inputs(rows, "inputs")
+        validate_spk(data.mix_spk, "mix_spk")
+        if data.change_spk:
+            validate_spk(data.change_spk, "change_spk")
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+    await _pj_validate_inputs(data.wallet_id, rows)
+    await _tango_refuse_reserved(uid, rows)
+
+    a_rows = _pj_inputs(rnd.a_inputs)
+    overlap = {(str(i["txid"]).lower(), int(i["vout"])) for i in rows} & {
+        (str(i["txid"]).lower(), int(i["vout"])) for i in a_rows
+    }
+    if overlap:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="A coin cannot be contributed by both sides.",
+        )
+
+    try:
+        amounts = plan(
+            _pj_payjoin_inputs(a_rows),
+            _pj_payjoin_inputs(rows),
+            rnd.denom_sats,
+            rnd.fee_rate,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+
+    if amounts["b_change"] and not data.change_spk:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"Your coins leave {amounts['b_change']} sats of change, so "
+                   f"this needs a change script.",
+        )
+
+    updated = await update_tango_round(
+        rid,
+        status="ACCEPTED",
+        b_wallet_id=data.wallet_id,
+        b_inputs=json.dumps(rows),
+        b_in_sats=amounts["b_in"],
+        a_change_sats=amounts["a_change"],
+        b_change_sats=amounts["b_change"],
+        a_fee_sats=amounts["a_fee"],
+        b_fee_sats=amounts["b_fee"],
+        fee_sats=amounts["fee"],
+        vsize=amounts["vsize"],
+        clean=amounts["clean"],
+        b_mix_spk=data.mix_spk.lower(),
+        b_change_spk=data.change_spk.lower() if data.change_spk else None,
+    )
+    await _notify_tango(
+        rnd.a_user_id, "Tango accepted",
+        "Your Tango was matched and is waiting for you to sign.",
+    )
+    return updated.dict()
+
+
+@silnt_api_router.post("/api/v1/tango/rounds/{rid}/sign")
+async def api_tango_sign(
+    rid: str,
+    data: SignTangoData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """Witnesses for the caller's own inputs. A goes first, with its scripts."""
+    from .helpers.payjoin_sp import (
+        explain_mismatch,
+        finalize,
+        owner_indices,
+        validate_spk,
+        verify_witnesses,
+    )
+    from .helpers.tango import require_turn
+
+    uid = key_info.wallet.user
+    rnd = await get_tango_round(rid)
+    role = _tango_role(rnd, uid) if rnd else None
+    if not rnd or not role:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Not found.")
+    try:
+        require_turn(rnd.status, role)
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.CONFLICT, detail=str(e))
+
+    if role == "a":
+        try:
+            validate_spk(data.mix_spk or "", "mix_spk")
+            if rnd.a_change_sats:
+                validate_spk(data.change_spk or "", "change_spk")
+        except ValueError as e:
+            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+        rnd = await update_tango_round(
+            rid,
+            a_mix_spk=data.mix_spk.lower(),
+            a_change_spk=data.change_spk.lower() if data.change_spk else None,
+        )
+
+    try:
+        tx = _tango_assemble(rnd)
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+
+    difference = explain_mismatch(tx, data.unsigned_tx or "")
+    if difference:
+        logger.warning(
+            f"tango {rid}: {role} signed a different transaction. "
+            f"server={tx.serialize().hex()} client={data.unsigned_tx}"
+        )
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"This device and the server disagree about the "
+                   f"transaction. {difference}",
+        )
+
+    a_rows = _pj_inputs(rnd.a_inputs)
+    b_rows = _pj_inputs(rnd.b_inputs)
+    all_inputs = _pj_payjoin_inputs(a_rows + b_rows)
+    mine = a_rows if role == "a" else b_rows
+    allowed = owner_indices(all_inputs, _pj_payjoin_inputs(mine))
+    try:
+        checked = verify_witnesses(tx, all_inputs, data.witnesses, allowed)
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+
+    witness_hex = {str(n): sig.hex() for n, sig in checked.items()}
+
+    if role == "a":
+        updated = await update_tango_round(
+            rid,
+            status="A_SIGNED",
+            a_witnesses=json.dumps(witness_hex),
+            unsigned_tx=tx.serialize().hex(),
+        )
+        await _notify_tango(
+            rnd.b_user_id, "Tango ready",
+            "The other side has signed. Open WhiSPa to finish it.",
+        )
+        return updated.dict()
+
+    other = {
+        int(k): bytes.fromhex(v)
+        for k, v in json.loads(rnd.a_witnesses or "{}").items()
+    }
+    try:
+        tx_hex = finalize(tx, {**other, **checked})
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+
+    txid = await _pj_broadcast(rnd.network, tx_hex)
+    await update_tango_round(
+        rid, status="BROADCAST", b_witnesses=json.dumps(witness_hex),
+        tx_hex=tx_hex, txid=txid,
+    )
+
+    for wallet_id, rows in ((rnd.a_wallet_id, a_rows), (rnd.b_wallet_id, b_rows)):
+        if not wallet_id:
+            continue
+        try:
+            await mark_utxos_spent_by_tx(
+                wallet_id=wallet_id,
+                input_outpoints=[(str(i["txid"]), int(i["vout"])) for i in rows],
+                spending_txid=txid,
+            )
+        except Exception as e:
+            logger.warning(f"tango {rid}: could not mark inputs spent: {e}")
+
+    final = await get_tango_round(rid)
+    await _tango_label_change(final)
+    await _notify_tango(
+        rnd.a_user_id, "Tango done", "Your Tango has been broadcast."
+    )
+    return (await get_tango_round(rid)).dict()
+
+
+@silnt_api_router.post("/api/v1/tango/rounds/{rid}/cancel")
+async def api_tango_cancel(
+    rid: str,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """Either side, until it is broadcast."""
+    from .helpers.tango import can_cancel
+
+    uid = key_info.wallet.user
+    rnd = await get_tango_round(rid)
+    role = _tango_role(rnd, uid) if rnd else None
+    if not rnd or not role:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Not found.")
+    if not can_cancel(rnd.status):
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=f"This Tango is already {rnd.status.lower()}.",
+        )
+    updated = await update_tango_round(
+        rid, status="CANCELLED", reject_reason=f"cancelled by {role}"
+    )
+    other = rnd.b_user_id if role == "a" else rnd.a_user_id
+    if other:
+        await _notify_tango(other, "Tango cancelled", "The other side cancelled a Tango.")
     return updated.dict()

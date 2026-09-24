@@ -26,6 +26,7 @@ from .models import (
 
 from .models import PayjoinDescriptor, PayjoinRequest, PayjoinContact
 from .models import PayjoinSpRequest
+from .models import TangoRound
 from embit.descriptor import Descriptor, Key
 from embit.descriptor.arguments import AllowedDerivation
 from embit.networks import NETWORKS
@@ -3393,3 +3394,152 @@ async def claim_payjoin_sp_offer(
     if row and row.status == "CLAIMED" and row.payer_user_id == payer_user_id:
         return row
     return None
+
+
+# ── Tango ────────────────────────────────────────────────────────────────────
+# A two-party equal-output mix. Stores public data only, as the PayJoin does:
+# outpoints, x-only keys, amounts, derived scripts, witnesses. Both sides
+# derive on their own devices and sign there. See migrations.py::m033.
+
+TANGO_LIVE = ("PROPOSED", "ACCEPTED", "A_SIGNED", "BROADCAST")
+
+
+async def create_tango_round(
+    *,
+    network: str,
+    a_user_id: str,
+    a_username: str,
+    a_wallet_id: str,
+    b_user_id: str,
+    b_username: str,
+    denom_sats: int,
+    fee_rate: float,
+    a_inputs: list,
+    expiry_seconds: int = 86400,
+) -> TangoRound:
+    rid = urlsafe_short_hash()
+    await db.execute(
+        """
+        INSERT INTO silnt.tango_rounds
+            (id, status, network,
+             a_user_id, a_username, a_wallet_id, b_user_id, b_username,
+             denom_sats, fee_rate, a_in_sats, a_inputs, expires_at)
+        VALUES
+            (:id, 'PROPOSED', :network,
+             :a_user_id, :a_username, :a_wallet_id, :b_user_id, :b_username,
+             :denom_sats, :fee_rate, :a_in_sats, :a_inputs, :expires_at)
+        """,
+        {
+            "id": rid,
+            "network": network,
+            "a_user_id": a_user_id,
+            "a_username": a_username,
+            "a_wallet_id": a_wallet_id,
+            "b_user_id": b_user_id,
+            "b_username": b_username,
+            "denom_sats": denom_sats,
+            "fee_rate": fee_rate,
+            "a_in_sats": sum(int(i["amount"]) for i in a_inputs),
+            "a_inputs": json.dumps(a_inputs),
+            "expires_at": int(time.time()) + expiry_seconds,
+        },
+    )
+    return await get_tango_round(rid)
+
+
+async def get_tango_round(rid: str) -> Optional[TangoRound]:
+    row = await db.fetchone(
+        "SELECT * FROM silnt.tango_rounds WHERE id = :id", {"id": rid}
+    )
+    return TangoRound(**row) if row else None
+
+
+async def update_tango_round(rid: str, **fields) -> Optional[TangoRound]:
+    if not fields:
+        return await get_tango_round(rid)
+    fields_sql = ", ".join(f"{k} = :{k}" for k in fields)
+    await db.execute(
+        f"UPDATE silnt.tango_rounds SET {fields_sql}, "
+        f"updated_at = {db.timestamp_now} WHERE id = :id",
+        {**fields, "id": rid},
+    )
+    return await get_tango_round(rid)
+
+
+async def list_tango_rounds_for_user(user_id: str) -> list[TangoRound]:
+    """Every round this user is in, either side. One list rather than two:
+    neither party pays the other, so "mine" and "theirs" is not a distinction
+    worth making in the UI."""
+    rows = await db.fetchall(
+        "SELECT * FROM silnt.tango_rounds "
+        "WHERE a_user_id = :uid OR b_user_id = :uid "
+        "ORDER BY created_at DESC",
+        {"uid": user_id},
+    )
+    return [TangoRound(**r) for r in rows]
+
+
+async def get_reserved_tango_outpoints(user_id: str) -> set:
+    """Coins this user has already committed to a live round.
+
+    Committed twice makes a transaction that cannot confirm, and both sides
+    would hear it from the network rather than from us. BROADCAST counts as
+    live because the spend is not confirmed yet.
+    """
+    placeholders = ", ".join(f"'{s}'" for s in TANGO_LIVE)
+    rows = await db.fetchall(
+        f"""
+        SELECT a_user_id, b_user_id, a_inputs, b_inputs
+        FROM silnt.tango_rounds
+        WHERE (a_user_id = :uid OR b_user_id = :uid)
+          AND status IN ({placeholders})
+        """,
+        {"uid": user_id},
+    )
+    reserved = set()
+    for r in rows:
+        cols = []
+        if r["a_user_id"] == user_id:
+            cols.append("a_inputs")
+        if r["b_user_id"] == user_id:
+            cols.append("b_inputs")
+        for col in cols:
+            raw = r[col]
+            if not raw:
+                continue
+            try:
+                for i in json.loads(raw):
+                    reserved.add(f"{i['txid']}:{i['vout']}")
+            except (ValueError, KeyError, TypeError):
+                continue
+    return reserved
+
+
+async def label_utxo_by_pubkey(
+    wallet_id: str, pub_key: str, label: str
+) -> int:
+    """Label a coin the scanner has found, by its on-chain key.
+
+    Used to mark a Tango's change the moment it turns up. The change is the
+    part of a two-party mix that leaks — change plus mixed output is that
+    party's input total — so the user should be able to see which coin it is
+    without reconstructing the round. Only writes where there is no label
+    already, so it never overwrites something the user typed.
+
+    Returns how many rows it touched: 0 means the scanner has not found it yet,
+    which is the normal case for the first minutes after a broadcast.
+    """
+    await db.execute(
+        """
+        UPDATE silnt.utxos SET label = :label
+        WHERE wallet_id = :wid AND pub_key = :pub
+          AND (label IS NULL OR label = '')
+        """,
+        {"wid": wallet_id, "pub": pub_key, "label": label},
+    )
+    rows = await db.fetchall(
+        "SELECT txid FROM silnt.utxos WHERE wallet_id = :wid AND pub_key = :pub "
+        "AND label = :label",
+        {"wid": wallet_id, "pub": pub_key, "label": label},
+    )
+    return len(rows)
