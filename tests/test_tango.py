@@ -400,16 +400,78 @@ def test_a_round_with_no_deadline_never_expires():
     assert not tango.is_expired(tango.PROPOSED, 0, 99_999)
 
 
-# ── the change label ─────────────────────────────────────────────────────────
+# ── the label pair, and what it is for ───────────────────────────────────────
+# A round's change and its mixed share add up to what that side put in. Spend
+# them together and the coin flip between the two identical outputs becomes a
+# certainty — retroactively, and no later mix puts it back. The labels exist so
+# a client can refuse that combination, so the format is load-bearing.
 
 
-def test_change_is_labelled_with_the_counterparty():
+def test_both_coins_are_named_after_the_counterparty():
+    assert tango.mix_label("alice") == "Tango mix - alice"
     assert tango.change_label("alice") == "Tango change - alice"
 
 
 def test_a_missing_username_still_names_the_coin():
-    """Better an unattributed "Tango change" than "Tango change - ", which
-    looks like the wallet lost something."""
-    assert tango.change_label(None) == "Tango change"
-    assert tango.change_label("") == "Tango change"
-    assert tango.change_label("   ") == "Tango change"
+    """Better an unattributed "Tango mix" than "Tango mix - ", which looks like
+    the wallet lost something."""
+    for f, bare in (
+        (tango.mix_label, "Tango mix"),
+        (tango.change_label, "Tango change"),
+    ):
+        assert f(None) == bare
+        assert f("") == bare
+        assert f("   ") == bare
+
+
+def test_a_share_with_its_own_change_is_refused():
+    assert tango.undoes_a_round(
+        ["Tango mix - alice", "Tango change - alice"]
+    ) == "alice"
+
+
+def test_a_share_with_someone_elses_change_is_refused_too():
+    """Two rounds with the same person are still one person. Pairing across
+    them links coins whose whole purpose was to be unlinkable, so the name is
+    the unit to refuse on rather than the round."""
+    assert tango.undoes_a_round(
+        ["Tango mix - alice", "Tango change - alice", "rent"]
+    ) == "alice"
+
+
+def test_two_shares_together_are_not_this_failure():
+    """Spending two mixed shares links them, which the generic multi-input
+    caution already says. It does not hand anyone the arithmetic."""
+    assert tango.undoes_a_round(["Tango mix - alice", "Tango mix - bob"]) is None
+
+
+def test_two_changes_together_are_not_this_failure():
+    assert tango.undoes_a_round(
+        ["Tango change - alice", "Tango change - bob"]
+    ) is None
+
+
+def test_a_share_and_an_unrelated_partners_change_is_allowed():
+    """alice's share plus bob's change reveals nothing about either round: the
+    sums do not meet."""
+    assert tango.undoes_a_round(
+        ["Tango mix - alice", "Tango change - bob"]
+    ) is None
+
+
+def test_unnamed_tango_coins_still_pair():
+    """Labelled before the username was carried, or by a wallet that had no
+    name to use. Still the same two coins."""
+    assert tango.undoes_a_round(["Tango mix", "Tango change"]) == "someone"
+
+
+def test_ordinary_coins_are_left_alone():
+    assert tango.undoes_a_round([]) is None
+    assert tango.undoes_a_round(["", None, "salary", "Tango"]) is None
+
+
+def test_a_label_that_merely_mentions_tango_is_not_one():
+    """Substring matching here would refuse a coin the user named themselves."""
+    assert tango.undoes_a_round(
+        ["my Tango mix - alice", "Tango change - alice"]
+    ) is None

@@ -3254,20 +3254,24 @@ async def list_expired_tango_rounds(now: int, limit: int = 200) -> list[TangoRou
 async def list_tango_rounds_awaiting_change_label(
     limit: int = 200,
 ) -> list[TangoRound]:
-    """Broadcast rounds whose change coin still has no name.
+    """Broadcast rounds whose coins still have no name.
 
-    A round is labelled when the scanner has found the coin, which is minutes
-    to hours after the broadcast that created it. Waiting for someone to open
-    that particular round again is waiting for the one thing they have no
-    reason to do — it is finished, so they close the app. The sweeper picks
-    these up instead.
+    Both the mixed share and the change, which is why there is no condition on
+    a change script here: a round that left neither side with change still has
+    two shares to name, and naming them is what lets a client refuse the one
+    combination that would undo the round.
+
+    A coin is labelled when the scanner has found it, which is minutes to hours
+    after the broadcast that created it. Waiting for someone to open that
+    particular round again is waiting for the one thing they have no reason to
+    do — it is finished, so they close the app. The sweeper picks these up
+    instead.
     """
     rows = await db.fetchall(
         f"""
         SELECT * FROM silnt.tango_rounds
         WHERE status = 'BROADCAST'
           AND COALESCE(change_labelled, FALSE) = FALSE
-          AND (a_change_spk IS NOT NULL OR b_change_spk IS NOT NULL)
         ORDER BY updated_at DESC
         LIMIT {int(limit)}
         """,

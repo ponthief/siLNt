@@ -108,28 +108,58 @@ def can_cancel(status: str) -> bool:
     return status not in TERMINAL
 
 
+MIX_LABEL = "Tango mix"
 CHANGE_LABEL = "Tango change"
 
 
-def change_label(other_username: Optional[str]) -> str:
-    """The name a change coin gets: "Tango change - alice".
-
-    WHO, not just what. "Tango change" says the coin is change from a mix but
-    not from WHICH mix, and after a second round that is the question you
-    actually have — a change coin and the mixed coin from the SAME round add up
-    to what you put into it, so spending those two together is the one
-    combination that undoes the round. The counterparty's name is what makes
-    two change coins tellable apart.
-
-    Stored server-side, unlike the clients' own transaction labels, and that is
-    not an inconsistency. Those are device-only because a txid to "who I paid"
-    map would be a new fact about a payment the server never saw. Here the
-    server coordinated the round: silnt.tango_rounds already holds both
-    usernames next to both input sets, so the label adds nothing it did not
-    write itself.
-    """
+def _named(prefix: str, other_username: Optional[str]) -> str:
     who = (other_username or "").strip()
-    return f"{CHANGE_LABEL} - {who}" if who else CHANGE_LABEL
+    return f"{prefix} - {who}" if who else prefix
+
+
+def mix_label(other_username: Optional[str]) -> str:
+    """The name the mixed share gets: "Tango mix - alice"."""
+    return _named(MIX_LABEL, other_username)
+
+
+def change_label(other_username: Optional[str]) -> str:
+    """The name a change coin gets: "Tango change - alice"."""
+    return _named(CHANGE_LABEL, other_username)
+
+
+def undoes_a_round(labels) -> Optional[str]:
+    """The counterparty whose round a selection of coins would undo, if any.
+
+    THE FAILURE THIS IS FOR. A round's own change and its own mixed share add
+    up to what that side put in. On chain the two mixed outputs are identical,
+    so which one is yours is a coin flip — until you spend your change together
+    with your share. That single transaction says "one owner", the arithmetic
+    then says which input total that owner had, and the coin flip becomes a
+    certainty. It does not weaken the round; it undoes it, retroactively, and
+    no later mix puts it back.
+
+    Same-name granularity on purpose. Two rounds with the same person produce
+    two changes and two shares, and pairing them across rounds still links
+    coins whose whole purpose was to be unlinkable — so the name is the right
+    unit to refuse on. It is also all a client has: a coin's label is what the
+    wallet knows about it, and asking the server which round a coin came from
+    would put the question back on the machine that already knows too much.
+
+    Returns the counterparty's name, or None when the selection is safe.
+    """
+    mixed = {}
+    changed = {}
+    for raw in labels:
+        text = (raw or "").strip()
+        for prefix, bucket in ((MIX_LABEL, mixed), (CHANGE_LABEL, changed)):
+            if text == prefix:
+                bucket[""] = True
+            elif text.startswith(f"{prefix} - "):
+                bucket[text[len(prefix) + 3 :].strip()] = True
+    for who in changed:
+        if who in mixed:
+            return who or "someone"
+    return None
 
 
 def is_expired(status: str, expires_at: Optional[int], now: int) -> bool:

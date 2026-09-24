@@ -3325,15 +3325,36 @@ async def api_payjoin_contact_request(
     target_id = target.id if target else None
 
     # Clear error if you enter your OWN username (harmless self-oracle — you know
-    # your own handle). Otherwise stay neutral (no username-existence oracle).
+    # your own handle).
     me = await get_account(uid)
     if me and me.username and me.username.strip().lower() == username:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
                             detail="That's your own username — connect with someone else.")
 
-    if target_id and target_id != uid:
+    # A MISTYPED NAME IS TOLD SO, which reverses the choice this endpoint used
+    # to make: it answered "sent" either way, so as not to be an oracle for
+    # which usernames exist on the instance.
+    #
+    # That neutrality was already absent. GET /payjoin/contacts lists outgoing
+    # pending requests, and a request to a name nobody holds creates no row —
+    # so any caller could send one, read the list, and learn the answer from
+    # whether it appeared. Two requests instead of one, available to anyone
+    # with an account. Silence here bought nothing and cost the user the one
+    # thing they needed: knowing they had typed it wrong, rather than waiting
+    # on an approval that was never going to come.
+    #
+    # What still guards the list is the gate above this function:
+    # require_trusted_device means an authenticated account on an approved
+    # device, so enumeration is not something a passer-by can do.
+    if not target_id:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail=f"No account here is called '{username}'. Check the spelling.",
+        )
+
+    if target_id != uid:
         await create_payjoin_contact(uid, target_id)
-    return {"status": "sent"}
+    return {"status": "sent", "username": username}
 
 
 @silnt_api_router.get("/api/v1/payjoin/contacts")
@@ -4407,31 +4428,42 @@ def _tango_assemble(rnd):
 
 
 async def _tango_label_change(rnd) -> None:
-    """Mark each side's change coin once the scanner has found it.
+    """Name BOTH of each side's coins once the scanner has found them.
 
-    Change is where a two-party mix leaks: change plus mixed output is that
-    party's input total, and with two inputs an observer can often solve which
-    is which. A user cannot avoid re-spending it carelessly if they cannot tell
-    which coin it is, so it gets a name.
+    The share as well as the change, and the share is the one that makes this
+    worth doing. A round's change and its share add up to what that side put
+    in. On chain the two shares are identical, so which is yours is a coin
+    flip — until you spend your change together with your share. That one
+    transaction says "same owner", the arithmetic then says which input total
+    that owner had, and the coin flip becomes a certainty. It does not weaken
+    the round, it undoes it, and no later mix puts it back.
 
-    Best-effort and idempotent. Called after broadcast — when the coin almost
-    certainly does not exist yet — again whenever the round is fetched, and by
-    the sweeper, which is what actually catches it: a finished round is the one
-    thing nobody reopens, so waiting for a fetch meant waiting forever.
-    `change_labelled` stops it retrying once both sides are done.
+    Labelling only the change told the user which coin was dangerous but not
+    what it was dangerous WITH, which is half an answer. With both named, the
+    clients can refuse the pairing outright — see helpers/tango.py's
+    undoes_a_round, which both of them mirror.
 
-    Each side is named after the OTHER: your change coin is labelled with the
-    person you mixed with, since that is what tells one round's change from
-    another's.
+    Each coin is named after the OTHER party, because that is what tells one
+    round's coins from another's.
+
+    Best-effort and idempotent. Called after broadcast — when the coins almost
+    certainly do not exist yet — again whenever the round is fetched, and by
+    the sweeper, which is what actually catches them: a finished round is the
+    one thing nobody reopens, so waiting for a fetch meant waiting forever.
+    The `change_labelled` column stops it retrying once every coin is named;
+    it predates the share being labelled too, and the name stayed rather than
+    spend a migration on it.
     """
-    from .helpers.tango import change_label
+    from .helpers.tango import change_label, mix_label
 
     if rnd.status != "BROADCAST" or rnd.change_labelled:
         return
     done = True
-    for wallet_id, spk, other in (
-        (rnd.a_wallet_id, rnd.a_change_spk, rnd.b_username),
-        (rnd.b_wallet_id, rnd.b_change_spk, rnd.a_username),
+    for wallet_id, spk, other, naming in (
+        (rnd.a_wallet_id, rnd.a_mix_spk, rnd.b_username, mix_label),
+        (rnd.b_wallet_id, rnd.b_mix_spk, rnd.a_username, mix_label),
+        (rnd.a_wallet_id, rnd.a_change_spk, rnd.b_username, change_label),
+        (rnd.b_wallet_id, rnd.b_change_spk, rnd.a_username, change_label),
     ):
         if not spk or not wallet_id:
             continue
@@ -4439,12 +4471,12 @@ async def _tango_label_change(rnd) -> None:
             # The scriptPubKey is OP_1 <32-byte key>; the utxos table stores the
             # key, not the script.
             found = await label_utxo_by_pubkey(
-                wallet_id, spk[4:], change_label(other)
+                wallet_id, spk[4:], naming(other)
             )
             if not found:
                 done = False
         except Exception as e:
-            logger.warning(f"tango {rnd.id}: could not label change: {e}")
+            logger.warning(f"tango {rnd.id}: could not label coins: {e}")
             done = False
     if done:
         await update_tango_round(rnd.id, change_labelled=True)
