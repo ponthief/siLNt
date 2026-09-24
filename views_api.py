@@ -3352,6 +3352,38 @@ async def api_payjoin_contact_request(
             detail=f"No account here is called '{username}'. Check the spelling.",
         )
 
+    # AND THEY HAVE TO BE ON YOUR NETWORK. An LNbits account is global; a siLNt
+    # wallet belongs to one network. A connection to somebody whose only wallet
+    # is on another network looks exactly like a working one — it sits pending,
+    # they can approve it — and then every Tango with them is refused, because
+    # /accept requires both wallets on the round's network. Better to refuse the
+    # connection, where the reason can still be explained.
+    #
+    # The caller's networks come from their own wallets rather than from the
+    # request. A client that sent its own network could be wrong about it, and
+    # this is the check that decides whether a stranger's account is reachable.
+    my_networks = {w.network for w in await get_silnt_wallets(uid) if w.network}
+    if not my_networks:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Create a wallet before connecting with anyone.",
+        )
+    shared = False
+    for net in my_networks:
+        if target_id in set(await list_silnt_user_ids_for_network(net)):
+            shared = True
+            break
+    if not shared:
+        where = " or ".join(sorted(my_networks))
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail=(
+                f"'{username}' has an account but no wallet on {where}, so a "
+                f"Tango with them could never be built. Ask them to open the "
+                f"app on {where} first."
+            ),
+        )
+
     if target_id != uid:
         await create_payjoin_contact(uid, target_id)
     return {"status": "sent", "username": username}
