@@ -333,9 +333,10 @@
     "change": "Tango change - alice",
     "bare_mix": "Tango mix",
     "bare_change": "Tango change",
-    "marked_mix": "Tango mix - alice #7c2e",
-    "marked_change": "Tango change - alice #3f9a",
-    "marker_only": "Tango mix #7c2e",
+    "dated_mix": "Tango mix - alice \u00b7 2026-09-24",
+    "dated_change": "Tango change - alice \u00b7 2026-10-01",
+    "marker_only": "Tango mix \u00b7 2026-09-24",
+    "date_from_timestamp": "Tango change - alice \u00b7 2026-09-24",
     "cases": [
       {
         "labels": [
@@ -361,10 +362,24 @@
       },
       {
         "labels": [
+          "Tango mix - alice \u00b7 2026-09-24",
+          "Tango change - alice \u00b7 2026-10-01"
+        ],
+        "undoes": "alice"
+      },
+      {
+        "labels": [
           "Tango mix - alice #7c2e",
           "Tango change - alice #3f9a"
         ],
         "undoes": "alice"
+      },
+      {
+        "labels": [
+          "Tango mix \u00b7 2026-09-24",
+          "Tango change"
+        ],
+        "undoes": "someone"
       },
       {
         "labels": [
@@ -376,7 +391,7 @@
       {
         "labels": [
           "Tango mix",
-          "Tango change #3f9a"
+          "Tango change \u00b7 2026-09-24"
         ],
         "undoes": "someone"
       },
@@ -397,8 +412,8 @@
       },
       {
         "labels": [
-          "Tango mix - alice #7c2e",
-          "Tango mix - alice #3f9a"
+          "Tango mix - alice \u00b7 2026-09-24",
+          "Tango mix - alice \u00b7 2026-10-01"
         ],
         "undoes": null
       },

@@ -1086,3 +1086,28 @@ async def m035_relabel_tango_coins_again(db):
         WHERE status = 'BROADCAST'
         """
     )
+
+
+async def m036_date_tango_labels(db):
+    """Once more, to replace the round-id marker with the day.
+
+    The marker exists so two rounds with the same person do not produce two
+    coins whose labels read identically. Four characters of the round id did
+    that and told the owner nothing — "#fagk" is noise in a coin list — so it
+    is now the date the coins were made, in ISO order.
+
+    Clearing the flag is what makes the sweeper revisit these rounds; it
+    relabels within five minutes and sets the flag again. The labeller replaces
+    its own prefixes, so a "#fagk" becomes a date and a label the user typed is
+    left alone — it does not start with "Tango mix" or "Tango change".
+
+    The rule that refuses a share beside a change coin still recognises the old
+    marker, so nothing is unprotected in between.
+    """
+    await db.execute(
+        """
+        UPDATE silnt.tango_rounds
+        SET change_labelled = FALSE
+        WHERE status = 'BROADCAST'
+        """
+    )

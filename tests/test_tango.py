@@ -500,16 +500,39 @@ def test_a_label_that_merely_mentions_tango_is_not_one():
 # above does not use it, because the refusal is by kind.
 
 
-def test_a_marker_distinguishes_two_rounds():
-    a = tango.change_label("alice", "7c2ef019-aaaa")
-    b = tango.change_label("alice", "3f9a1122-bbbb")
+def test_the_marker_is_the_day():
+    from datetime import date, datetime
+
+    assert tango.change_label("alice", date(2026, 9, 24)) == (
+        "Tango change - alice · 2026-09-24"
+    )
+    assert tango.mix_label("alice", datetime(2026, 9, 24, 13, 5)) == (
+        "Tango mix - alice · 2026-09-24"
+    )
+
+
+def test_a_date_already_a_string_is_taken_as_written():
+    """Some rows come back as text rather than a datetime, depending on the
+    driver. Both have to produce the same label or two coins from one round
+    would disagree."""
+    assert tango.change_label("alice", "2026-09-24") == (
+        "Tango change - alice · 2026-09-24"
+    )
+    assert tango.change_label("alice", "2026-09-24T13:05:00Z") == (
+        "Tango change - alice · 2026-09-24"
+    )
+
+
+def test_two_days_distinguish_two_rounds():
+    from datetime import date
+
+    a = tango.change_label("alice", date(2026, 9, 24))
+    b = tango.change_label("alice", date(2026, 10, 1))
     assert a != b
-    assert a == "Tango change - alice #7c2e"
-    assert b == "Tango change - alice #3f9a"
 
 
 def test_the_marker_is_optional():
-    """Callers without a round id, and every coin labelled before the marker
+    """Callers without a date, and every coin labelled before the marker
     existed, still get a usable name."""
     assert tango.change_label("alice") == "Tango change - alice"
     assert tango.mix_label("alice", "") == "Tango mix - alice"
@@ -517,17 +540,21 @@ def test_the_marker_is_optional():
 
 
 def test_a_marker_without_a_name_still_reads():
-    assert tango.mix_label("", "7c2ef019") == "Tango mix #7c2e"
+    assert tango.mix_label("", "2026-09-24") == "Tango mix · 2026-09-24"
 
 
 def test_every_shape_this_has_ever_written_is_recognised():
     """Coins labelled by the earlier versions are the ones most likely to be
-    sitting in a wallet right now. If the rule stopped recognising them it
-    would stop refusing them, silently."""
-    for mix in ("Tango mix", "Tango mix #7c2e",
-                "Tango mix - alice", "Tango mix - alice #7c2e"):
+    sitting in a wallet right now — including the round-id marker the date
+    replaced. If the rule stopped recognising them it would stop refusing
+    them, silently."""
+    for mix in ("Tango mix", "Tango mix #7c2e", "Tango mix · 2026-09-24",
+                "Tango mix - alice", "Tango mix - alice #7c2e",
+                "Tango mix - alice · 2026-09-24"):
         for change in ("Tango change", "Tango change #3f9a",
-                       "Tango change - bob", "Tango change - bob #3f9a"):
+                       "Tango change · 2026-09-24",
+                       "Tango change - bob", "Tango change - bob #3f9a",
+                       "Tango change - bob · 2026-10-01"):
             assert tango.undoes_a_round([mix, change]), f"{mix!r} + {change!r}"
 
 
@@ -561,38 +588,41 @@ OUTS = {MIX_A: 4000, MIX_B: 4000, CHG_A: 1702, CHG_B: 4024}
 
 
 def test_the_share_is_the_output_worth_the_denomination():
-    got = tango.coin_labels(OUTS, 4000, [MIX_A, CHG_A], "bob", "fagk0001")
-    assert got[MIX_A] == "Tango mix - bob #fagk"
-    assert got[CHG_A] == "Tango change - bob #fagk"
+    got = tango.coin_labels(OUTS, 4000, [MIX_A, CHG_A], "bob", "2026-09-24")
+    assert got[MIX_A] == "Tango mix - bob · 2026-09-24"
+    assert got[CHG_A] == "Tango change - bob · 2026-09-24"
 
 
 def test_swapped_columns_still_produce_the_right_labels():
     """The case this was written for. Whatever order the caller passes the two
     scripts in, the values decide — so a client or a column that had them the
     wrong way round cannot make the wallet call a change coin a share."""
-    got = tango.coin_labels(OUTS, 4000, [CHG_A, MIX_A], "bob", "fagk0001")
-    assert got[MIX_A] == "Tango mix - bob #fagk"
-    assert got[CHG_A] == "Tango change - bob #fagk"
+    got = tango.coin_labels(OUTS, 4000, [CHG_A, MIX_A], "bob", "2026-09-24")
+    assert got[MIX_A] == "Tango mix - bob · 2026-09-24"
+    assert got[CHG_A] == "Tango change - bob · 2026-09-24"
 
 
 def test_a_clean_round_has_only_a_share_to_name():
-    got = tango.coin_labels({MIX_A: 4000, MIX_B: 4000}, 4000, [MIX_A], "bob", "x")
-    assert got == {MIX_A: "Tango mix - bob #x"}
+    got = tango.coin_labels(
+        {MIX_A: 4000, MIX_B: 4000}, 4000, [MIX_A], "bob", "2026-09-24"
+    )
+    assert got == {MIX_A: "Tango mix - bob · 2026-09-24"}
 
 
 def test_a_script_that_is_not_an_output_is_left_out():
     """The caller counts what it asked for, so a missing one is reported rather
     than guessed at. A label written past this would be fiction."""
     got = tango.coin_labels(OUTS, 4000, [MIX_A, "51" + "20" + "ee" * 32],
-                            "bob", "x")
+                            "bob", "2026-09-24")
     assert list(got) == [MIX_A]
 
 
 def test_case_and_padding_do_not_matter():
     got = tango.coin_labels(
-        {MIX_A.upper(): 4000}, 4000, ["  " + MIX_A.upper() + " "], "bob", "x"
+        {MIX_A.upper(): 4000}, 4000, ["  " + MIX_A.upper() + " "], "bob",
+        "2026-09-24",
     )
-    assert got[MIX_A] == "Tango mix - bob #x"
+    assert got[MIX_A] == "Tango mix - bob · 2026-09-24"
 
 
 def test_change_that_happens_to_equal_the_denomination_reads_as_a_share():
@@ -601,8 +631,8 @@ def test_change_that_happens_to_equal_the_denomination_reads_as_a_share():
     coin is then indistinguishable from a share on chain too — so calling it
     one is not a lie, and the guard still refuses it beside a change coin."""
     outs = {MIX_A: 4000, CHG_A: 4000}
-    got = tango.coin_labels(outs, 4000, [MIX_A, CHG_A], "bob", "x")
-    assert got[CHG_A] == "Tango mix - bob #x"
+    got = tango.coin_labels(outs, 4000, [MIX_A, CHG_A], "bob", "2026-09-24")
+    assert got[CHG_A] == "Tango mix - bob · 2026-09-24"
 
 
 # ── the round that was labelled wrongly, as it happened ──────────────────────
@@ -624,24 +654,24 @@ REAL_A_CHANGE = "512085f3628e9f18b3ac4ba72937163585127ab38d0718e31a69d2b84cf9485
 
 def test_the_real_round_labels_its_1702_as_change():
     got = tango.coin_labels(
-        REAL_OUTS, 4000, [REAL_A_MIX, REAL_A_CHANGE], "bob", "fagk0001"
+        REAL_OUTS, 4000, [REAL_A_MIX, REAL_A_CHANGE], "bob", "2026-09-24"
     )
-    assert got[REAL_A_CHANGE] == "Tango change - bob #fagk"
-    assert got[REAL_A_MIX] == "Tango mix - bob #fagk"
+    assert got[REAL_A_CHANGE] == "Tango change - bob · 2026-09-24"
+    assert got[REAL_A_MIX] == "Tango mix - bob · 2026-09-24"
 
 
 def test_and_still_does_with_the_scripts_the_wrong_way_round():
     """Whatever put a share's name on that 1702, the value decides now."""
     got = tango.coin_labels(
-        REAL_OUTS, 4000, [REAL_A_CHANGE, REAL_A_MIX], "bob", "fagk0001"
+        REAL_OUTS, 4000, [REAL_A_CHANGE, REAL_A_MIX], "bob", "2026-09-24"
     )
-    assert got[REAL_A_CHANGE] == "Tango change - bob #fagk"
-    assert got[REAL_A_MIX] == "Tango mix - bob #fagk"
+    assert got[REAL_A_CHANGE] == "Tango change - bob · 2026-09-24"
+    assert got[REAL_A_MIX] == "Tango mix - bob · 2026-09-24"
 
 
 def test_the_two_coins_of_that_round_are_refused_together():
     """Which is the point of getting the labels right."""
     got = tango.coin_labels(
-        REAL_OUTS, 4000, [REAL_A_MIX, REAL_A_CHANGE], "bob", "fagk0001"
+        REAL_OUTS, 4000, [REAL_A_MIX, REAL_A_CHANGE], "bob", "2026-09-24"
     )
     assert tango.undoes_a_round(list(got.values())) == "bob"

@@ -235,9 +235,10 @@ def labels() -> dict:
         "change": _t.change_label("alice"),
         "bare_mix": _t.mix_label(None),
         "bare_change": _t.change_label(""),
-        "marked_mix": _t.mix_label("alice", "7c2ef019-dead-beef"),
-        "marked_change": _t.change_label("alice", "3f9a1122-dead-beef"),
-        "marker_only": _t.mix_label("", "7c2ef019"),
+        "dated_mix": _t.mix_label("alice", "2026-09-24"),
+        "dated_change": _t.change_label("alice", "2026-10-01"),
+        "marker_only": _t.mix_label("", "2026-09-24"),
+        "date_from_timestamp": _t.change_label("alice", "2026-09-24T13:05:00Z"),
         "cases": [
             {"labels": ls, "undoes": _t.undoes_a_round(ls)}
             for ls in (
@@ -247,13 +248,19 @@ def labels() -> dict:
                 ["Tango mix - alice", "Tango change - alice"],
                 ["Tango mix - alice", "Tango change - alice", "rent"],
                 ["Tango mix - alice", "Tango change - bob"],
+                # The date marker, and the round-id tag it replaced: coins
+                # carrying the old one are still in wallets.
+                ["Tango mix - alice · 2026-09-24",
+                 "Tango change - alice · 2026-10-01"],
                 ["Tango mix - alice #7c2e", "Tango change - alice #3f9a"],
+                ["Tango mix · 2026-09-24", "Tango change"],
                 ["Tango mix #7c2e", "Tango change"],
-                ["Tango mix", "Tango change #3f9a"],
+                ["Tango mix", "Tango change · 2026-09-24"],
                 ["Tango mix - alice", "Tango mix - bob", "Tango change - carol"],
                 # Not this failure.
                 ["Tango mix - alice", "Tango mix - bob"],
-                ["Tango mix - alice #7c2e", "Tango mix - alice #3f9a"],
+                ["Tango mix - alice · 2026-09-24",
+                 "Tango mix - alice · 2026-10-01"],
                 ["Tango change - alice", "Tango change - bob"],
                 # The user's own words, not ours.
                 ["my Tango mix - alice", "Tango change - alice"],

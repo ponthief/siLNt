@@ -4477,8 +4477,8 @@ async def _tango_label_change(rnd) -> None:
     exactly denom is a share and anything else is change. The columns only say
     which scripts belong to which side; the chain says what they received.
 
-    Each coin is named after the OTHER party, with four characters of the round
-    id, so two rounds with one person do not produce two identical labels.
+    Each coin is named after the OTHER party and dated, so two rounds with one
+    person do not produce two coins whose labels read identically.
 
     Best-effort and idempotent. Called after broadcast — when the coins almost
     certainly do not exist yet — again whenever the round is fetched, and by
@@ -4497,6 +4497,10 @@ async def _tango_label_change(rnd) -> None:
     if rnd.status != "BROADCAST" or rnd.change_labelled:
         return
 
+    # The day the coins came into existence, which is the broadcast rather than
+    # the proposal — updated_at is when the round reached BROADCAST.
+    day = rnd.updated_at or rnd.created_at
+
     values, vouts = _tango_outputs(rnd)
     if not values:
         # No transaction to read, so there is nothing to be sure about. Left
@@ -4512,7 +4516,7 @@ async def _tango_label_change(rnd) -> None:
         if not wallet_id:
             continue
         wanted = [s for s in (mix_spk, change_spk) if s]
-        labels = coin_labels(values, rnd.denom_sats, wanted, other, rnd.id)
+        labels = coin_labels(values, rnd.denom_sats, wanted, other, day)
         if len(labels) != len(wanted):
             # A script this side derived is not in the transaction it signed.
             # That is a real disagreement, not a slow scanner, and a label

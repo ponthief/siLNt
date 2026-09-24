@@ -229,3 +229,14 @@ def test_tango_coins_are_labelled_by_outpoint_not_pubkey():
     assert "coin_labels(" in body
     crud = (ROOT / "crud.py").read_text()
     assert "async def label_utxo_by_pubkey" not in crud
+
+
+def test_m036_clears_the_label_flag_for_the_date_marker():
+    mod = _load_migrations()
+    db = _FakeDB()
+    asyncio.run(mod.m036_date_tango_labels(db))
+    joined = " ".join(" ".join(db.sql).split())
+    assert "UPDATE silnt.tango_rounds" in joined
+    assert "change_labelled = FALSE" in joined
+    assert "WHERE status = 'BROADCAST'" in joined
+    assert "DELETE" not in joined.upper()
