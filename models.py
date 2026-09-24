@@ -523,6 +523,14 @@ class PayjoinContact(BaseModel):
 
 class CreateContactData(BaseModel):
     username: str
+    # The network the caller is on. An LNbits account is global; a siLNt wallet
+    # belongs to one network, and a connection to somebody who has no wallet on
+    # yours can never produce a Tango. The endpoint checks this against the
+    # caller's OWN wallets, so naming a network you are not on is refused
+    # rather than believed. Optional: a client that does not send it falls back
+    # to every network the caller has a wallet on, which is what the first
+    # version of the check did.
+    network: Optional[str] = None
 
 
 class ContactLabelData(BaseModel):

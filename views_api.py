@@ -3352,29 +3352,45 @@ async def api_payjoin_contact_request(
             detail=f"No account here is called '{username}'. Check the spelling.",
         )
 
-    # AND THEY HAVE TO BE ON YOUR NETWORK. An LNbits account is global; a siLNt
-    # wallet belongs to one network. A connection to somebody whose only wallet
-    # is on another network looks exactly like a working one — it sits pending,
-    # they can approve it — and then every Tango with them is refused, because
-    # /accept requires both wallets on the round's network. Better to refuse the
-    # connection, where the reason can still be explained.
+    # AND THEY HAVE TO BE ON THE NETWORK YOU ARE ON. An LNbits account is
+    # global; a siLNt wallet belongs to one network. A connection to somebody
+    # whose only wallet is on another network looks exactly like a working one
+    # — it sits pending, they can approve it, they appear in the partner picker
+    # — and then every Tango with them is refused, because /accept requires
+    # both wallets on the round's network.
     #
-    # The caller's networks come from their own wallets rather than from the
-    # request. A client that sent its own network could be wrong about it, and
-    # this is the check that decides whether a stranger's account is reachable.
+    # WHICH NETWORK IS "YOURS" IS THE WHOLE OF THIS. The first version of this
+    # check took every network the caller had a wallet on, which is wrong for
+    # the case it was written for: an account that has been used for testing
+    # holds a signet wallet and a mainnet wallet at once, so the mainnet app
+    # asking about a signet-only user found signet in that set and allowed it.
+    # The app is network-locked per build even though the account is not, so
+    # the client says which one it is on — and is believed only so far as its
+    # own wallets bear it out, which means naming a network you are not on
+    # gains nothing.
     my_networks = {w.network for w in await get_silnt_wallets(uid) if w.network}
     if not my_networks:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
             detail="Create a wallet before connecting with anyone.",
         )
+    asked = (data.network or "").strip().lower() or None
+    if asked and asked not in my_networks:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"You have no wallet on {asked}.",
+        )
+    # No network from the client means an older build; the union is the best it
+    # can do, and it is what that build already got.
+    scope = {asked} if asked else my_networks
+
     shared = False
-    for net in my_networks:
+    for net in scope:
         if target_id in set(await list_silnt_user_ids_for_network(net)):
             shared = True
             break
     if not shared:
-        where = " or ".join(sorted(my_networks))
+        where = " or ".join(sorted(scope))
         raise HTTPException(
             status_code=HTTPStatus.NOT_FOUND,
             detail=(
@@ -3391,13 +3407,29 @@ async def api_payjoin_contact_request(
 
 @silnt_api_router.get("/api/v1/payjoin/contacts")
 async def api_payjoin_contacts(
+    network: Optional[str] = None,
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
     """All of my connections: accepted, incoming pending, outgoing pending.
-    Usernames + this user's private labels resolved here (never stored together)."""
+    Usernames + this user's private labels resolved here (never stored
+    together).
+
+    With `network`, each row also carries `on_network`: whether that person has
+    a wallet there. ANNOTATED, NOT FILTERED, and the difference matters —
+    connections made before the request endpoint started refusing off-network
+    ones are still here, and hiding them would leave the user unable to see or
+    remove the very rows that are getting in their way. The pickers exclude
+    them; this list shows them and says why.
+    """
     uid = key_info.wallet.user
     res = await list_payjoin_contacts(uid)
     labels = await get_payjoin_contact_labels(uid)
+
+    on_network = None
+    asked = (network or "").strip().lower() or None
+    if asked:
+        on_network = set(await list_silnt_user_ids_for_network(asked))
+
     cache = {}
     async def uname(u):
         if u not in cache:
@@ -3408,6 +3440,8 @@ async def api_payjoin_contacts(
         for d in group:
             d["counterparty_username"] = await uname(d["counterparty_user_id"])
             d["label"] = labels.get(d["id"], "")
+            if on_network is not None:
+                d["on_network"] = d["counterparty_user_id"] in on_network
     return res
 
 
@@ -3469,15 +3503,31 @@ async def api_payjoin_contact_label(
 
 @silnt_api_router.get("/api/v1/payjoin/payers")
 async def api_payjoin_payers(
+    network: Optional[str] = None,
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
-    """My connected counterparties, for the invoice payer-picker. Only ACCEPTED
-    connections. Includes this user's private label (shown if set)."""
+    """My connected counterparties, for the partner and payer pickers. Only
+    ACCEPTED connections. Includes this user's private label (shown if set).
+
+    With `network`, only those who have a wallet on it. Connections made before
+    the request endpoint started refusing off-network ones are still in the
+    table, and offering them here is offering a round that /accept will refuse
+    — the dead end three screens from the choice that caused it. Without it,
+    every connection, which is what older clients already get.
+    """
     uid = key_info.wallet.user
     pairs = await list_accepted_contacts_with_ids(uid)
     labels = await get_payjoin_contact_labels(uid)
+
+    on_network = None
+    asked = (network or "").strip().lower() or None
+    if asked:
+        on_network = set(await list_silnt_user_ids_for_network(asked))
+
     payers = []
     for p in pairs:
+        if on_network is not None and p["user_id"] not in on_network:
+            continue
         acct = await get_account(p["user_id"])
         if acct and acct.username:
             payers.append({
