@@ -4528,10 +4528,14 @@ async def _tango_label_change(rnd) -> None:
                 # By outpoint, not by key. A Tango pays two outputs to the same
                 # wallet in one transaction, and (txid, vout, wallet_id) is what
                 # this table promises is unique — pub_key is not.
-                found = await label_utxo_at_outpoint(
+                # False means the row is not there yet, which is the only
+                # reason to come back. A coin the user has renamed counts as
+                # settled — otherwise this round would be revisited every five
+                # minutes for as long as it exists.
+                settled = await label_utxo_at_outpoint(
                     wallet_id, rnd.txid, vouts[spk], label, replaces=our_labels
                 )
-                if not found:
+                if not settled:
                     done = False
             except Exception as e:
                 logger.warning(f"tango {rnd.id}: could not label coins: {e}")

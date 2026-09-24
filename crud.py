@@ -3281,7 +3281,7 @@ async def list_tango_rounds_awaiting_change_label(
 
 async def label_utxo_at_outpoint(
     wallet_id: str, txid: str, vout: int, label: str, replaces: tuple = ()
-) -> int:
+) -> bool:
     """Label a coin the scanner has found, BY ITS OUTPOINT.
 
     The outpoint is what identifies a coin: (txid, vout, wallet_id) is this
@@ -3290,9 +3290,19 @@ async def label_utxo_at_outpoint(
     answer uniquely, and a Tango pays TWO outputs to the same wallet in the
     same transaction, so the one place it matters is the one place it was used.
 
-    Everything else is as below: writes where there is no label, and where the
-    existing one starts with a prefix in `replaces` — a tuple of OUR prefixes
-    only, so a label the user typed survives.
+    Writes where there is no label, and where the existing one starts with a
+    prefix in `replaces` — a tuple of OUR prefixes only, so a label the user
+    typed survives.
+
+    Returns True when there is nothing further to do for this coin: either it
+    now carries `label`, or the row exists and carries something the caller
+    must not overwrite. False means the row is not there yet — the scanner has
+    not found the coin — which is the only case worth coming back for.
+
+    The distinction matters because the caller stops revisiting a round once
+    every coin is settled. Reporting "not done" for a coin the user had renamed
+    would have it retry that round every five minutes for as long as the round
+    exists.
     """
     clauses = ["label IS NULL", "label = ''"]
     params = {
@@ -3313,14 +3323,13 @@ async def label_utxo_at_outpoint(
         """,
         params,
     )
-    rows = await db.fetchall(
-        "SELECT txid FROM silnt.utxos WHERE wallet_id = :wid AND txid = :txid "
-        "AND vout = :vout AND label = :label",
+    row = await db.fetchone(
+        "SELECT 1 FROM silnt.utxos "
+        "WHERE wallet_id = :wid AND txid = :txid AND vout = :vout",
         {
             "wid": wallet_id,
             "txid": str(txid).lower(),
             "vout": int(vout),
-            "label": label,
         },
     )
-    return len(rows)
+    return bool(row)
