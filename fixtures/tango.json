@@ -333,6 +333,9 @@
     "change": "Tango change - alice",
     "bare_mix": "Tango mix",
     "bare_change": "Tango change",
+    "marked_mix": "Tango mix - alice #7c2e",
+    "marked_change": "Tango change - alice #3f9a",
+    "marker_only": "Tango mix #7c2e",
     "cases": [
       {
         "labels": [
@@ -352,7 +355,50 @@
       {
         "labels": [
           "Tango mix - alice",
+          "Tango change - bob"
+        ],
+        "undoes": "alice"
+      },
+      {
+        "labels": [
+          "Tango mix - alice #7c2e",
+          "Tango change - alice #3f9a"
+        ],
+        "undoes": "alice"
+      },
+      {
+        "labels": [
+          "Tango mix #7c2e",
+          "Tango change"
+        ],
+        "undoes": "someone"
+      },
+      {
+        "labels": [
+          "Tango mix",
+          "Tango change #3f9a"
+        ],
+        "undoes": "someone"
+      },
+      {
+        "labels": [
+          "Tango mix - alice",
+          "Tango mix - bob",
+          "Tango change - carol"
+        ],
+        "undoes": "alice and bob"
+      },
+      {
+        "labels": [
+          "Tango mix - alice",
           "Tango mix - bob"
+        ],
+        "undoes": null
+      },
+      {
+        "labels": [
+          "Tango mix - alice #7c2e",
+          "Tango mix - alice #3f9a"
         ],
         "undoes": null
       },
@@ -365,21 +411,21 @@
       },
       {
         "labels": [
-          "Tango mix - alice",
-          "Tango change - bob"
+          "my Tango mix - alice",
+          "Tango change - alice"
         ],
         "undoes": null
       },
       {
         "labels": [
-          "Tango mix",
-          "Tango change"
+          "Tango mixer fund",
+          "Tango change - alice"
         ],
-        "undoes": "someone"
+        "undoes": null
       },
       {
         "labels": [
-          "my Tango mix - alice",
+          "Tango mix money for alice",
           "Tango change - alice"
         ],
         "undoes": null

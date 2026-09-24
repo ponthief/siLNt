@@ -4486,7 +4486,13 @@ async def _tango_label_change(rnd) -> None:
     it predates the share being labelled too, and the name stayed rather than
     spend a migration on it.
     """
-    from .helpers.tango import change_label, mix_label
+    from .helpers.tango import CHANGE_LABEL, MIX_LABEL, change_label, mix_label
+
+    # Labels this code wrote before, which it may replace. A coin already
+    # carrying an older wording of ours — the change-only scheme, or a name
+    # with no round marker — should end up with the current one, and a label
+    # the USER typed must survive untouched.
+    OUR_LABELS = (MIX_LABEL, CHANGE_LABEL)
 
     if rnd.status != "BROADCAST" or rnd.change_labelled:
         return
@@ -4503,7 +4509,7 @@ async def _tango_label_change(rnd) -> None:
             # The scriptPubKey is OP_1 <32-byte key>; the utxos table stores the
             # key, not the script.
             found = await label_utxo_by_pubkey(
-                wallet_id, spk[4:], naming(other)
+                wallet_id, spk[4:], naming(other, rnd.id), replaces=OUR_LABELS
             )
             if not found:
                 done = False

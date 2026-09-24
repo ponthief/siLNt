@@ -182,3 +182,19 @@ def test_m031_creates_the_payjoin_table_and_its_indexes():
     for idx in ("idx_payjoin_sp_payee", "idx_payjoin_sp_payer",
                 "idx_payjoin_sp_status"):
         assert idx in joined, idx
+
+
+def test_m034_clears_the_label_flag_on_broadcast_rounds_only():
+    """It exists so the sweeper revisits rounds it already labelled, under the
+    current wording. Scoped to BROADCAST: clearing the flag on a cancelled or
+    still-running round would have the sweeper hunting for coins that do not
+    exist."""
+    mod = _load_migrations()
+    db = _FakeDB()
+    asyncio.run(mod.m034_relabel_tango_coins(db))
+    joined = " ".join(" ".join(db.sql).split())
+    assert "UPDATE silnt.tango_rounds" in joined
+    assert "change_labelled = FALSE" in joined
+    assert "WHERE status = 'BROADCAST'" in joined
+    # Never a DELETE: the point is to redo work, not to drop rounds.
+    assert "DELETE" not in joined.upper()

@@ -3280,26 +3280,37 @@ async def list_tango_rounds_awaiting_change_label(
 
 
 async def label_utxo_by_pubkey(
-    wallet_id: str, pub_key: str, label: str
+    wallet_id: str, pub_key: str, label: str, replaces: tuple = ()
 ) -> int:
     """Label a coin the scanner has found, by its on-chain key.
 
-    Used to mark a Tango's change the moment it turns up. The change is the
-    part of a two-party mix that leaks — change plus mixed output is that
-    party's input total — so the user should be able to see which coin it is
-    without reconstructing the round. Only writes where there is no label
-    already, so it never overwrites something the user typed.
+    Used to mark a Tango's two coins the moment they turn up, so the owner can
+    see which is the share and which is the change without reconstructing the
+    round — and so the send flow can refuse the combination that undoes it.
 
-    Returns how many rows it touched: 0 means the scanner has not found it yet,
-    which is the normal case for the first minutes after a broadcast.
+    Writes where there is no label, and where the existing one begins with a
+    prefix in `replaces`. That second case is how a coin labelled by an earlier
+    wording of ours gets the current one; it is a tuple of OUR prefixes only,
+    never a wildcard, because a label the user typed has to survive. Passing
+    nothing keeps the original behaviour of never overwriting.
+
+    Returns how many rows now carry this label: 0 means the scanner has not
+    found the coin yet, which is the normal case for the first minutes after a
+    broadcast.
     """
+    clauses = ["label IS NULL", "label = ''"]
+    params = {"wid": wallet_id, "pub": pub_key, "label": label}
+    for n, prefix in enumerate(replaces):
+        key = f"pfx{n}"
+        clauses.append(f"label LIKE :{key}")
+        params[key] = f"{prefix}%"
     await db.execute(
-        """
+        f"""
         UPDATE silnt.utxos SET label = :label
         WHERE wallet_id = :wid AND pub_key = :pub
-          AND (label IS NULL OR label = '')
+          AND ({" OR ".join(clauses)})
         """,
-        {"wid": wallet_id, "pub": pub_key, "label": label},
+        params,
     )
     rows = await db.fetchall(
         "SELECT txid FROM silnt.utxos WHERE wallet_id = :wid AND pub_key = :pub "

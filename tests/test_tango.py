@@ -451,12 +451,28 @@ def test_two_changes_together_are_not_this_failure():
     ) is None
 
 
-def test_a_share_and_an_unrelated_partners_change_is_allowed():
-    """alice's share plus bob's change reveals nothing about either round: the
-    sums do not meet."""
+def test_a_share_with_another_rounds_change_is_refused_too():
+    """This assertion used to say the opposite, on the reasoning that alice's
+    share and bob's change do not add up to anything. They do not — and it is
+    still the same failure.
+
+    A Tango change coin is attributable by construction: its value plus a share
+    equals an input total, so an observer can tie it to the coins its owner
+    brought. A share is the coin that history was cut off from. One transaction
+    holding both repairs the cut, and it does not matter which round the change
+    came from.
+    """
     assert tango.undoes_a_round(
         ["Tango mix - alice", "Tango change - bob"]
-    ) is None
+    ) == "alice"
+
+
+def test_the_share_at_risk_is_the_one_named():
+    """The share is what loses its protection, so that is whose round the
+    warning is about — not the change coin's."""
+    assert tango.undoes_a_round(
+        ["Tango mix - alice", "Tango mix - bob", "Tango change - carol"]
+    ) == "alice and bob"
 
 
 def test_unnamed_tango_coins_still_pair():
@@ -474,4 +490,56 @@ def test_a_label_that_merely_mentions_tango_is_not_one():
     """Substring matching here would refuse a coin the user named themselves."""
     assert tango.undoes_a_round(
         ["my Tango mix - alice", "Tango change - alice"]
+    ) is None
+
+
+# ── telling two rounds apart ─────────────────────────────────────────────────
+# Two rounds with the same person produced two coins with identical labels — a
+# wallet showing "Tango change - alice" twice, with nothing to say which round
+# either came from. The marker is for the person reading the list; the refusal
+# above does not use it, because the refusal is by kind.
+
+
+def test_a_marker_distinguishes_two_rounds():
+    a = tango.change_label("alice", "7c2ef019-aaaa")
+    b = tango.change_label("alice", "3f9a1122-bbbb")
+    assert a != b
+    assert a == "Tango change - alice #7c2e"
+    assert b == "Tango change - alice #3f9a"
+
+
+def test_the_marker_is_optional():
+    """Callers without a round id, and every coin labelled before the marker
+    existed, still get a usable name."""
+    assert tango.change_label("alice") == "Tango change - alice"
+    assert tango.mix_label("alice", "") == "Tango mix - alice"
+    assert tango.mix_label(None, None) == "Tango mix"
+
+
+def test_a_marker_without_a_name_still_reads():
+    assert tango.mix_label("", "7c2ef019") == "Tango mix #7c2e"
+
+
+def test_every_shape_this_has_ever_written_is_recognised():
+    """Coins labelled by the earlier versions are the ones most likely to be
+    sitting in a wallet right now. If the rule stopped recognising them it
+    would stop refusing them, silently."""
+    for mix in ("Tango mix", "Tango mix #7c2e",
+                "Tango mix - alice", "Tango mix - alice #7c2e"):
+        for change in ("Tango change", "Tango change #3f9a",
+                       "Tango change - bob", "Tango change - bob #3f9a"):
+            assert tango.undoes_a_round([mix, change]), f"{mix!r} + {change!r}"
+
+
+def test_a_coin_the_user_named_is_left_alone():
+    """Only separators this module writes count. Anything else after the
+    prefix is the user's own words."""
+    assert tango.undoes_a_round(
+        ["my Tango mix - alice", "Tango change - alice"]
+    ) is None
+    assert tango.undoes_a_round(
+        ["Tango mixer fund", "Tango change - alice"]
+    ) is None
+    assert tango.undoes_a_round(
+        ["Tango mix money for alice", "Tango change - alice"]
     ) is None

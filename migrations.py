@@ -1031,3 +1031,31 @@ async def m033_tango_rounds(db):
     await db.execute(
         "CREATE INDEX idx_tango_status ON silnt.tango_rounds (status, expires_at);"
     )
+
+
+async def m034_relabel_tango_coins(db):
+    """Let the sweeper name every Tango coin again, under the current wording.
+
+    Two things changed after rounds had already been labelled. The share is now
+    labelled as well as the change — labelling only the change told the owner
+    which coin was dangerous but not what it was dangerous WITH — and both
+    labels now carry a short round marker, because two rounds with the same
+    person produced two coins reading exactly the same thing.
+
+    Rounds already marked change_labelled will never be revisited, so clearing
+    the flag is what makes the sweeper pick them up. It relabels within five
+    minutes and sets the flag again; coins the scanner has not found yet keep
+    it clear until it has, which is the behaviour anyway.
+
+    Nothing is destroyed here. The utxo labels themselves are rewritten by
+    _tango_label_change, and only where the existing label is one this code
+    wrote: a label the user typed does not begin with "Tango mix" or "Tango
+    change", so it is left alone.
+    """
+    await db.execute(
+        """
+        UPDATE silnt.tango_rounds
+        SET change_labelled = FALSE
+        WHERE status = 'BROADCAST'
+        """
+    )

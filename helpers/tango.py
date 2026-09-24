@@ -112,54 +112,111 @@ MIX_LABEL = "Tango mix"
 CHANGE_LABEL = "Tango change"
 
 
-def _named(prefix: str, other_username: Optional[str]) -> str:
+def round_marker(round_id: Optional[str]) -> str:
+    """A short, stable tag for one round: "#7c2e".
+
+    Two rounds with the same person used to produce two coins with identical
+    labels — a wallet showing "Tango change - alice" twice, with no way to tell
+    which round either came from. The marker is four characters of the round id,
+    which is enough to tell them apart in a list and short enough to read.
+
+    It is not a secret. The id is the server's own primary key for a round both
+    parties took part in; four characters of it in a label the owner sees adds
+    nothing anyone else can use.
+    """
+    rid = (round_id or "").strip().lower()
+    hexish = "".join(ch for ch in rid if ch.isalnum())
+    return f"#{hexish[:4]}" if hexish else ""
+
+
+def _named(prefix: str, other_username: Optional[str], round_id: Optional[str]) -> str:
+    parts = [prefix]
     who = (other_username or "").strip()
-    return f"{prefix} - {who}" if who else prefix
+    if who:
+        parts.append(f"- {who}")
+    mark = round_marker(round_id)
+    if mark:
+        parts.append(mark)
+    return " ".join(parts)
 
 
-def mix_label(other_username: Optional[str]) -> str:
-    """The name the mixed share gets: "Tango mix - alice"."""
-    return _named(MIX_LABEL, other_username)
+def mix_label(other_username: Optional[str], round_id: Optional[str] = None) -> str:
+    """The mixed share: "Tango mix - alice #7c2e"."""
+    return _named(MIX_LABEL, other_username, round_id)
 
 
-def change_label(other_username: Optional[str]) -> str:
-    """The name a change coin gets: "Tango change - alice"."""
-    return _named(CHANGE_LABEL, other_username)
+def change_label(other_username: Optional[str], round_id: Optional[str] = None) -> str:
+    """A change coin: "Tango change - alice #7c2e"."""
+    return _named(CHANGE_LABEL, other_username, round_id)
+
+
+def _party(label: str, prefix: str) -> Optional[str]:
+    """The counterparty named in one of our labels, or None if it is not one.
+
+    Matched from the start and only up to a separator we wrote, never as a
+    substring: a coin the user named "my Tango mix money" is theirs, not ours,
+    and refusing to spend it would be us reading our own meaning into their
+    words.
+
+    Accepts every shape this has written: the bare prefix, prefix with a
+    marker, and prefix with a name and an optional marker. Coins labelled
+    before the marker existed still have to be recognised — they are the ones
+    most likely to be sitting in a wallet right now.
+    """
+    text = (label or "").strip()
+    if text == prefix:
+        return ""
+    if not text.startswith(f"{prefix} "):
+        return None
+    rest = text[len(prefix) + 1 :].strip()
+    if rest.startswith("- "):
+        rest = rest[2:].strip()
+    elif rest.startswith("#"):
+        return ""
+    else:
+        # "Tango mix something we never wrote" is the user's own text.
+        return None
+    if " #" in rest:
+        rest = rest[: rest.rindex(" #")].strip()
+    return rest
 
 
 def undoes_a_round(labels) -> Optional[str]:
-    """The counterparty whose round a selection of coins would undo, if any.
+    """The round(s) a selection of coins would undo, named, or None.
 
-    THE FAILURE THIS IS FOR. A round's own change and its own mixed share add
-    up to what that side put in. On chain the two mixed outputs are identical,
-    so which one is yours is a coin flip — until you spend your change together
-    with your share. That single transaction says "one owner", the arithmetic
-    then says which input total that owner had, and the coin flip becomes a
-    certainty. It does not weaken the round; it undoes it, retroactively, and
-    no later mix puts it back.
+    ANY TANGO SHARE WITH ANY TANGO CHANGE. Not only a share with its own
+    round's change, which is what this used to check and was too narrow.
 
-    Same-name granularity on purpose. Two rounds with the same person produce
-    two changes and two shares, and pairing them across rounds still links
-    coins whose whole purpose was to be unlinkable — so the name is the right
-    unit to refuse on. It is also all a client has: a coin's label is what the
-    wallet knows about it, and asking the server which round a coin came from
-    would put the question back on the machine that already knows too much.
+    The reasoning that led there was that the two have to add up — a round's
+    change plus its share is what that side put in, so the arithmetic resolves
+    which of the two identical shares was theirs. True, and not the only way
+    it goes wrong. A Tango change coin is attributable BY CONSTRUCTION: its
+    value plus a share equals an input total, so an observer can tie it to the
+    coins its owner brought, which is exactly the history that owner had before
+    the mix. A share is the opposite: it is the coin that history was cut off
+    from. Put the two in one transaction and the cut is repaired — the share
+    inherits the change's attribution — whoever the round was with and whenever
+    it happened. Change from the alice round reconnects a share from the bob
+    round just as well.
 
-    Returns the counterparty's name, or None when the selection is safe.
+    So the rule is by KIND, not by round, and the marker in the label is for
+    the human reading it rather than for this.
+
+    Returns the counterparty of the share(s) at risk, since the share is what
+    loses its protection. None when the selection is safe.
     """
-    mixed = {}
-    changed = {}
+    mixed = set()
+    has_change = False
     for raw in labels:
-        text = (raw or "").strip()
-        for prefix, bucket in ((MIX_LABEL, mixed), (CHANGE_LABEL, changed)):
-            if text == prefix:
-                bucket[""] = True
-            elif text.startswith(f"{prefix} - "):
-                bucket[text[len(prefix) + 3 :].strip()] = True
-    for who in changed:
-        if who in mixed:
-            return who or "someone"
-    return None
+        who = _party(raw or "", MIX_LABEL)
+        if who is not None:
+            mixed.add(who or "someone")
+            continue
+        if _party(raw or "", CHANGE_LABEL) is not None:
+            has_change = True
+    if not mixed or not has_change:
+        return None
+    return " and ".join(sorted(mixed))
 
 
 def is_expired(status: str, expires_at: Optional[int], now: int) -> bool:

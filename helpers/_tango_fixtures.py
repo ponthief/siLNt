@@ -235,16 +235,30 @@ def labels() -> dict:
         "change": _t.change_label("alice"),
         "bare_mix": _t.mix_label(None),
         "bare_change": _t.change_label(""),
+        "marked_mix": _t.mix_label("alice", "7c2ef019-dead-beef"),
+        "marked_change": _t.change_label("alice", "3f9a1122-dead-beef"),
+        "marker_only": _t.mix_label("", "7c2ef019"),
         "cases": [
             {"labels": ls, "undoes": _t.undoes_a_round(ls)}
             for ls in (
+                # A share with change: refused, whoever each was with and
+                # whenever it happened. The change carries an attribution the
+                # share exists to be free of.
                 ["Tango mix - alice", "Tango change - alice"],
                 ["Tango mix - alice", "Tango change - alice", "rent"],
-                ["Tango mix - alice", "Tango mix - bob"],
-                ["Tango change - alice", "Tango change - bob"],
                 ["Tango mix - alice", "Tango change - bob"],
-                ["Tango mix", "Tango change"],
+                ["Tango mix - alice #7c2e", "Tango change - alice #3f9a"],
+                ["Tango mix #7c2e", "Tango change"],
+                ["Tango mix", "Tango change #3f9a"],
+                ["Tango mix - alice", "Tango mix - bob", "Tango change - carol"],
+                # Not this failure.
+                ["Tango mix - alice", "Tango mix - bob"],
+                ["Tango mix - alice #7c2e", "Tango mix - alice #3f9a"],
+                ["Tango change - alice", "Tango change - bob"],
+                # The user's own words, not ours.
                 ["my Tango mix - alice", "Tango change - alice"],
+                ["Tango mixer fund", "Tango change - alice"],
+                ["Tango mix money for alice", "Tango change - alice"],
                 ["salary", "Tango", ""],
                 [],
             )
