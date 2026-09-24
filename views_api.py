@@ -4360,7 +4360,6 @@ async def _pj_broadcast(network: str, tx_hex: str) -> str:
 #   /sign  (B)       B signs; the two witness sets are combined and broadcast
 
 TANGO_EXPIRY_SECONDS = 86400
-TANGO_CHANGE_LABEL = "Tango change"
 
 
 def _tango_role(rnd, uid: str) -> Optional[str]:
@@ -4416,16 +4415,23 @@ async def _tango_label_change(rnd) -> None:
     which coin it is, so it gets a name.
 
     Best-effort and idempotent. Called after broadcast — when the coin almost
-    certainly does not exist yet — and again whenever the round is fetched,
-    which is what eventually catches it. `change_labelled` stops it retrying
-    forever once both sides are done.
+    certainly does not exist yet — again whenever the round is fetched, and by
+    the sweeper, which is what actually catches it: a finished round is the one
+    thing nobody reopens, so waiting for a fetch meant waiting forever.
+    `change_labelled` stops it retrying once both sides are done.
+
+    Each side is named after the OTHER: your change coin is labelled with the
+    person you mixed with, since that is what tells one round's change from
+    another's.
     """
+    from .helpers.tango import change_label
+
     if rnd.status != "BROADCAST" or rnd.change_labelled:
         return
     done = True
-    for wallet_id, spk in (
-        (rnd.a_wallet_id, rnd.a_change_spk),
-        (rnd.b_wallet_id, rnd.b_change_spk),
+    for wallet_id, spk, other in (
+        (rnd.a_wallet_id, rnd.a_change_spk, rnd.b_username),
+        (rnd.b_wallet_id, rnd.b_change_spk, rnd.a_username),
     ):
         if not spk or not wallet_id:
             continue
@@ -4433,7 +4439,7 @@ async def _tango_label_change(rnd) -> None:
             # The scriptPubKey is OP_1 <32-byte key>; the utxos table stores the
             # key, not the script.
             found = await label_utxo_by_pubkey(
-                wallet_id, spk[4:], TANGO_CHANGE_LABEL
+                wallet_id, spk[4:], change_label(other)
             )
             if not found:
                 done = False
@@ -4605,7 +4611,7 @@ async def api_tango_accept(
     request and must not change afterwards.
     """
     from .helpers.payjoin_sp import validate_spk, validate_wire_inputs
-    from .helpers.tango import plan, require_turn
+    from .helpers.tango import is_expired, plan, require_turn
 
     uid = key_info.wallet.user
     rnd = await get_tango_round(rid)
@@ -4615,7 +4621,7 @@ async def api_tango_accept(
         require_turn(rnd.status, "b")
     except ValueError as e:
         raise HTTPException(status_code=HTTPStatus.CONFLICT, detail=str(e))
-    if rnd.expires_at and rnd.expires_at < int(time.time()):
+    if is_expired(rnd.status, rnd.expires_at, int(time.time())):
         raise HTTPException(
             status_code=HTTPStatus.GONE, detail="This Tango has expired."
         )
@@ -4702,7 +4708,7 @@ async def api_tango_sign(
         validate_spk,
         verify_witnesses,
     )
-    from .helpers.tango import require_turn
+    from .helpers.tango import is_expired, require_turn
 
     uid = key_info.wallet.user
     rnd = await get_tango_round(rid)
@@ -4713,6 +4719,14 @@ async def api_tango_sign(
         require_turn(rnd.status, role)
     except ValueError as e:
         raise HTTPException(status_code=HTTPStatus.CONFLICT, detail=str(e))
+    # /accept checked this; signing did not, so a round could be signed and
+    # broadcast after the sweeper had already given its coins back — and the
+    # other side could by then have committed them to a second Tango. Two
+    # transactions spending one coin, and the loser finds out from the network.
+    if is_expired(rnd.status, rnd.expires_at, int(time.time())):
+        raise HTTPException(
+            status_code=HTTPStatus.GONE, detail="This Tango has expired."
+        )
 
     if role == "a":
         try:
@@ -4829,3 +4843,71 @@ async def api_tango_cancel(
     if other:
         await _notify_tango(other, "Tango cancelled", "The other side cancelled a Tango.")
     return updated.dict()
+
+
+# ── the Tango sweeper ────────────────────────────────────────────────────────
+#
+# Two jobs, both of them things that cannot happen on a request.
+#
+# EXPIRY GIVES THE COINS BACK. A round that is not terminal has a claim on both
+# sides' coins — get_reserved_tango_outpoints lists them and /propose and
+# /accept refuse anything already claimed. So a round the other side walked
+# away from does not merely sit in a list: it holds your coins out of the next
+# Tango. Nothing on a request path will ever close it, because the side who
+# would close it is the side that stopped. Until this existed, expires_at was a
+# number the clients displayed and nobody enforced.
+#
+# THE CHANGE LABEL LANDS LATE. A round's change coin does not exist when the
+# round finishes — the scanner finds it minutes to hours after the broadcast.
+# _tango_label_change was called on the single-round fetch, which meant the
+# label arrived only if someone reopened a finished round, which is the one
+# thing nobody does. That is why change was showing up unnamed.
+#
+# Both passes are best-effort and idempotent: one bad row must not stop the
+# rest, and running twice must change nothing the first pass already did.
+
+TANGO_SWEEP_LIMIT = 200
+
+
+async def run_tango_sweep() -> dict:
+    """Close what has expired, name what has landed. Returns a small summary
+    for the log — the loop only prints it when something happened."""
+    from .crud import (
+        list_expired_tango_rounds,
+        list_tango_rounds_awaiting_change_label,
+    )
+
+    now = int(time.time())
+    expired = 0
+    labelled = 0
+
+    for rnd in await list_expired_tango_rounds(now, TANGO_SWEEP_LIMIT):
+        try:
+            await update_tango_round(
+                rnd.id, status="CANCELLED", reject_reason="expired"
+            )
+            expired += 1
+            # Both sides are told, not just one: each had coins held against
+            # this round and each can now use them again. No amount, the same
+            # rule as every other push here.
+            for uid in (rnd.a_user_id, rnd.b_user_id):
+                if uid:
+                    await _notify_tango(
+                        uid,
+                        "Tango expired",
+                        "A Tango ran out of time. Your coins are free again.",
+                    )
+        except Exception as e:
+            logger.warning(f"tango sweep: could not expire {rnd.id}: {e}")
+
+    for rnd in await list_tango_rounds_awaiting_change_label(TANGO_SWEEP_LIMIT):
+        try:
+            before = rnd.change_labelled
+            await _tango_label_change(rnd)
+            fresh = await get_tango_round(rnd.id)
+            if fresh and fresh.change_labelled and not before:
+                labelled += 1
+        except Exception as e:
+            logger.warning(f"tango sweep: could not label {rnd.id}: {e}")
+
+    return {"expired": expired, "labelled": labelled}

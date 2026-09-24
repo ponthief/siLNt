@@ -3224,6 +3224,57 @@ async def get_reserved_tango_outpoints(user_id: str) -> set:
     return reserved
 
 
+async def list_expired_tango_rounds(now: int, limit: int = 200) -> list[TangoRound]:
+    """Live rounds whose time has run out, oldest first.
+
+    The sweeper closes these, and closing them is what gives the coins back:
+    get_reserved_tango_outpoints only counts rounds in TANGO_LIVE, so a round
+    nobody will ever finish holds both sides' coins out of the next Tango until
+    its status changes. Nothing else changes it — the side that stopped is the
+    reason it is stuck.
+
+    BROADCAST is excluded even though it is live: those coins are spent on
+    chain, and re-closing the round would rewrite a finished one.
+    """
+    placeholders = ", ".join(f"'{s}'" for s in TANGO_LIVE if s != "BROADCAST")
+    rows = await db.fetchall(
+        f"""
+        SELECT * FROM silnt.tango_rounds
+        WHERE status IN ({placeholders})
+          AND expires_at IS NOT NULL
+          AND expires_at <= :now
+        ORDER BY expires_at ASC
+        LIMIT {int(limit)}
+        """,
+        {"now": int(now)},
+    )
+    return [TangoRound(**r) for r in rows]
+
+
+async def list_tango_rounds_awaiting_change_label(
+    limit: int = 200,
+) -> list[TangoRound]:
+    """Broadcast rounds whose change coin still has no name.
+
+    A round is labelled when the scanner has found the coin, which is minutes
+    to hours after the broadcast that created it. Waiting for someone to open
+    that particular round again is waiting for the one thing they have no
+    reason to do — it is finished, so they close the app. The sweeper picks
+    these up instead.
+    """
+    rows = await db.fetchall(
+        f"""
+        SELECT * FROM silnt.tango_rounds
+        WHERE status = 'BROADCAST'
+          AND COALESCE(change_labelled, FALSE) = FALSE
+          AND (a_change_spk IS NOT NULL OR b_change_spk IS NOT NULL)
+        ORDER BY updated_at DESC
+        LIMIT {int(limit)}
+        """,
+    )
+    return [TangoRound(**r) for r in rows]
+
+
 async def label_utxo_by_pubkey(
     wallet_id: str, pub_key: str, label: str
 ) -> int:

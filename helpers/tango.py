@@ -108,6 +108,55 @@ def can_cancel(status: str) -> bool:
     return status not in TERMINAL
 
 
+CHANGE_LABEL = "Tango change"
+
+
+def change_label(other_username: Optional[str]) -> str:
+    """The name a change coin gets: "Tango change - alice".
+
+    WHO, not just what. "Tango change" says the coin is change from a mix but
+    not from WHICH mix, and after a second round that is the question you
+    actually have — a change coin and the mixed coin from the SAME round add up
+    to what you put into it, so spending those two together is the one
+    combination that undoes the round. The counterparty's name is what makes
+    two change coins tellable apart.
+
+    Stored server-side, unlike the clients' own transaction labels, and that is
+    not an inconsistency. Those are device-only because a txid to "who I paid"
+    map would be a new fact about a payment the server never saw. Here the
+    server coordinated the round: silnt.tango_rounds already holds both
+    usernames next to both input sets, so the label adds nothing it did not
+    write itself.
+    """
+    who = (other_username or "").strip()
+    return f"{CHANGE_LABEL} - {who}" if who else CHANGE_LABEL
+
+
+def is_expired(status: str, expires_at: Optional[int], now: int) -> bool:
+    """Whether a round has run out of time and should be closed.
+
+    WHY THIS MATTERS MORE HERE THAN IN MOST PLACES. A round that is not
+    terminal holds a claim on both sides' coins: get_reserved_tango_outpoints
+    lists them, and /propose and /accept refuse anything already claimed. So an
+    abandoned round does not merely sit there — it takes those coins out of
+    circulation, for this feature, until something closes it. Nobody is going
+    to: the whole reason it is abandoned is that one side stopped. The sweeper
+    is what closes it, and this decides what it closes.
+
+    A terminal round is never expired. BROADCAST has already spent the coins
+    and CANCELLED has already freed them, so re-closing either would only
+    rewrite history.
+
+    A round with no expires_at never expires, which is the honest reading of a
+    missing value rather than a reason to cancel someone's coins.
+    """
+    if status in TERMINAL:
+        return False
+    if not expires_at:
+        return False
+    return int(expires_at) <= int(now)
+
+
 def estimate(n_inputs: int, n_outputs: int, fee_rate: float) -> tuple[int, int]:
     """(vsize, fee). Every input and output in a Tango is P2TR."""
     vsize = estimate_vsize(n_inputs, [TAPROOT_OUTPUT_VBYTES] * n_outputs)

@@ -360,3 +360,56 @@ def test_neither_side_can_derive_the_others_output():
     b_mix = tango.payment_script(B_SCAN, spend_pub(B_SPEND), all_in)
     forged = tango.payment_script(A_SCAN, spend_pub(B_SPEND), all_in)
     assert forged != b_mix
+
+
+# ── expiry ───────────────────────────────────────────────────────────────────
+# A live round holds a claim on both sides' coins. That is the whole reason
+# expiry has to be enforced rather than displayed: the side who would close an
+# abandoned round is the side that stopped, so without a sweeper those coins
+# are held out of the next Tango for good.
+
+
+def test_a_round_past_its_time_is_expired():
+    assert tango.is_expired(tango.PROPOSED, 1_000, 1_001)
+    assert tango.is_expired(tango.ACCEPTED, 1_000, 1_001)
+    assert tango.is_expired(tango.A_SIGNED, 1_000, 1_001)
+
+
+def test_the_boundary_second_counts_as_expired():
+    """<= rather than <: a round whose deadline is this second has had all the
+    time it was given, and the sweeper and the endpoints must agree on which
+    side of it they are."""
+    assert tango.is_expired(tango.PROPOSED, 1_000, 1_000)
+    assert not tango.is_expired(tango.PROPOSED, 1_000, 999)
+
+
+def test_a_broadcast_round_never_expires():
+    """Its coins are spent on chain. Cancelling it would rewrite a finished
+    round, and the sweeper would do it on every pass forever."""
+    assert not tango.is_expired(tango.BROADCAST, 1_000, 99_999)
+
+
+def test_a_cancelled_round_never_expires():
+    assert not tango.is_expired(tango.CANCELLED, 1_000, 99_999)
+
+
+def test_a_round_with_no_deadline_never_expires():
+    """The honest reading of a missing value. Treating it as 'expired long ago'
+    would cancel rounds nobody agreed to time-limit."""
+    assert not tango.is_expired(tango.PROPOSED, None, 99_999)
+    assert not tango.is_expired(tango.PROPOSED, 0, 99_999)
+
+
+# ── the change label ─────────────────────────────────────────────────────────
+
+
+def test_change_is_labelled_with_the_counterparty():
+    assert tango.change_label("alice") == "Tango change - alice"
+
+
+def test_a_missing_username_still_names_the_coin():
+    """Better an unattributed "Tango change" than "Tango change - ", which
+    looks like the wallet lost something."""
+    assert tango.change_label(None) == "Tango change"
+    assert tango.change_label("") == "Tango change"
+    assert tango.change_label("   ") == "Tango change"

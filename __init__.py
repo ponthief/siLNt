@@ -14,6 +14,7 @@ from .views_api import (
     run_background_scans,
     background_tip_advanced,
     run_send_confirmation_checks,
+    run_tango_sweep,
     BACKGROUND_SCAN_POLL_SECONDS,
     BACKGROUND_SCAN_INTERVAL_SECONDS,
 )
@@ -96,6 +97,22 @@ async def _background_scan_loop():
             logger.error(f"[silnt] background scan loop error: {exc}")
         await asyncio.sleep(BACKGROUND_SCAN_POLL_SECONDS)
 
+async def _tango_sweep_loop():
+    # Closes rounds that ran out of time, which is what gives both sides' coins
+    # back — a live round holds a claim on them, and the side who would close
+    # it is the side that stopped. Also names change coins the scanner has
+    # since found: they do not exist when the round finishes, and nobody
+    # reopens a finished round to trigger it.
+    while True:
+        try:
+            res = await run_tango_sweep()
+            if res and (res.get("expired") or res.get("labelled")):
+                logger.info(f"[silnt] tango sweep: {res}")
+        except Exception as exc:
+            logger.error(f"[silnt] tango sweep loop error: {exc}")
+        await asyncio.sleep(300)   # every 5 min
+
+
 # in async def silnt_start() / wherever the ext starts its tasks:
 def siLNt_start():
     task = create_permanent_unique_task("ext_silnt", _refund_loop)
@@ -106,6 +123,8 @@ def siLNt_start():
     scheduled_tasks.append(health_task)
     bgscan_task = create_permanent_unique_task("ext_silnt_bgscan", _background_scan_loop)
     scheduled_tasks.append(bgscan_task)
+    tango_task = create_permanent_unique_task("ext_silnt_tango", _tango_sweep_loop)
+    scheduled_tasks.append(tango_task)
 
 # in the ext stop hook:
 def siLNt_stop():
