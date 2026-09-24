@@ -195,56 +195,84 @@ def receiver_scan_transaction_with_shared_secret(
     tx_outputs: list[bytes],
     shared_secret: bytes,
 ) -> list[FoundOutput]:
+    """Every output of this transaction that belongs to us.
+
+    ONE k PER CHAIN, and that is the whole of this function's difficulty.
+
+    BIP-352's own scanning algorithm keeps a single counter: it computes
+    P_k = B_spend + t_k*G, looks for it among the outputs, accepts either a
+    plain match or one whose difference from P_k is a label, and on a hit
+    increments k and goes round again. That is correct whenever a sender pays
+    one address of ours twice, which is the case it was written for — the
+    second payment is k=1 of the same chain.
+
+    It quietly loses an output when a transaction pays our BASE address and a
+    LABELLED address of ours at the same time. Those are two different spend
+    keys, so both are k=0, and a single counter can only take one of them: the
+    first hit consumes k=0 and every later pass looks for k=1, which neither
+    output is.
+
+    That is not a hypothetical. A Tango pays each side exactly that pair — the
+    mixed share to the base address, the change to the m=0 change label — so
+    each side saw one of its two coins and the other was invisible. Money in
+    the wallet, absent from the wallet.
+
+    So the scan runs the plain chain and each label chain with a counter of its
+    own. t_k depends on the shared secret and k alone, so nothing about the
+    curve arithmetic changes; only how many times each P_k is looked for.
+    Outputs already claimed are removed, so no output can be counted twice.
+
+    Note the candidate filters upstream (tweak_script_map in sync_block,
+    _tx_has_candidate in sync_block_reverse) still test k=0 of each chain. A
+    transaction whose only output to us sat at k>=1 would never reach here —
+    unchanged by this, and not a shape either of our senders produces.
+    """
     found_outputs: list[FoundOutput] = []
     remaining = list(tx_outputs)
-    k = 0
-    # Stop at K_max even if outputs keep matching — bounds worst-case work on a
-    # hostile transaction. A normal transaction exits earlier via `not found`.
-    while k < BIP352_MAX_OUTPUTS_PER_GROUP:
-        output_pub_key, tweak = create_output_pub_key_and_tweak(
-            shared_secret, spend_pub_key, k
-        )
-        found = False
-        for i, tx_output in enumerate(remaining):
-            if output_pub_key == tx_output:
-                found_outputs.append(FoundOutput(output=tx_output, sec_key_tweak=tweak))
-                remaining.pop(i)
-                found = True
-                k += 1
-                break
-            if not labels:
-                continue
-            tx_out_33 = b"\x02" + tx_output
-            out_pk_33 = b"\x02" + output_pub_key
-            fl = match_labels(tx_out_33, out_pk_33, labels)
-            if fl:
-                found_outputs.append(
-                    FoundOutput(
+
+    # None is the plain chain: the base spend key, no label added.
+    for chain in [None, *labels]:
+        k = 0
+        # Stop at K_max even if outputs keep matching — bounds worst-case work
+        # on a hostile transaction. A normal one exits earlier via `not found`.
+        while k < BIP352_MAX_OUTPUTS_PER_GROUP and remaining:
+            output_pub_key, tweak = create_output_pub_key_and_tweak(
+                shared_secret, spend_pub_key, k
+            )
+            hit: Optional[tuple] = None
+            for i, tx_output in enumerate(remaining):
+                if chain is None:
+                    if output_pub_key == tx_output:
+                        hit = (i, FoundOutput(
+                            output=tx_output, sec_key_tweak=tweak,
+                        ))
+                        break
+                    continue
+                tx_out_33 = b"\x02" + tx_output
+                out_pk_33 = b"\x02" + output_pub_key
+                if match_labels(tx_out_33, out_pk_33, [chain]):
+                    hit = (i, FoundOutput(
                         output=tx_output,
-                        sec_key_tweak=add_private_keys(tweak, fl.tweak),
-                        label=fl,
-                    )
-                )
-                remaining.pop(i)
-                found = True
-                k += 1
-                break
-            tx_out_neg = negate_public_key(tx_out_33)
-            fl = match_labels(tx_out_neg, out_pk_33, labels)
-            if fl:
-                found_outputs.append(
-                    FoundOutput(
+                        sec_key_tweak=add_private_keys(tweak, chain.tweak),
+                        label=chain,
+                    ))
+                    break
+                # The x-only key on chain can be either parity; the label is
+                # only recoverable from the sign that yields it.
+                tx_out_neg = negate_public_key(tx_out_33)
+                if match_labels(tx_out_neg, out_pk_33, [chain]):
+                    hit = (i, FoundOutput(
                         output=tx_out_neg[1:],
-                        sec_key_tweak=add_private_keys(tweak, fl.tweak),
-                        label=fl,
-                    )
-                )
-                remaining.pop(i)
-                found = True
-                k += 1
+                        sec_key_tweak=add_private_keys(tweak, chain.tweak),
+                        label=chain,
+                    ))
+                    break
+            if hit is None:
                 break
-        if not found:
-            break
+            i, fo = hit
+            remaining.pop(i)
+            found_outputs.append(fo)
+            k += 1
     return found_outputs
 
 
