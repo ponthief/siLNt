@@ -576,47 +576,11 @@ class AdminAlert(BaseModel):
     created_at:   int
 
 
-# ── Silent Payments PayJoin ──────────────────────────────────────────────────
-# The row, and the four request bodies that move it through its states. What is
-# NOT here is the point: no field on any of these carries a scan key, a spend
-# key or an input's private tweak. Each party derives its own output and signs
-# its own inputs on its own device; the server only ever sees public keys,
-# amounts, scriptPubKeys and witnesses. See migrations.py::m031.
-class PayjoinSpRequest(BaseModel):
-    id: str
-    status: str = "PROPOSED"
-    network: str = "signet"
-    # Optional because an advertised offer has no payer until a contact
-    # claims it. m032 dropped the NOT NULL to match.
-    payer_user_id: Optional[str] = None
-    payer_username: Optional[str] = None
-    payer_wallet_id: Optional[str] = None
-    payee_user_id: Optional[str] = None
-    payee_username: str
-    payee_wallet_id: Optional[str] = None
-    amount_sats: int
-    fee_rate: float
-    payer_in_sats: Optional[int] = None
-    payee_in_sats: Optional[int] = None
-    payment_sats: Optional[int] = None
-    change_sats: Optional[int] = None
-    fee_sats: Optional[int] = None
-    vsize: Optional[int] = None
-    payer_inputs: Optional[str] = None      # JSON array
-    payee_inputs: Optional[str] = None      # JSON array
-    payment_spk: Optional[str] = None       # hex, derived by the payee
-    change_spk: Optional[str] = None        # hex, derived by the payer
-    payer_witnesses: Optional[str] = None   # JSON {input index: hex}
-    payee_witnesses: Optional[str] = None   # JSON {input index: hex}
-    unsigned_tx: Optional[str] = None
-    tx_hex: Optional[str] = None
-    txid: Optional[str] = None
-    reject_reason: Optional[str] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-    expires_at: Optional[int] = None
-
-
+# ── Shared transaction inputs ────────────────────────────────────────────────
+# One class, used by the Tango bodies below. It was written for the Silent
+# Payments PayJoin, which is gone; it stayed because a contributed UTXO on the
+# wire looks the same whoever is contributing it.
+#
 # NO `pattern=` OR `min_length=` ON THE MODELS BELOW, and that is not laziness.
 #
 # This extension loads under whichever Pydantic LNbits brings, and the two
@@ -655,68 +619,11 @@ class PayjoinSpInput(BaseModel):
     amount: int = Field(gt=0)
 
 
-class ProposePayjoinSpData(BaseModel):
-    payer_wallet_id: str
-    payee_username: str
-    amount_sats: int = Field(gt=0)
-    fee_rate: float = Field(gt=0)
-    inputs: List[PayjoinSpInput]
-    network: str = "signet"
-
-
-class ContributePayjoinSpData(BaseModel):
-    """The payee's half. It can derive its payment script here and only here:
-    this is the first moment the complete input set is known, and the set must
-    not change afterwards."""
-    payee_wallet_id: str
-    inputs: List[PayjoinSpInput]
-    payment_spk: str
-
-
-class OfferPayjoinSpData(BaseModel):
-    """The payee advertising an amount. No payment_spk: it cannot be derived
-    until a claimant's inputs are in, which is what CLAIMED exists for."""
-    payee_wallet_id: str
-    amount_sats: int = Field(gt=0)
-    fee_rate: float = Field(gt=0)
-    inputs: List[PayjoinSpInput]
-    memo: Optional[str] = None
-    network: str = "signet"
-
-
-class ClaimPayjoinSpData(BaseModel):
-    """A contact taking an offer, contributing the paying side's coins."""
-    payer_wallet_id: str
-    inputs: List[PayjoinSpInput]
-
-
-class SignPayjoinSpData(BaseModel):
-    """Witnesses for the caller's own inputs, keyed by their index in the
-    frozen input set. `change_spk` comes with the payer's call and is absent
-    from the payee's — the payee has no output of its own to derive.
-
-    A witness here is the hex of a BIP-341 key-path signature: 64 bytes for
-    SIGHASH_DEFAULT, or 65 with an explicit sighash byte.
-    """
-    witnesses: dict
-    change_spk: Optional[str] = None
-    # The transaction the CLIENT assembled and signed over, hex.
-    #
-    # Both sides build this independently from the same row, and a signature
-    # commits to every byte of it — so if they differ at all, the signature
-    # cannot verify and the only thing the server can say is "the signature
-    # does not match", which is true and useless. Sending it lets the server
-    # compare first and name the difference instead.
-    #
-    # Optional so an older client still works; it just gets the vaguer error.
-    unsigned_tx: Optional[str] = None
-
-
 # ── Tango ────────────────────────────────────────────────────────────────────
-# A two-party equal-output mix. Same no-Field-constraints rule as the SP
-# PayJoin models above: the shapes are checked by helpers/payjoin_sp.py's
-# validate_wire_inputs and validate_spk, which behave the same under either
-# Pydantic and are tested. gt/ge stay, because both versions enforce them.
+# A two-party equal-output mix. Same no-Field-constraints rule as PayjoinSpInput
+# above: the shapes are checked by helpers/payjoin_sp.py's validate_wire_inputs
+# and validate_spk, which behave the same under either Pydantic and are tested.
+# gt/ge stay, because both versions enforce them.
 class TangoRound(BaseModel):
     id: str
     status: str = "PROPOSED"
