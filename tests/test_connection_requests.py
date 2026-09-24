@@ -22,6 +22,7 @@ sys.modules[_spec.name] = conn
 _spec.loader.exec_module(conn)
 
 refusal = conn.refusal_for_existing
+may_reopen = conn.may_reopen
 
 
 def test_nothing_between_us_is_not_a_refusal():
@@ -51,33 +52,48 @@ def test_their_pending_request_points_at_approving_it():
     assert "approve" in why.lower()
 
 
-def test_a_decline_is_not_reopened_by_asking_again():
-    """Letting a fresh request overwrite a DECLINED row would make "no" mean
-    "ask again", which is not what the person who declined chose."""
-    mine = refusal("DECLINED", True, "bob")
-    assert mine and "declined your request" in mine
-    assert "dismiss" in mine.lower()
-
-    theirs = refusal("DECLINED", False, "bob")
-    assert theirs and "You declined" in theirs
-    assert "dismiss" in theirs.lower()
+def test_being_declined_and_asking_again_is_refused():
+    """Letting a fresh request overwrite the row would make "no" mean "ask
+    again", which is not what the other person chose. The caller can clear it
+    themselves, and their own declined requests ARE listed for them."""
+    why = refusal("DECLINED", True, "bob")
+    assert why and "declined your request" in why
+    assert "Declined" in why          # names the section it is actually in
+    assert not may_reopen("DECLINED", True)
 
 
-def test_the_two_declined_messages_are_different():
-    """Who declined whom is the thing the user needs to know, and it decides
-    whose Dismiss button they are looking for."""
-    assert refusal("DECLINED", True, "bob") != refusal("DECLINED", False, "bob")
+def test_declining_someone_and_then_asking_them_reopens_it():
+    """The bug this pair was written for. A DECLINED row is listed only for the
+    REQUESTER, so the decliner cannot see it — being told to dismiss it first
+    sent them hunting for a row their own screen does not show.
+
+    Nothing is overridden by reopening: the only person a decline protects is
+    the one who was told no, and here that is the person now asking."""
+    assert refusal("DECLINED", False, "bob") is None
+    assert may_reopen("DECLINED", False)
 
 
-def test_every_message_names_the_person():
-    for state in ("ACCEPTED", "PENDING", "DECLINED"):
+def test_nothing_else_reopens():
+    """Reopening rewrites who asked whom, so it must not reach a row that is
+    pending or accepted."""
+    for state in ("ACCEPTED", "PENDING", "SOMETHING_NEW", "", None):
         for mine in (True, False):
-            why = refusal(state, mine, "bob")
-            assert why and "bob" in why, (state, mine)
+            assert not may_reopen(state, mine), (state, mine)
+
+
+def test_every_refusal_names_the_person():
+    for state, mine in (
+        ("ACCEPTED", True), ("ACCEPTED", False),
+        ("PENDING", True), ("PENDING", False),
+        ("DECLINED", True),
+    ):
+        why = refusal(state, mine, "bob")
+        assert why and "bob" in why, (state, mine)
 
 
 def test_case_and_space_in_the_stored_status_do_not_matter():
     assert refusal(" accepted ", True, "bob") == refusal("ACCEPTED", True, "bob")
+    assert may_reopen(" declined ", False)
 
 
 def test_an_unknown_status_does_not_block_a_connection():

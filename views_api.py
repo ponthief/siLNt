@@ -179,6 +179,7 @@ from .crud import (
     create_payjoin_contact,
     get_payjoin_contact,
     get_payjoin_contact_between,
+    reopen_payjoin_contact,
     set_payjoin_contact_status,
     delete_payjoin_contact,
     list_payjoin_contacts,
@@ -3358,10 +3359,13 @@ async def api_payjoin_contact_request(
     # this endpoint used to answer "sent" regardless — so asking again someone
     # who had declined, or someone who had asked YOU, reported success and did
     # nothing. Two requests, one new pending row, no way to tell which landed.
-    from .helpers.connections import refusal_for_existing
+    from .helpers.connections import may_reopen, refusal_for_existing
 
     existing = await get_payjoin_contact_between(uid, target_id)
-    if existing:
+    mine_to_reopen = existing and may_reopen(
+        existing.status, existing.requester_user_id == uid
+    )
+    if existing and not mine_to_reopen:
         why = refusal_for_existing(
             existing.status, existing.requester_user_id == uid, username
         )
@@ -3416,7 +3420,12 @@ async def api_payjoin_contact_request(
             ),
         )
 
-    if target_id != uid:
+    # The network check above has to come first either way: reopening a row
+    # towards somebody off-network would make a pending request that could
+    # never produce a round, which is the thing that check exists to prevent.
+    if mine_to_reopen:
+        await reopen_payjoin_contact(existing.id, uid, target_id)
+    elif target_id != uid:
         await create_payjoin_contact(uid, target_id)
     return {"status": "sent", "username": username}
 

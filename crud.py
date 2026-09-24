@@ -2510,6 +2510,27 @@ async def set_payjoin_contact_status(cid: str, status: str) -> None:
     )
 
 
+async def reopen_payjoin_contact(
+    cid: str, requester_user_id: str, target_user_id: str
+) -> None:
+    """Turn a declined row back into a pending request, the other way round.
+
+    The roles are rewritten, not just the status. The person asking now is the
+    one who declined before, so they have to become the requester — leaving the
+    ids as they were would show the request as INCOMING on their own screen and
+    outgoing on the screen of the person they are trying to reach.
+    """
+    await db.execute(
+        f"""UPDATE silnt.payjoin_contacts
+            SET status = 'PENDING',
+                requester_user_id = :ruid,
+                target_user_id = :tuid,
+                updated_at = {db.timestamp_now}
+            WHERE id = :id""",
+        {"id": cid, "ruid": requester_user_id, "tuid": target_user_id},
+    )
+
+
 async def delete_payjoin_contact(cid: str) -> None:
     await db.execute("DELETE FROM silnt.payjoin_contacts WHERE id = :id", {"id": cid})
     # also drop any private labels attached to it
