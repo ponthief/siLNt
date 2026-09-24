@@ -262,9 +262,12 @@ def test_nobody_acts_on_a_finished_round():
 
 
 def test_either_side_may_walk_away_until_it_is_broadcast():
+    """Also the set that removing a connection cancels: everything still
+    holding coins. BROADCAST is on chain and CANCELLED is already done."""
     for s in (tango.PROPOSED, tango.ACCEPTED, tango.A_SIGNED):
         assert tango.can_cancel(s)
     assert not tango.can_cancel(tango.BROADCAST)
+    assert not tango.can_cancel(tango.CANCELLED)
 
 
 # ── a whole round, signed by both sides ──────────────────────────────────────
@@ -675,3 +678,37 @@ def test_the_two_coins_of_that_round_are_refused_together():
         REAL_OUTS, 4000, [REAL_A_MIX, REAL_A_CHANGE], "bob", "2026-09-24"
     )
     assert tango.undoes_a_round(list(got.values())) == "bob"
+
+
+# ── severing a connection takes its unfinished rounds ────────────────────────
+# A round that is not terminal holds both sides' coins, and /accept and /sign
+# do not re-check the connection — only proposing does. So removing a
+# connection has to reach the rounds, or it leaves one live: the coins stay
+# reserved until it expires, and the other side can still carry it through to a
+# broadcast with somebody who has just cut them off.
+
+
+def test_removal_cancels_rounds_before_deleting_the_connection():
+    """Order matters and there is no database here to prove it on. The other
+    way round could sever the connection and leave the round it was supposed to
+    take with it — which is the state this was written to prevent."""
+    src = (ROOT / "views_api.py").read_text()
+    body = src[src.index("async def api_payjoin_contact_remove"):]
+    body = body[: body.index("@silnt_api_router")]
+    assert "list_live_tango_rounds_between(" in body
+    assert "delete_payjoin_contact(" in body
+    assert body.index("list_live_tango_rounds_between(") < body.index(
+        "delete_payjoin_contact("
+    ), "the connection is deleted before its rounds are cancelled"
+    # And the other side is told, since their coins come back too.
+    assert "_notify_tango(" in body
+
+
+def test_the_query_leaves_broadcast_rounds_alone():
+    """Cancelling a broadcast round would rewrite a finished one, and its coins
+    are spent rather than reserved."""
+    src = (ROOT / "crud.py").read_text()
+    body = src[src.index("async def list_live_tango_rounds_between"):]
+    body = body[: body.index("async def get_reserved_tango_outpoints")]
+    assert 's != "BROADCAST"' in body
+    assert "TANGO_LIVE" in body

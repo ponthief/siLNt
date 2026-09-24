@@ -172,6 +172,7 @@ from .crud import (
     get_tango_round,
     update_tango_round,
     list_tango_rounds_for_user,
+    list_live_tango_rounds_between,
     get_reserved_tango_outpoints,
     label_utxo_at_outpoint,
     create_payjoin_invoice, list_payjoin_invoices_for_payer,
@@ -3547,13 +3548,44 @@ async def api_payjoin_contact_decline(
 async def api_payjoin_contact_remove(
     cid: str, key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
-    """Either party removes the connection (pending or accepted)."""
+    """Either party removes the connection (pending or accepted).
+
+    ANY UNFINISHED TANGO BETWEEN THEM GOES WITH IT. A round that is not
+    terminal holds both sides' coins, and /accept and /sign do not re-check the
+    connection — only /rounds does, at proposal. So without this a severed
+    connection left a live round behind: the coins stayed reserved until it
+    expired, and the other side could still carry it through to a broadcast
+    with somebody who had just cut them off.
+
+    Cancelled BEFORE the connection row goes, so a failure leaves both in
+    place. The other order could sever the connection and leave the round it
+    was supposed to take with it, which is the state this exists to prevent.
+    """
     c = await get_payjoin_contact(cid)
     uid = key_info.wallet.user
     if not c or uid not in (c.requester_user_id, c.target_user_id):
         raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Not found.")
+
+    other_uid = (
+        c.target_user_id if c.requester_user_id == uid else c.requester_user_id
+    )
+    cancelled = 0
+    for rnd in await list_live_tango_rounds_between(uid, other_uid, c.network):
+        await update_tango_round(
+            rnd.id, status="CANCELLED", reject_reason="connection removed"
+        )
+        cancelled += 1
+    if cancelled and other_uid:
+        # No amount, the same rule as every other push here.
+        await _notify_tango(
+            other_uid,
+            "Tango cancelled",
+            "A connection was removed. Any unfinished Tango with them is off "
+            "and your coins are free again.",
+        )
+
     await delete_payjoin_contact(cid)
-    return {"status": "REMOVED"}
+    return {"status": "REMOVED", "tangos_cancelled": cancelled}
 
 
 @silnt_api_router.post("/api/v1/payjoin/contacts/{cid}/label")

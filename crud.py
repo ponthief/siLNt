@@ -3260,6 +3260,30 @@ async def list_tango_rounds_for_user(
     return [TangoRound(**r) for r in rows]
 
 
+async def list_live_tango_rounds_between(
+    a_user_id: str, b_user_id: str, network: str
+) -> list[TangoRound]:
+    """Unfinished rounds between two people on one network, either way round.
+
+    "Unfinished" is TANGO_LIVE minus BROADCAST: a broadcast round is on chain
+    and there is nothing left to stop. Everything else still holds both sides'
+    coins, which is why severing the connection has to reach them.
+    """
+    states = tuple(s for s in TANGO_LIVE if s != "BROADCAST")
+    placeholders = ", ".join(f"'{s}'" for s in states)
+    rows = await db.fetchall(
+        f"""
+        SELECT * FROM silnt.tango_rounds
+        WHERE network = :net
+          AND status IN ({placeholders})
+          AND ((a_user_id = :a AND b_user_id = :b)
+            OR (a_user_id = :b AND b_user_id = :a))
+        """,
+        {"a": a_user_id, "b": b_user_id, "net": network},
+    )
+    return [TangoRound(**r) for r in rows]
+
+
 async def get_reserved_tango_outpoints(user_id: str) -> set:
     """Coins this user has already committed to a live round.
 
