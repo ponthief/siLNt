@@ -1529,12 +1529,6 @@ async def _scan_wallet(
 
         batch = batch_at(batch_start)
 
-        owned_rows = await db.fetchall(
-            "SELECT txid, vout FROM silnt.utxos WHERE wallet_id = :wallet_id AND utxo_state IN ('unspent', 'unconfirmed_spent')",
-            {"wallet_id": wallet_id},
-        )
-        owned_utxos_lookup = {f"{r['txid']}:{r['vout']}": r for r in owned_rows}
-
         batch_results = None
         batch_spent = None
 
@@ -1603,13 +1597,6 @@ async def _scan_wallet(
             oracle.stats.fetch_seconds += time.perf_counter() - _t
 
         _t = time.perf_counter()
-        await mark_spent_utxos_batch(
-            batch, oracle, wallet_id, owned_utxos_lookup, wallet.network,
-            spent_by_height=batch_spent,
-        )
-        oracle.stats.spent_seconds += time.perf_counter() - _t
-
-        _t = time.perf_counter()
         for h, result in zip(batch, batch_results):
             if isinstance(result, Exception):
                 logger.error(f"Block {h} error: {result}")
@@ -1666,12 +1653,43 @@ async def _scan_wallet(
             if scan_gap_height is None:
                 last_scanned_height = h
 
+        oracle.stats.persist_seconds += time.perf_counter() - _t
+
+        # THE SPEND PASS RUNS AFTER THIS BATCH'S DISCOVERIES ARE STORED, and on
+        # a snapshot taken here rather than before the batch.
+        #
+        # It used to run first, against the wallet as it was before any of
+        # these blocks. A coin RECEIVED and SPENT inside one batch was
+        # therefore invisible to it: not yet in the database when the spend was
+        # looked for, inserted as 'unspent' a moment later, and the resume
+        # point then moved past the block that spent it. Nothing ever looked
+        # again. The wallet counted it as money for as long as it existed.
+        #
+        # Signet 1027dbc2…:0 was exactly that — 5560 sats received in block
+        # 320818 and spent in 320821, three blocks apart, still spendable in
+        # the wallet twenty days later. It was offered for a Tango, and the
+        # network refused the round with bad-txns-inputs-missingorspent.
+        #
+        # Ordering is the whole fix. The same query, run three lines later.
+        _t = time.perf_counter()
+        owned_rows = await db.fetchall(
+            "SELECT txid, vout FROM silnt.utxos WHERE wallet_id = :wallet_id AND utxo_state IN ('unspent', 'unconfirmed_spent')",
+            {"wallet_id": wallet_id},
+        )
+        owned_utxos_lookup = {f"{r['txid']}:{r['vout']}": r for r in owned_rows}
+        await mark_spent_utxos_batch(
+            batch, oracle, wallet_id, owned_utxos_lookup, wallet.network,
+            spent_by_height=batch_spent,
+        )
+        oracle.stats.spent_seconds += time.perf_counter() - _t
+
+        # Only now may the resume point advance past these blocks: it is the
+        # promise that they will not be looked at again.
         set_scan_progress(
             wallet_id, blocks_scanned, total_blocks, total_found,
             amount=total_found_amount,
         )
         await set_last_scan_height(wallet_id, last_scanned_height)
-        oracle.stats.persist_seconds += time.perf_counter() - _t
 
         # Yield to the event loop between batches so other requests (wallet
         # loads, navigation) get serviced promptly during a long scan.

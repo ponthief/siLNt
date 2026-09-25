@@ -597,3 +597,59 @@ async def test_compute_index_probe_happens_once_per_client():
 
     assert first == 1, f"probed {first} times in the first batch"
     assert second == 1, f"probed again on the second batch (total {second})"
+
+
+# --- the spend pass runs after the batch is stored --------------------------
+#
+# A coin RECEIVED and SPENT inside one batch was invisible to the spend pass:
+# it ran first, against the wallet as it was before any of those blocks, so the
+# coin was not in the database when its spend was looked for. It was inserted
+# as 'unspent' a moment later, the resume point moved past the block that spent
+# it, and nothing ever looked again — the wallet counted it as money for as
+# long as it existed, and offered it to spend.
+#
+# Signet 1027dbc2…:0 was exactly that: 5560 sats received in block 320818 and
+# spent in 320821, three blocks apart, still spendable twenty days later.
+#
+# The fix is ordering, so ordering is what this asserts. Nothing about the two
+# statements says which has to come first, and swapping them breaks no types,
+# no query and no other test.
+
+
+def _batch_loop() -> str:
+    """The body of one batch iteration in scan_wallet."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    src = (root / "helpers" / "scan.py").read_text()
+    start = src.index("        batch = batch_at(batch_start)")
+    end = src.index("await asyncio.sleep(0)", start)
+    return src[start:end]
+
+
+def test_discoveries_are_stored_before_the_spend_pass_looks_for_them():
+    loop = _batch_loop()
+    assert loop.index("insert_utxos_for_wallet(") < loop.index(
+        "mark_spent_utxos_batch("
+    ), "the spend pass runs before this batch's coins are in the database"
+
+
+def test_the_owned_snapshot_is_taken_after_the_batch_is_stored():
+    """Reading it earlier is the same bug by another route: the lookup would
+    not contain a coin this batch just found, and mark_spent_utxos_batch
+    returns immediately when it is empty."""
+    loop = _batch_loop()
+    assert loop.index("insert_utxos_for_wallet(") < loop.index(
+        "owned_utxos_lookup = "
+    ), "the owned-coin snapshot predates this batch's inserts"
+    assert loop.index("owned_utxos_lookup = ") < loop.index(
+        "mark_spent_utxos_batch("
+    )
+
+
+def test_the_resume_point_moves_only_after_the_spend_pass():
+    """Advancing it is the promise that these blocks will not be read again."""
+    loop = _batch_loop()
+    assert loop.index("mark_spent_utxos_batch(") < loop.index(
+        "set_last_scan_height("
+    ), "the resume point advances past blocks whose spends were not marked"
