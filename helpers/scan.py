@@ -468,9 +468,9 @@ def sync_block_reverse(compute_index, utxos, scan_key, spend_pub_key, labels):
 async def get_outspend_status(base_mempool_url: str, txid: str, vout: int) -> dict | None:
     """
     Exact-outpoint spent check via mempool.
-    Returns {"spent": bool, "spent_by": txid|None, "confirmed": bool} when
-    known, or None on unknown/error (caller leaves the UTXO in
-    unconfirmed_spent and retries next scan).
+    Returns {"spent", "spent_by", "confirmed", "block_time"} when known, or
+    None on unknown/error (caller leaves the UTXO in unconfirmed_spent and
+    retries next scan).
 
     `spent_by` is the transaction that took it, when the explorer says. The
     wallet's own record of a spend comes from scanning the block it is in, so
@@ -483,6 +483,12 @@ async def get_outspend_status(base_mempool_url: str, txid: str, vout: int) -> di
     is 'unconfirmed_spent', which can still be undone if it never lands; one in
     a block is 'spent', and leaving it provisional means the coin sits in the
     wallet forever as neither, with a Restore button that refuses it.
+
+    `block_time` is WHEN IT HAPPENED, and a caller discovering an old spend
+    must write that rather than the clock. spent_at is what the transaction
+    list dates a send by, so stamping the moment of discovery reports a
+    three-week-old payment as an hour ago — which reads as money leaving the
+    wallet just now, and is the most alarming thing a wallet can say.
     """
     base = (base_mempool_url or "https://mempool.space").rstrip("/")
     url = f"{base}/api/tx/{txid}/outspend/{vout}"
@@ -495,10 +501,12 @@ async def get_outspend_status(base_mempool_url: str, txid: str, vout: int) -> di
             if r.status_code != 200:
                 return None
             data = r.json()
+            st = data.get("status") or {}
             return {
                 "spent": bool(data.get("spent", False)),
                 "spent_by": data.get("txid") or None,
-                "confirmed": bool((data.get("status") or {}).get("confirmed")),
+                "confirmed": bool(st.get("confirmed")),
+                "block_time": st.get("block_time") or None,
             }
     except Exception as e:
         logger.warning(f"outspend check failed for {txid}:{vout}: {e}")
@@ -1254,12 +1262,27 @@ async def mark_spent_utxos_batch(
                     )
                     continue
                 if status["spent"]:
+                    # WHAT took it and WHEN, recorded with the state. Without
+                    # them a scanned spend has spent_at NULL and the
+                    # transaction list dates the send by the RECEIVE instead —
+                    # and nothing anywhere names the spending transaction. Both
+                    # come free: the outspend answer above carries them.
+                    # COALESCE keeps whatever a broadcast already wrote, which
+                    # is the same fact recorded closer to the event.
                     await db.execute(
-                        """UPDATE silnt.utxos SET utxo_state = 'spent'
-                           WHERE txid = :txid AND vout = :vout
-                             AND wallet_id = :wallet_id
-                             AND utxo_state = 'unconfirmed_spent'""",
-                        {"txid": row["txid"], "vout": row["vout"], "wallet_id": wallet_id},
+                        """UPDATE silnt.utxos
+                              SET utxo_state    = 'spent',
+                                  spent_in_txid = COALESCE(spent_in_txid, :stxid),
+                                  spent_at      = COALESCE(spent_at, :ts)
+                            WHERE txid = :txid AND vout = :vout
+                              AND wallet_id = :wallet_id
+                              AND utxo_state = 'unconfirmed_spent'""",
+                        {
+                            "txid": row["txid"], "vout": row["vout"],
+                            "wallet_id": wallet_id,
+                            "stxid": status.get("spent_by"),
+                            "ts": status.get("block_time"),
+                        },
                     )
                     # Terminal: finalised as spent, so later blocks in this
                     # batch need not re-check it. A false positive below is NOT

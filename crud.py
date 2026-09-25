@@ -1093,10 +1093,19 @@ async def mark_utxos_spent_by_outpoints(
     wallet_id:     str,
     outpoints:     list[tuple[str, int]],   # [(txid, vout), ...]
     spending_txid: str,
+    spent_at:      Optional[int] = None,
 ) -> int:
+    """Mark these coins spent by `spending_txid`.
+
+    `spent_at` is WHEN IT HAPPENED. It defaults to now, which is right for a
+    spend we are broadcasting this instant and wrong for one we have just
+    discovered: the transaction list dates a send by this column, so stamping
+    the clock reports a three-week-old payment as minutes ago. A caller that
+    knows the block time passes it.
+    """
     if not outpoints:
         return 0
-    now = int(time.time())
+    now = int(spent_at) if spent_at else int(time.time())
     affected = 0
     for (in_txid, in_vout) in outpoints:
         result = await db.execute(

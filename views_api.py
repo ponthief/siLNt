@@ -4855,13 +4855,21 @@ async def _refuse_spent_tango_inputs(rnd) -> None:
                 # placeholder, reads that as a spend that never happened, and
                 # restores a genuinely spent coin to spendable.
                 if res.get("spent_by"):
-                    repair.append(((t, v), res["spent_by"], bool(res.get("confirmed"))))
-            for (t, v), spender, confirmed in repair:
+                    repair.append((
+                        (t, v), res["spent_by"], bool(res.get("confirmed")),
+                        res.get("block_time"),
+                    ))
+            for (t, v), spender, confirmed, when in repair:
                 try:
+                    # `when` is the block time, not now. This is a spend being
+                    # DISCOVERED, often long after it happened, and spent_at is
+                    # what dates the row in the transaction list — stamping the
+                    # clock reported a three-week-old payment as an hour ago.
                     await mark_utxos_spent_by_outpoints(
                         wallet_id=wallet_id,
                         outpoints=[(t, v)],
                         spending_txid=spender,
+                        spent_at=when,
                     )
                     # A spend already in a block is 'spent', not provisional.
                     # Left at 'unconfirmed_spent' it waits for a reconciler

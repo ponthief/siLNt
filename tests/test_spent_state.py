@@ -23,6 +23,7 @@ was added for, and it fails silently.
 from __future__ import annotations
 
 import pathlib
+import re
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 VIEWS = (ROOT / "views_api.py").read_text()
@@ -32,6 +33,20 @@ SCAN = (ROOT / "helpers" / "scan.py").read_text()
 def body_of(src: str, start: str, end: str = "@silnt_api_router") -> str:
     at = src.index(start)
     return src[at : src.index(end, at + len(start))]
+
+
+def func_of(src: str, start: str) -> str:
+    """One top-level function, start to the next top-level thing.
+
+    Not a fixed slice. These assertions read the tail of a function, and a
+    slice sized to today's body silently stops covering it the moment a comment
+    is added above the code it checks — which is a test that passes because it
+    can no longer see.
+    """
+    at = src.index(start)
+    rest = src[at + len(start) :]
+    m = re.search(r"\n(?=(async def |def |# ─|@))", rest)
+    return start + (rest[: m.start()] if m else rest)
 
 
 def code_of(src: str, start: str, end: str = "@silnt_api_router") -> str:
@@ -132,15 +147,61 @@ def test_the_repair_settles_a_spend_that_is_already_in_a_block():
 
 def test_the_outspend_check_reports_confirmation():
     """Which record to write depends on it, so it has to come back."""
-    body = SCAN[SCAN.index("async def get_outspend_status") :][:2000]
+    body = func_of(SCAN, "async def get_outspend_status")
     assert '"confirmed"' in body
-    assert '(data.get("status") or {}).get("confirmed")' in body
+    # Read off the explorer's status block, whatever shape the code reads it in.
+    assert 'data.get("status")' in body and 'get("confirmed")' in body
     assert '"spent_by"' in body
+
+
+# ── a discovered spend is dated when it HAPPENED ────────────────────────────
+# spent_at is what the transaction list dates a send by. The repair stamped the
+# clock, so a coin spent on 5 September and noticed today was reported as spent
+# an hour ago — which reads as money leaving the wallet just now. That is the
+# most alarming thing a wallet can say, and it was not true.
+
+
+def test_the_outspend_check_reports_when_the_spend_landed():
+    body = func_of(SCAN, "async def get_outspend_status")
+    assert '"block_time"' in body
+    assert 'st.get("block_time")' in body
+
+
+def test_the_repair_dates_a_spend_by_its_block_not_the_clock():
+    body = code_of(
+        VIEWS,
+        "async def _refuse_spent_tango_inputs",
+        "async def _refuse_tango_reserved",
+    )
+    assert 'res.get("block_time")' in body
+    assert "spent_at=when" in body
+
+
+def test_marking_spent_takes_an_explicit_time():
+    """Defaulting to now is right for a spend being broadcast this instant and
+    wrong for one being discovered. Both callers exist, so it is a parameter."""
+    crud = (ROOT / "crud.py").read_text()
+    body = crud[crud.index("async def mark_utxos_spent_by_outpoints") :][:1400]
+    assert "spent_at:      Optional[int] = None" in body
+    assert "int(spent_at) if spent_at else int(time.time())" in body
+
+
+def test_a_scanned_spend_records_what_took_it_and_when():
+    """Without these the row has spent_at NULL, so the transaction list dates
+    the send by the RECEIVE, and nothing names the spending transaction."""
+    body = SCAN[SCAN.index("async def mark_spent_utxos_batch") :][:6000]
+    finalise = body.index("SET utxo_state    = 'spent'")
+    after = body[finalise : finalise + 900]
+    assert "spent_in_txid = COALESCE(spent_in_txid, :stxid)" in after
+    assert "spent_at      = COALESCE(spent_at, :ts)" in after
+    # COALESCE, not overwrite: a broadcast recorded the same fact closer to the
+    # event, and a rescan must not move the date it already got right.
+    assert 'status.get("block_time")' in body
 
 
 def test_an_unanswerable_outpoint_is_left_alone():
     """Not knowing is not evidence. A 404 or a timeout must not refuse a round
     or rewrite a coin's state."""
-    body = SCAN[SCAN.index("async def get_outspend_status") :][:2000]
+    body = func_of(SCAN, "async def get_outspend_status")
     assert "if r.status_code == 404:" in body
     assert "return None" in body
