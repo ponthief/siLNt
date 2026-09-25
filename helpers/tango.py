@@ -65,6 +65,23 @@ from .payjoin_sp import (  # noqa: F401  (re-exported for the endpoints)
     verify_witnesses,
 )
 from .txsize import TAPROOT_OUTPUT_VBYTES, estimate_vsize, fee_for
+# The label vocabulary, re-exported so tango.* remains the one import every
+# caller and test already uses. It lives in its own module because it needs
+# none of the above — see tangolabels.py.
+from .tangolabels import (  # noqa: F401
+    CHANGE_LABEL,
+    MIX_LABEL,
+    _MARKERS,
+    _named,
+    _party,
+    _strip_marker,
+    change_label,
+    coin_labels,
+    day_marker,
+    mix_label,
+    undoes_a_round,
+    wrote_label,
+)
 from .wallet import DUST_SATS
 
 # The states a round passes through. The shape mirrors the advertised PayJoin
@@ -108,181 +125,40 @@ def can_cancel(status: str) -> bool:
     return status not in TERMINAL
 
 
-MIX_LABEL = "Tango mix"
-CHANGE_LABEL = "Tango change"
+def dust_to_fee(
+    my_fee: Optional[int],
+    my_change: Optional[int],
+    vsize: Optional[int],
+    fee_rate: Optional[float],
+    i_am_the_initiator: bool,
+) -> int:
+    """How much of this side's change was too small to keep, and so went to the
+    miner instead of back to the wallet.
 
+    WHY THIS HAS TO BE SAYABLE. `plan` drops a change below the dust limit and
+    charges it to whoever's excess it was. The result is a side that put in
+    13,749, got one 13,000 coin back, and paid 749 — while the other side, in
+    the same transaction, paid 427. Nothing on chain or in the wallet explains
+    the difference, and the coin the owner expects to see simply is not there.
+    The honest reading is "322 sats was below the 546 sat dust limit", and
+    without this the wallet cannot say it.
 
-def day_marker(when) -> str:
-    """The day a coin was made, for the label: "· 2026-09-24".
+    Recovered rather than stored, because the round records the fee AFTER
+    absorption. The planned share is recomputable exactly: `vsize` is the final
+    shape's size and `fee_rate` is what the initiator chose, so fee_for and
+    split_fee retrace the two lines of plan() that ran just before the
+    absorption.
 
-    WHY A DATE AND NOT A ROUND ID. Two rounds with the same person produce two
-    coins whose labels would otherwise read identically, so something has to
-    separate them. This was four characters of the round id, which separated
-    them and told the owner nothing — "#fagk" is noise in a coin list.
-
-    ISO order rather than "24 Sep": it needs no locale to read, it sorts, and
-    it is the same width every time. The year is included because the label is
-    written once and never revised, so leaving it out would make a coin from
-    last September indistinguishable from one from this September.
-
-    Two rounds with one person ON THE SAME DAY still collide. They are
-    distinguishable by amount in the list beside it, and the refusal that reads
-    these labels does not use the marker at all — it goes by kind.
-
-    Accepts a date, a datetime, or a string already in this shape.
+    Returns 0 whenever there is real change (nothing was dropped), and whenever
+    a field needed for the arithmetic is missing — an unknown is not a claim.
     """
-    if not when:
-        return ""
-    if isinstance(when, str):
-        text = when.strip()[:10]
-        return f"· {text}" if text else ""
-    try:
-        return "· " + when.strftime("%Y-%m-%d")
-    except (AttributeError, ValueError):
-        return ""
-
-
-def _named(prefix: str, other_username: Optional[str], when) -> str:
-    parts = [prefix]
-    who = (other_username or "").strip()
-    if who:
-        parts.append(f"- {who}")
-    mark = day_marker(when)
-    if mark:
-        parts.append(mark)
-    return " ".join(parts)
-
-
-def mix_label(other_username: Optional[str], when=None) -> str:
-    """The mixed share: "Tango mix - alice · 2026-09-24"."""
-    return _named(MIX_LABEL, other_username, when)
-
-
-def change_label(other_username: Optional[str], when=None) -> str:
-    """A change coin: "Tango change - alice · 2026-09-24"."""
-    return _named(CHANGE_LABEL, other_username, when)
-
-
-# The markers this module has written: the date, and the round-id tag it
-# replaced. Both have to be recognised — coins carrying the old one are in
-# wallets right now, and a rule that stopped seeing them would stop refusing
-# them silently.
-_MARKERS = (" · ", " #")
-
-
-def _strip_marker(rest: str) -> str:
-    for sep in _MARKERS:
-        if sep in rest:
-            return rest[: rest.rindex(sep)].strip()
-    return rest
-
-
-def _party(label: str, prefix: str) -> Optional[str]:
-    """The counterparty named in one of our labels, or None if it is not one.
-
-    Matched from the start and only up to a separator we wrote, never as a
-    substring: a coin the user named "my Tango mix money" is theirs, not ours,
-    and refusing to spend it would be us reading our own meaning into their
-    words.
-
-    Accepts every shape this has written: the bare prefix, the prefix with
-    either marker, and the prefix with a name and an optional marker.
-    """
-    text = (label or "").strip()
-    if text == prefix:
-        return ""
-    if not text.startswith(f"{prefix} "):
-        return None
-    rest = text[len(prefix) + 1 :].strip()
-    if rest.startswith("- "):
-        rest = rest[2:].strip()
-    elif rest.startswith("#") or rest.startswith("·"):
-        return ""
-    else:
-        # "Tango mix something we never wrote" is the user's own text.
-        return None
-    return _strip_marker(rest)
-
-
-def coin_labels(
-    tx_outputs: dict,
-    denom: int,
-    scripts,
-    other_username: Optional[str],
-    when=None,
-) -> dict:
-    """Which of this side's coins is the share and which is the change, decided
-    by what each one is WORTH in the broadcast transaction.
-
-    WHY NOT JUST TRUST THE COLUMNS. a_mix_spk and a_change_spk say which is
-    which, and a label written from them is wrong in exactly the way that is
-    hardest to notice if either the client or the server ever puts them the
-    wrong way round: the wallet then calls the change coin a share, the send
-    guard refuses the safe pair and allows the dangerous one, and the label
-    reads plausibly throughout.
-
-    The transaction cannot be wrong about it. Both shares are worth the
-    denomination — that is the whole privacy claim, checked on both devices
-    before either signs — so an output of this side's worth exactly `denom` is
-    its share and anything else is its change. Reading it off the chain makes
-    the label true whatever the columns say, and disagreement becomes visible
-    rather than silent.
-
-    `tx_outputs` maps scriptPubKey hex to value; case and surrounding space are
-    ignored on both sides, since one comes off the wire and the other out of a
-    column. Scripts not in it are left out: the caller knows how many it asked
-    about and can say so.
-    """
-    outs = {
-        (k or "").strip().lower(): v for k, v in (tx_outputs or {}).items()
-    }
-    out = {}
-    for spk in scripts:
-        key = (spk or "").strip().lower()
-        if not key or key not in outs:
-            continue
-        value = int(outs[key])
-        naming = mix_label if value == int(denom) else change_label
-        out[key] = naming(other_username, when)
-    return out
-
-
-def undoes_a_round(labels) -> Optional[str]:
-    """The round(s) a selection of coins would undo, named, or None.
-
-    ANY TANGO SHARE WITH ANY TANGO CHANGE. Not only a share with its own
-    round's change, which is what this used to check and was too narrow.
-
-    The reasoning that led there was that the two have to add up — a round's
-    change plus its share is what that side put in, so the arithmetic resolves
-    which of the two identical shares was theirs. True, and not the only way
-    it goes wrong. A Tango change coin is attributable BY CONSTRUCTION: its
-    value plus a share equals an input total, so an observer can tie it to the
-    coins its owner brought, which is exactly the history that owner had before
-    the mix. A share is the opposite: it is the coin that history was cut off
-    from. Put the two in one transaction and the cut is repaired — the share
-    inherits the change's attribution — whoever the round was with and whenever
-    it happened. Change from the alice round reconnects a share from the bob
-    round just as well.
-
-    So the rule is by KIND, not by round, and the marker in the label is for
-    the human reading it rather than for this.
-
-    Returns the counterparty of the share(s) at risk, since the share is what
-    loses its protection. None when the selection is safe.
-    """
-    mixed = set()
-    has_change = False
-    for raw in labels:
-        who = _party(raw or "", MIX_LABEL)
-        if who is not None:
-            mixed.add(who or "someone")
-            continue
-        if _party(raw or "", CHANGE_LABEL) is not None:
-            has_change = True
-    if not mixed or not has_change:
-        return None
-    return " and ".join(sorted(mixed))
+    if my_fee is None or vsize is None or fee_rate is None:
+        return 0
+    if my_change:
+        return 0
+    a_share, b_share = split_fee(fee_for(int(vsize), float(fee_rate)))
+    planned = a_share if i_am_the_initiator else b_share
+    return max(0, int(my_fee) - planned)
 
 
 def is_expired(status: str, expires_at: Optional[int], now: int) -> bool:

@@ -8,6 +8,7 @@ from typing import Optional, Tuple, List
 from lnbits.db import Database
 from lnbits.helpers import urlsafe_short_hash
 from .helpers.appenv import silnt_env
+from .helpers import tango
 from .models import (
     Config,
     BackendConfig,
@@ -3261,15 +3262,23 @@ async def list_tango_rounds_for_user(
 
 
 async def get_tango_txids_for_wallet(wallet_id: str) -> dict:
-    """{txid: {denom_sats, partner}} for this wallet's broadcast rounds.
+    """{txid: {denom_sats, partner, fee_sats, change_sats, dust_to_fee}} for
+    this wallet's broadcast rounds, from THIS wallet's side.
 
     So the transaction list can say a mix happened. Without it a Tango is a
     send of the fee with a change coin's label on it — arithmetically true and
     unreadable: "-427, Tango change - alice" for a round that mixed 13,000.
+
+    The fee is this side's share, not the transaction's: the two differ
+    whenever one side's change was dropped as dust, and that side's is the one
+    its owner is trying to account for. dust_to_fee is how much of it was that
+    dropped change, so a wallet with no change coin can say where it went.
     """
     rows = await db.fetchall(
         """
-        SELECT txid, denom_sats, a_wallet_id, a_username, b_username
+        SELECT txid, denom_sats, a_wallet_id, a_username, b_username,
+               a_fee_sats, b_fee_sats, a_change_sats, b_change_sats,
+               vsize, fee_rate
         FROM silnt.tango_rounds
         WHERE status = 'BROADCAST' AND txid IS NOT NULL
           AND (a_wallet_id = :wid OR b_wallet_id = :wid)
@@ -3279,9 +3288,16 @@ async def get_tango_txids_for_wallet(wallet_id: str) -> dict:
     out = {}
     for r in rows:
         mine_is_a = r["a_wallet_id"] == wallet_id
+        my_fee = r["a_fee_sats"] if mine_is_a else r["b_fee_sats"]
+        my_change = r["a_change_sats"] if mine_is_a else r["b_change_sats"]
         out[r["txid"]] = {
             "denom_sats": int(r["denom_sats"] or 0),
             "partner": (r["b_username"] if mine_is_a else r["a_username"]) or "",
+            "fee_sats": int(my_fee or 0),
+            "change_sats": int(my_change or 0),
+            "dust_to_fee": tango.dust_to_fee(
+                my_fee, my_change, r["vsize"], r["fee_rate"], mine_is_a
+            ),
         }
     return out
 

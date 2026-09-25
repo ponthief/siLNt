@@ -712,3 +712,171 @@ def test_the_query_leaves_broadcast_rounds_alone():
     body = body[: body.index("async def get_reserved_tango_outpoints")]
     assert 's != "BROADCAST"' in body
     assert "TANGO_LIVE" in body
+
+
+# ── the round whose missing change looked like a bug ─────────────────────────
+# Signet 61511d8a53fc2ed4f5c33848547306638d63804feb19a8df917cb68591f6d27a:
+# five inputs (8000 + 1749 + 5000 + 11500 + 4000 = 30,249) and only THREE
+# outputs — 3073, 13,000, 13,000 — for a fee of 1176 over 427 vB.
+#
+# The side that put in 13,749 got one 13,000 coin and no change at all, and its
+# row read "-749" while the other side's read "-427" for the same transaction.
+# Both numbers are right and neither explains itself: 13,749 - 13,000 - 427 is
+# 322, which is under the 546 sat dust limit, so plan() dropped it and charged
+# it to the side whose excess it was. These hold that arithmetic, because the
+# alternative reading — that the wallet lost a coin — is the one a user reaches
+# for first, and it was wrong.
+
+REAL_DENOM = 13_000
+REAL_RATE = 2
+REAL_A_IN = 11_500 + 5_000        # the initiator
+REAL_B_IN = 8_000 + 4_000 + 1_749
+
+
+def real_round():
+    return tango.plan(
+        [coin(0xA0, 11_500, A_SECRET), coin(0xA1, 5_000, A_SECRET)],
+        [coin(0xB0, 8_000, B_SECRET), coin(0xB1, 4_000, B_SECRET),
+         coin(0xB2, 1_749, B_SECRET)],
+        REAL_DENOM, REAL_RATE,
+    )
+
+
+def test_the_planner_reproduces_that_transaction_exactly():
+    """Every number on chain, from the two sides' coins alone."""
+    p = real_round()
+    assert p["vsize"] == 427
+    assert p["a_change"] == 3073
+    assert p["b_change"] == 0
+    assert p["a_fee"] == 427
+    assert p["b_fee"] == 749
+    assert p["fee"] == 1176
+    # And it balances: what went in, less what came out, is the fee.
+    outs = REAL_DENOM * 2 + p["a_change"] + p["b_change"]
+    assert REAL_A_IN + REAL_B_IN - outs == 1176
+
+
+def test_the_side_with_no_change_paid_its_dust():
+    """749 is not a fee anyone chose. It is 427 of a real fee share plus 322 of
+    change too small to be worth an output."""
+    p = real_round()
+    assert p["b_fee"] - 427 == 322
+    assert REAL_B_IN - REAL_DENOM - 427 == 322
+    assert 322 < 546, "if this ever stops being dust the round gains an output"
+
+
+def test_dust_to_fee_recovers_the_322():
+    """What the wallet needs in order to say where the coin went. The round
+    stores the fee AFTER absorption, so this has to retrace it."""
+    p = real_round()
+    assert tango.dust_to_fee(
+        p["b_fee"], p["b_change"], p["vsize"], REAL_RATE, i_am_the_initiator=False
+    ) == 322
+
+
+def test_the_side_that_kept_its_change_absorbed_nothing():
+    p = real_round()
+    assert tango.dust_to_fee(
+        p["a_fee"], p["a_change"], p["vsize"], REAL_RATE, i_am_the_initiator=True
+    ) == 0
+
+
+def test_a_round_where_both_sides_keep_change_absorbs_nothing():
+    p = tango.plan(
+        [coin(0xA0, 14_000, A_SECRET)],
+        [coin(0xB0, 14_000, B_SECRET)],
+        REAL_DENOM, REAL_RATE,
+    )
+    assert p["a_change"] == p["b_change"] == 702
+    for fee, change, is_a in ((p["a_fee"], p["a_change"], True),
+                              (p["b_fee"], p["b_change"], False)):
+        assert tango.dust_to_fee(fee, change, p["vsize"], REAL_RATE, is_a) == 0
+
+
+def test_clean_does_not_mean_nothing_was_absorbed():
+    """A trap for anyone reading `clean` as "the coins covered it exactly".
+
+    It means only that no change OUTPUT exists, which is the privacy property
+    it was named for. Both sides here put in 86 sats more than the fee, kept
+    nothing, and paid it to the miner — a clean round in which each side
+    absorbed dust. So a wallet cannot use `clean` to decide whether to explain
+    a missing change coin; that is what dust_to_fee is for.
+    """
+    p = tango.plan(
+        [coin(0xA0, 13_298, A_SECRET)],
+        [coin(0xB0, 13_298, B_SECRET)],
+        REAL_DENOM, REAL_RATE,
+    )
+    assert p["clean"] and p["a_change"] == 0
+    assert tango.dust_to_fee(p["a_fee"], 0, p["vsize"], REAL_RATE, True) == 86
+    assert 13_298 - REAL_DENOM - 212 == 86
+
+
+def test_dust_to_fee_claims_nothing_when_a_field_is_missing():
+    """An old round predating these columns must not report a dust absorption
+    it cannot know about."""
+    assert tango.dust_to_fee(749, 0, None, 2, False) == 0
+    assert tango.dust_to_fee(749, 0, 427, None, False) == 0
+    assert tango.dust_to_fee(None, 0, 427, 2, False) == 0
+
+
+# ── which labels the transaction row may drop ────────────────────────────────
+
+
+def test_our_own_coin_labels_are_recognised():
+    assert tango.wrote_label("Tango mix - bob · 2026-09-25")
+    assert tango.wrote_label("Tango change - bob · 2026-09-25")
+    assert tango.wrote_label("Tango mix - bob #fagk")     # the old marker
+    assert tango.wrote_label("Tango change")             # bare, no counterparty
+
+
+def test_a_label_the_user_wrote_is_not_ours_to_drop():
+    """The row drops what this module wrote. Dropping the user's text because
+    it begins with the same word would lose the only note they kept."""
+    assert not tango.wrote_label("Tango mix money")
+    assert not tango.wrote_label("my Tango mix - bob · 2026-09-25")
+    assert not tango.wrote_label("rent")
+    assert not tango.wrote_label("")
+
+
+def test_the_real_rounds_labels_are_both_droppable():
+    """Both of the three badges that row carried, so one is left."""
+    got = tango.coin_labels(
+        REAL_OUTS, 4000, [REAL_A_MIX, REAL_A_CHANGE], "bob", "2026-09-24"
+    )
+    assert all(tango.wrote_label(v) for v in got.values())
+
+
+# ── the label vocabulary stands on its own ───────────────────────────────────
+# It moved out of this module so the transaction list could ask "is this label
+# one of ours?" without importing the signing stack to find out. That is only
+# true while it stays import-free, and nothing about editing it would say so.
+
+
+def test_the_label_vocabulary_imports_nothing_of_its_own():
+    """No curve, no embit, no wallet — it is string work.
+
+    Checked on the import statements rather than the text, because the module's
+    own docstring names the things it is avoiding.
+    """
+    import ast
+
+    tree = ast.parse((ROOT / "helpers" / "tangolabels.py").read_text())
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add((node.module or "").split(".")[0])
+    assert imported <= {"__future__", "typing"}, sorted(imported)
+
+
+def test_tango_still_re_exports_all_of_it():
+    """Every caller and test reaches these through tango.*, and the split was
+    supposed to be invisible to them."""
+    for name in (
+        "MIX_LABEL", "CHANGE_LABEL", "mix_label", "change_label",
+        "coin_labels", "undoes_a_round", "day_marker", "wrote_label",
+        "_party", "_strip_marker", "_MARKERS", "_named",
+    ):
+        assert hasattr(tango, name), name

@@ -12,6 +12,7 @@ from ..crud import (
     list_plain_incoming,
     clear_plain_incoming,
 )
+from . import tangolabels
 
 
 # Per-process in-memory cache. Keyed by (mempool_base, txid).
@@ -73,7 +74,9 @@ async def list_wallet_transactions(
         input_sum, output_sum,
         input_count, output_count,
         labels: [str],
-        confirmed: bool }                # False = send still in the mempool
+        confirmed: bool,                 # False = send still in the mempool
+        tango: {...} }                   # on kind 'tango' only: this side's
+                                         # denom, partner, fee and dropped dust
     """
     receives = {r["txid"]: r for r in await get_wallet_receives(wallet_id)}
     sends    = {s["txid"]: s for s in await get_wallet_sends(wallet_id)}
@@ -160,11 +163,22 @@ async def list_wallet_transactions(
     # the fee share — a true number that reads as a tiny payment to nobody,
     # under whichever of the two coins' labels sorted first. Named here so the
     # clients can say what happened instead.
+    #
+    # The round's own coin labels come off the row at the same time. "Tango mix
+    # - alice · 2026-09-25" and "Tango change - alice · 2026-09-25" say, twice,
+    # what the row above them already says once, and a row carrying three
+    # badges for one fact is harder to read than one carrying none. They are
+    # still on the coins, which is where a per-coin label belongs. A label the
+    # USER wrote on one of those coins survives — wrote_label only matches the
+    # shapes this feature writes.
     for row in rows:
         mix = tango_txids.get(row["txid"])
         if mix:
             row["kind"] = "tango"
             row["tango"] = mix
+            row["labels"] = [
+                lbl for lbl in (row["labels"] or []) if not tangolabels.wrote_label(lbl)
+            ]
 
     rows.sort(key=lambda r: r["timestamp"], reverse=True)
     return rows[offset:offset + limit]
