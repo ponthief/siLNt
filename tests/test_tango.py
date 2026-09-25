@@ -927,3 +927,125 @@ def test_a_reason_that_is_not_one_of_ours_names_nobody():
 
 def test_case_and_padding_do_not_hide_the_side():
     assert tango.who_cancelled("  Cancelled By A  ") == "a"
+
+
+# ── a coin a live round is holding ───────────────────────────────────────────
+# The reservation guarded /rounds and /accept only, so a second Tango could not
+# take a committed coin but an ORDINARY SEND could. The round then went all the
+# way to its last step, both people signed, and the node refused the finished
+# transaction with "bad-txns-inputs-missingorspent" — as a 502, naming no coin,
+# to whichever side happened to sign second.
+
+
+def test_the_two_spellings_of_an_outpoint_are_one():
+    """The reserved set was built from the txid as stored and looked up with it
+    lowercased. A miss there is a coin let into a second round, not a wasted
+    lookup."""
+    assert tango.outpoint_key("AB" * 32, 1) == tango.outpoint_key("ab" * 32, 1)
+    assert tango.outpoint_key("  ab  ", "2") == "ab:2"
+
+
+def test_a_held_coin_is_found_whatever_case_it_was_stored_in():
+    reserved = {tango.outpoint_key("AB" * 32, 0)}
+    rows = [{"txid": "ab" * 32, "vout": 0}]
+    assert tango.clashing_outpoints(rows, reserved) == [f"{'ab' * 32}:0"]
+
+
+def test_the_clash_is_quoted_back_as_it_was_asked_for():
+    """Not normalised: the user has never seen the normalised form."""
+    reserved = {tango.outpoint_key("ab" * 32, 3)}
+    assert tango.clashing_outpoints([{"txid": "AB" * 32, "vout": 3}], reserved) == [
+        f"{'AB' * 32}:3"
+    ]
+
+
+def test_every_shape_a_caller_sends_is_checked():
+    """Dicts from a send, stored round rows, and (txid, vout) pairs all reach
+    this. A shape it skipped would pass the coin straight through."""
+    reserved = {tango.outpoint_key("cd" * 32, 7)}
+
+    class Row:
+        txid = "cd" * 32
+        vout = 7
+
+    for rows in (
+        [{"txid": "cd" * 32, "vout": 7}],
+        [("cd" * 32, 7)],
+        [Row()],
+    ):
+        assert tango.clashing_outpoints(rows, reserved), rows
+
+
+def test_free_coins_clash_with_nothing():
+    reserved = {tango.outpoint_key("cd" * 32, 7)}
+    assert tango.clashing_outpoints([{"txid": "ef" * 32, "vout": 7}], reserved) == []
+    assert tango.clashing_outpoints([{"txid": "cd" * 32, "vout": 8}], reserved) == []
+    assert tango.clashing_outpoints([], reserved) == []
+    assert tango.clashing_outpoints([{"txid": "cd" * 32, "vout": 7}], set()) == []
+
+
+def test_a_row_with_no_outpoint_is_skipped_not_guessed():
+    assert tango.clashing_outpoints([{"vout": 0}], {"none:0"}) == []
+
+
+def test_the_refusal_says_where_the_coins_went_and_how_to_get_them_back():
+    one = tango.reserved_refusal(["abc:0"])
+    assert "Tango" in one and "Cancel" in one
+    assert one.startswith("That coin is")
+    assert tango.reserved_refusal(["abc:0", "abc:1"]).startswith("Those coins are")
+    assert tango.reserved_refusal([]) == ""
+
+
+def test_a_round_whose_coins_are_gone_says_so_in_words():
+    """Replacing a 502 carrying the node's "bad-txns-inputs-missingorspent",
+    which names no coin and says nothing to do."""
+    msg = tango.spent_input_refusal(["deadbeef:0"])
+    assert "deadbeef:0" in msg
+    assert "Cancel" in msg
+    assert msg.startswith("A coin")
+    assert tango.spent_input_refusal(["a:0", "b:1"]).startswith("Coins")
+    assert tango.spent_input_refusal([]) == ""
+
+
+def test_the_send_paths_refuse_a_coin_a_round_is_holding():
+    """There is no database here to prove it on, so this reads the endpoints.
+
+    Both of them: /tx/prepare quotes the fee and /tx/build still signs for the
+    older clients, and a guard on only one of them is a guard with a way round.
+    """
+    src = (ROOT / "views_api.py").read_text()
+    for marker in ('"/api/v1/tx/prepare"', '"/api/v1/tx/build"'):
+        start = src.index(marker)
+        body = src[start : src.index("@silnt_api_router", start + len(marker))]
+        assert "_refuse_tango_reserved(" in body, marker
+        assert "validate_spendable_utxos(" in body, marker
+
+
+def test_signing_checks_the_coins_still_exist_before_anyone_signs():
+    src = (ROOT / "views_api.py").read_text()
+    body = src[src.index("async def api_tango_sign"):]
+    body = body[: body.index("@silnt_api_router")]
+    assert "_refuse_spent_tango_inputs(" in body
+    # Before the witness work, not after: the point is to refuse without
+    # asking anyone to sign a transaction that cannot confirm.
+    assert body.index("_refuse_spent_tango_inputs(") < body.index("verify_witnesses(")
+
+
+def test_the_spent_check_covers_both_sides():
+    """The coin that went is as likely to be the other side's, and the round is
+    equally dead either way."""
+    src = (ROOT / "views_api.py").read_text()
+    body = src[src.index("async def _refuse_spent_tango_inputs"):]
+    body = body[: body.index("async def _refuse_tango_reserved")]
+    assert "rnd.a_wallet_id, rnd.a_inputs" in body
+    assert "rnd.b_wallet_id, rnd.b_inputs" in body
+
+
+def test_the_utxo_list_says_which_coins_a_round_is_holding():
+    """So a coin does not simply vanish from Send and Tango with nothing to
+    explain it."""
+    src = (ROOT / "views_api.py").read_text()
+    body = src[src.index("async def api_get_utxos"):]
+    body = body[: body.index("@silnt_api_router")]
+    assert "tango_reserved" in body
+    assert "get_reserved_tango_outpoints(" in body

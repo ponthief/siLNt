@@ -3356,7 +3356,8 @@ async def get_reserved_tango_outpoints(user_id: str) -> set:
                 continue
             try:
                 for i in json.loads(raw):
-                    reserved.add(f"{i['txid']}:{i['vout']}")
+                    # Normalised here and at every lookup: see tango.outpoint_key.
+                    reserved.add(tango.outpoint_key(i["txid"], i["vout"]))
             except (ValueError, KeyError, TypeError):
                 continue
     return reserved

@@ -125,6 +125,81 @@ def can_cancel(status: str) -> bool:
     return status not in TERMINAL
 
 
+def outpoint_key(txid, vout) -> str:
+    """One spelling of "txid:vout", for both sides of every comparison.
+
+    The reserved set was built from the stored txid as written and looked up
+    with it lowercased, so the two agreed only as long as every row happened to
+    be lower case. A miss there is not a wasted lookup — it is a coin let into
+    a second round, and two rounds spending one coin make a transaction the
+    network refuses with bad-txns-inputs-missingorspent, which neither party
+    can read.
+    """
+    return f"{str(txid).strip().lower()}:{int(vout)}"
+
+
+def clashing_outpoints(rows, reserved) -> list[str]:
+    """Which of these coins are already committed to a live round.
+
+    Returned as the caller spelled them, so a message quotes back what was
+    asked for rather than a normalised form the user has never seen.
+    """
+    held = reserved or set()
+    out = []
+    for r in rows or []:
+        # Three shapes reach this: the {txid, vout} dicts a send posts, the
+        # stored input rows of a round, and (txid, vout) pairs. Matching
+        # helpers/send_guards.py, which takes the same range from the same
+        # callers — a guard that silently skipped a shape would pass the coin.
+        if isinstance(r, dict):
+            txid, vout = r.get("txid"), r.get("vout", 0)
+        elif isinstance(r, (tuple, list)):
+            txid, vout = r[0], r[1]
+        else:
+            txid, vout = getattr(r, "txid", None), getattr(r, "vout", 0) or 0
+        if txid is None:
+            continue
+        if outpoint_key(txid, vout) in held:
+            out.append(f"{txid}:{vout}")
+    return out
+
+
+def spent_input_refusal(gone: list) -> str:
+    """Why a round cannot go through, when a coin in it no longer exists.
+
+    THE MESSAGE THIS REPLACES was the node's: "bad-txns-inputs-missingorspent",
+    arriving as a 502 at the very last step, after both people had signed. It
+    names no coin, says nothing about what to do, and reaches whichever side
+    happened to sign second — who is quite likely not the one whose coin went.
+    """
+    if not gone:
+        return ""
+    which = "A coin" if len(gone) == 1 else "Coins"
+    return (
+        f"{which} in this Tango no longer exists to spend ({', '.join(gone)}) "
+        f"— spent elsewhere, or frozen, since the round was agreed. It cannot "
+        f"go through. Cancel it, and start again with coins you still hold."
+    )
+
+
+def reserved_refusal(clash: list) -> str:
+    """Why a coin cannot be used, for whoever is trying to use it.
+
+    ONE WORDING FOR TWO CALLERS, because the situation is one situation: a coin
+    is committed to a round that has not finished. A second Tango says so
+    already; an ordinary send did not, and spending the coin from under a live
+    round is how that round came to fail at the very last step — after both
+    people had signed — with a message from the node about missing inputs.
+    """
+    if not clash:
+        return ""
+    which = "That coin is" if len(clash) == 1 else "Those coins are"
+    return (
+        f"{which} committed to a Tango that has not finished. Cancel the "
+        f"Tango first, under Tango → Rounds, and they are yours again."
+    )
+
+
 # Why a round ended, as reject_reason. Three of the four are already sentences;
 # a cancellation is the one that needs to name somebody, and the name depends on
 # who is reading. So the column keeps the SIDE and each client turns it into

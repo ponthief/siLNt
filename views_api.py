@@ -852,10 +852,21 @@ async def api_get_utxos(
         raise HTTPException(
             status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
         )
+    if wallet.user != key_info.wallet.user:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
     utxos = await get_utxos_for_wallet(wallet_id)
-    return {
-        "utxos": [u.dict() for u in utxos],
-    }
+    # Which coins a live Tango is holding. The server refuses to spend these
+    # either way; saying so here is what lets a coin list show it as held
+    # rather than offering it and failing at the end.
+    from .helpers.tango import outpoint_key
+
+    reserved = await get_reserved_tango_outpoints(key_info.wallet.user)
+    out = []
+    for u in utxos:
+        d = u.dict()
+        d["tango_reserved"] = outpoint_key(d["txid"], d["vout"]) in reserved
+        out.append(d)
+    return {"utxos": out}
 
 
 @silnt_api_router.post("/api/v1/wallet/{wallet_id}/scan")
@@ -1424,6 +1435,9 @@ async def api_prepare_transaction(
         data.utxos,
         bool(get_scan_progress(data.wallet_id).get("active")),
     )
+    # A coin a live Tango is holding is not spendable here either. Without
+    # this, the send succeeds and the round dies at its last step.
+    await _refuse_tango_reserved(key_info.wallet.user, data.utxos)
     recipient = await resolve_recipient(data.recipient)
 
     # The client only implements the Silent Payments derivation. Every other
@@ -1512,6 +1526,7 @@ async def api_build_transaction(
             data.utxos,
             bool(get_scan_progress(data.wallet_id).get("active")),
         )
+        await _refuse_tango_reserved(key_info.wallet.user, data.utxos)
         data.recipient = await resolve_recipient(data.recipient)
 
         result = build_transaction(
@@ -4747,20 +4762,67 @@ async def _notify_tango(user_id: str, title: str, body: str) -> None:
         logger.warning(f"tango push failed for {user_id}: {e}")
 
 
-async def _tango_refuse_reserved(user_id: str, rows: list) -> None:
+async def _refuse_spent_tango_inputs(rnd) -> None:
+    """Refuse a round whose coins no longer exist to spend.
+
+    /accept checked both sides' coins; nothing checked them again, and a round
+    lives for up to a day. In that window a coin can go: spent from another
+    device, frozen, or — until the send paths learned about reservations —
+    spent by an ordinary send from this very wallet.
+
+    Until now the first anyone heard of it was the node refusing the finished
+    transaction with "bad-txns-inputs-missingorspent", as a 502, after both
+    people had signed. Checked here so it is caught before either signature is
+    asked for, and said in words that name the coin.
+
+    Both sides are checked whichever side is calling: the coin that went is as
+    likely to be the other one's, and the round is equally dead either way.
+    """
+    from .crud import get_eligible_utxos
+    from .helpers.tango import spent_input_refusal
+
+    gone = []
+    for wallet_id, raw in ((rnd.a_wallet_id, rnd.a_inputs),
+                           (rnd.b_wallet_id, rnd.b_inputs)):
+        if not wallet_id or not raw:
+            continue
+        pairs = [(str(i["txid"]), int(i["vout"])) for i in _pj_inputs(raw)]
+        if not pairs:
+            continue
+        eligible = {
+            (str(r["txid"]).lower(), int(r["vout"]))
+            for r in await get_eligible_utxos(wallet_id, pairs)
+        }
+        gone += [
+            f"{t}:{v}" for t, v in pairs if (t.lower(), int(v)) not in eligible
+        ]
+    if gone:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT, detail=spent_input_refusal(gone)
+        )
+
+
+async def _refuse_tango_reserved(user_id: str, rows: list) -> None:
+    """Refuse coins a live Tango is already holding.
+
+    CALLED BY THE SEND PATHS TOO, and that is the point. This used to guard
+    only /rounds and /accept, so a second Tango could not take a committed
+    coin but an ordinary send could — and did. The round then went all the way
+    to the last step, both people signed it, and the network refused it with
+    "bad-txns-inputs-missingorspent", which says nothing to either of them
+    about what happened or which coin it was.
+
+    A round holds its coins for a day at most (TANGO_EXPIRY_SECONDS) and either
+    side can cancel it at any point before the broadcast, so the coins are
+    never stuck: the refusal says where to go and get them back.
+    """
+    from .helpers.tango import clashing_outpoints, reserved_refusal
+
     reserved = await get_reserved_tango_outpoints(user_id)
-    clash = [
-        f"{i['txid']}:{i['vout']}"
-        for i in rows
-        if f"{str(i['txid']).lower()}:{int(i['vout'])}" in reserved
-    ]
+    clash = clashing_outpoints(rows, reserved)
     if clash:
         raise HTTPException(
-            status_code=HTTPStatus.CONFLICT,
-            detail=(
-                f"{'That coin is' if len(clash) == 1 else 'Those coins are'} "
-                f"already committed to another pending Tango."
-            ),
+            status_code=HTTPStatus.CONFLICT, detail=reserved_refusal(clash)
         )
 
 
@@ -4805,7 +4867,7 @@ async def api_tango_propose(
     except ValueError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
     await _pj_validate_inputs(data.wallet_id, rows)
-    await _tango_refuse_reserved(uid, rows)
+    await _refuse_tango_reserved(uid, rows)
 
     # Priced against A's own coins standing in for B's, so an impossible
     # denomination is refused now rather than by the person invited.
@@ -4947,7 +5009,7 @@ async def api_tango_accept(
     except ValueError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
     await _pj_validate_inputs(data.wallet_id, rows)
-    await _tango_refuse_reserved(uid, rows)
+    await _refuse_tango_reserved(uid, rows)
 
     a_rows = _pj_inputs(rnd.a_inputs)
     overlap = {(str(i["txid"]).lower(), int(i["vout"])) for i in rows} & {
@@ -5032,6 +5094,9 @@ async def api_tango_sign(
         raise HTTPException(
             status_code=HTTPStatus.GONE, detail="This Tango has expired."
         )
+    # And the coins still have to exist. See _refuse_spent_tango_inputs: the
+    # alternative is the node saying so, in hex, to whoever signed second.
+    await _refuse_spent_tango_inputs(rnd)
 
     if role == "a":
         try:
