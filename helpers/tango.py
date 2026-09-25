@@ -174,11 +174,14 @@ def spent_input_refusal(gone: list) -> str:
     """
     if not gone:
         return ""
-    which = "A coin" if len(gone) == 1 else "Coins"
+    one = len(gone) == 1
+    which = "A coin" if one else "Coins"
+    it = "it" if one else "they"
     return (
-        f"{which} in this Tango no longer exists to spend ({', '.join(gone)}) "
-        f"— spent elsewhere, or frozen, since the round was agreed. It cannot "
-        f"go through. Cancel it, and start again with coins you still hold."
+        f"{which} in this Tango cannot be spent any more ({', '.join(gone)}) "
+        f"— already spent, or frozen, since the round was agreed. This round "
+        f"cannot go through: cancel it and start again. The wallet's record "
+        f"has been corrected, so {it} will not be offered for the next one."
     )
 
 

@@ -4763,7 +4763,7 @@ async def _notify_tango(user_id: str, title: str, body: str) -> None:
 
 
 async def _refuse_spent_tango_inputs(rnd) -> None:
-    """Refuse a round whose coins no longer exist to spend.
+    """Refuse a round whose coins no longer exist to spend, and say which.
 
     /accept checked both sides' coins; nothing checked them again, and a round
     lives for up to a day. In that window a coin can go: spent from another
@@ -4772,14 +4772,33 @@ async def _refuse_spent_tango_inputs(rnd) -> None:
 
     Until now the first anyone heard of it was the node refusing the finished
     transaction with "bad-txns-inputs-missingorspent", as a 502, after both
-    people had signed. Checked here so it is caught before either signature is
-    asked for, and said in words that name the coin.
+    people had signed. It names no coin and says nothing to do, and it reaches
+    whichever side happened to sign second — who is quite likely not the one
+    whose coin went.
 
-    Both sides are checked whichever side is calling: the coin that went is as
-    likely to be the other one's, and the round is equally dead either way.
+    THE CHAIN IS ASKED, NOT ONLY THE DATABASE, and that is the part that
+    matters. This wallet learns a coin was spent by SCANNING the block that
+    spent it, so until the scanner reaches that height its own record still
+    says unspent — which is precisely the case where the node disagrees. A
+    check against our own columns would pass, cheerfully, every time.
+
+    And when the chain says spent while our record says otherwise, the record
+    is corrected here. Otherwise the coin stays in the wallet's coin list,
+    gets picked for the next round, and fails exactly the same way — which is
+    the loop this was found in.
+
+    An outpoint the explorer cannot answer for is left alone. Not knowing is
+    not evidence, and a round refused on a failed HTTP call would be a worse
+    bug than the one this fixes.
     """
-    from .crud import get_eligible_utxos
+    import asyncio
+
+    from .crud import get_eligible_utxos, mark_utxos_spent_by_outpoints
+    from .helpers.scan import get_outspend_status
     from .helpers.tango import spent_input_refusal
+
+    cfg = await get_backend_config(rnd.network)
+    mempool = cfg.mempool_url or "https://mempool.space"
 
     gone = []
     for wallet_id, raw in ((rnd.a_wallet_id, rnd.a_inputs),
@@ -4789,13 +4808,40 @@ async def _refuse_spent_tango_inputs(rnd) -> None:
         pairs = [(str(i["txid"]), int(i["vout"])) for i in _pj_inputs(raw)]
         if not pairs:
             continue
+
+        # Our own columns first: frozen, or a spend we already knew about.
         eligible = {
             (str(r["txid"]).lower(), int(r["vout"]))
             for r in await get_eligible_utxos(wallet_id, pairs)
         }
-        gone += [
-            f"{t}:{v}" for t, v in pairs if (t.lower(), int(v)) not in eligible
-        ]
+        mine = [f"{t}:{v}" for t, v in pairs if (t.lower(), int(v)) not in eligible]
+
+        # Then the chain, for the ones we still believe in.
+        believed = [p for p in pairs if (p[0].lower(), int(p[1])) in eligible]
+        if believed:
+            results = await asyncio.gather(
+                *(get_outspend_status(mempool, t, v) for t, v in believed),
+                return_exceptions=True,
+            )
+            repair = []
+            for (t, v), res in zip(believed, results):
+                if not isinstance(res, dict) or not res.get("spent"):
+                    continue
+                mine.append(f"{t}:{v}")
+                repair.append(((t, v), res.get("spent_by")))
+            for (t, v), spender in repair:
+                try:
+                    await mark_utxos_spent_by_outpoints(
+                        wallet_id=wallet_id,
+                        outpoints=[(t, v)],
+                        spending_txid=spender or "unknown",
+                    )
+                except Exception as e:
+                    # The refusal below is the part that protects the round.
+                    logger.warning(f"tango {rnd.id}: could not mark {t}:{v} spent: {e}")
+
+        gone += mine
+
     if gone:
         raise HTTPException(
             status_code=HTTPStatus.CONFLICT, detail=spent_input_refusal(gone)

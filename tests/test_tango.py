@@ -1001,8 +1001,11 @@ def test_a_round_whose_coins_are_gone_says_so_in_words():
     which names no coin and says nothing to do."""
     msg = tango.spent_input_refusal(["deadbeef:0"])
     assert "deadbeef:0" in msg
-    assert "Cancel" in msg
+    assert "cancel it" in msg
     assert msg.startswith("A coin")
+    # The record is corrected when this fires, so the same coin is not offered
+    # for the next round — being told to start again is no use otherwise.
+    assert "will not be offered" in msg
     assert tango.spent_input_refusal(["a:0", "b:1"]).startswith("Coins")
     assert tango.spent_input_refusal([]) == ""
 
@@ -1029,6 +1032,24 @@ def test_signing_checks_the_coins_still_exist_before_anyone_signs():
     # Before the witness work, not after: the point is to refuse without
     # asking anyone to sign a transaction that cannot confirm.
     assert body.index("_refuse_spent_tango_inputs(") < body.index("verify_witnesses(")
+
+
+def test_the_spent_check_asks_the_chain_not_only_our_columns():
+    """THE CASE THAT KEPT FAILING. A wallet learns a coin was spent by scanning
+    the block that spent it, so until the scanner reaches that height its own
+    record still says unspent — which is exactly when the node disagrees. A
+    check against our own columns passes, cheerfully, every time.
+
+    And the record is repaired, or the coin stays in the coin list, gets picked
+    for the next round, and fails identically. That was the loop.
+    """
+    src = (ROOT / "views_api.py").read_text()
+    body = src[src.index("async def _refuse_spent_tango_inputs"):]
+    body = body[: body.index("async def _refuse_tango_reserved")]
+    assert "get_outspend_status(" in body
+    assert "mark_utxos_spent_by_outpoints(" in body
+    # An explorer that cannot answer must not refuse a good round.
+    assert 'isinstance(res, dict)' in body and 'res.get("spent")' in body
 
 
 def test_the_spent_check_covers_both_sides():
