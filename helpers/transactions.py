@@ -8,6 +8,7 @@ from ..crud import (
     get_utxos_for_txid,
     get_utxos_spent_in_tx,
     get_owned_pubkeys,
+    get_tango_txids_for_wallet,
     list_plain_incoming,
     clear_plain_incoming,
 )
@@ -42,6 +43,22 @@ async def _fetch_tx_from_mempool(txid: str, mempool_base: str) -> dict | None:
         return None
 
 
+def classify(input_sum: int, output_sum: int) -> tuple:
+    """(kind, amount_sats) for a transaction this wallet had inputs in.
+
+    THE DIRECTION FOLLOWS THE NET, not the fact that inputs were spent. That
+    was the bug: a PayJoin's payee contributes a coin of its own and still ends
+    up ahead, so "it spent something, therefore it is a send" produced a row
+    reading "Sent" beside a positive number. Anything where both parties put
+    coins in has the same shape.
+
+    The amount is signed throughout — negative out, positive in — so a caller
+    never has to know which of the two fields to negate.
+    """
+    net = int(output_sum) - int(input_sum)
+    return ("receive" if net > 0 else "send"), net
+
+
 async def list_wallet_transactions(
     wallet_id: str,
     limit:     int = 50,
@@ -51,7 +68,7 @@ async def list_wallet_transactions(
     Combined chronological transaction list from local DB (no mempool calls).
 
     Each row:
-      { kind: 'send'|'receive',
+      { kind: 'send'|'receive'|'tango',
         txid, timestamp, amount_sats,    # negative = net outflow, positive = inflow
         input_sum, output_sum,
         input_count, output_count,
@@ -60,6 +77,7 @@ async def list_wallet_transactions(
     """
     receives = {r["txid"]: r for r in await get_wallet_receives(wallet_id)}
     sends    = {s["txid"]: s for s in await get_wallet_sends(wallet_id)}
+    tango_txids = await get_tango_txids_for_wallet(wallet_id)
 
     # Plain-chain payments the wallet has made to its OWN Silent Payments
     # address, recorded at broadcast. Until the confirming block is scanned they
@@ -82,14 +100,13 @@ async def list_wallet_transactions(
         snd = sends.get(txid)
 
         if snd:
-            # Spent inputs → a send. If the wallet also owns an output (change or
-            # a consolidation back to self), subtract it so amount = net outflow.
+            # Spent inputs. The amount is the NET: what the wallet put in, less
+            # anything of its own that came back — change, a consolidation to
+            # self, or a share of a mix.
             input_sum    = snd["input_sum"]
             output_sum   = rcv["output_sum"] if rcv else 0
-            net_out      = input_sum - output_sum     # sent amount + fee
-            kind         = "send"
+            kind, amount_sats = classify(input_sum, output_sum)
             timestamp    = snd["spent_at"] or (rcv["timestamp"] if rcv else 0)
-            amount_sats  = -net_out                   # negative = outflow
             labels       = rcv["labels"] if rcv else []
             input_count  = snd["input_count"]
             output_count = rcv["output_count"] if rcv else 0
@@ -137,6 +154,17 @@ async def list_wallet_transactions(
             # recorded by a scan, which only ever sees mined blocks.
             "confirmed":    False,
         })
+
+    # A MIX IS NOT A PAYMENT, and the arithmetic alone cannot say so. Both
+    # sides of a Tango put in and take back the same amount, so the net is just
+    # the fee share — a true number that reads as a tiny payment to nobody,
+    # under whichever of the two coins' labels sorted first. Named here so the
+    # clients can say what happened instead.
+    for row in rows:
+        mix = tango_txids.get(row["txid"])
+        if mix:
+            row["kind"] = "tango"
+            row["tango"] = mix
 
     rows.sort(key=lambda r: r["timestamp"], reverse=True)
     return rows[offset:offset + limit]

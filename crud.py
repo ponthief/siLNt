@@ -3260,6 +3260,32 @@ async def list_tango_rounds_for_user(
     return [TangoRound(**r) for r in rows]
 
 
+async def get_tango_txids_for_wallet(wallet_id: str) -> dict:
+    """{txid: {denom_sats, partner}} for this wallet's broadcast rounds.
+
+    So the transaction list can say a mix happened. Without it a Tango is a
+    send of the fee with a change coin's label on it — arithmetically true and
+    unreadable: "-427, Tango change - alice" for a round that mixed 13,000.
+    """
+    rows = await db.fetchall(
+        """
+        SELECT txid, denom_sats, a_wallet_id, a_username, b_username
+        FROM silnt.tango_rounds
+        WHERE status = 'BROADCAST' AND txid IS NOT NULL
+          AND (a_wallet_id = :wid OR b_wallet_id = :wid)
+        """,
+        {"wid": wallet_id},
+    )
+    out = {}
+    for r in rows:
+        mine_is_a = r["a_wallet_id"] == wallet_id
+        out[r["txid"]] = {
+            "denom_sats": int(r["denom_sats"] or 0),
+            "partner": (r["b_username"] if mine_is_a else r["a_username"]) or "",
+        }
+    return out
+
+
 async def list_live_tango_rounds_between(
     a_user_id: str, b_user_id: str, network: str
 ) -> list[TangoRound]:
