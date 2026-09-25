@@ -2710,9 +2710,26 @@ async def api_restore_utxo(data: RestoreUtxoRequest):
     )
     if status is not None and not status.get("unknown"):
         if status.get("confirmed"):
+            # Finalise it. The row is 'unconfirmed_spent' only because nothing
+            # has revisited it: the reconciler that would is part of a scan, so
+            # a coin whose spend confirmed after the last scan sits provisional
+            # indefinitely, and the one button offered for it refuses to act.
+            # We have just learned the answer — writing it down is the whole of
+            # what was missing, and it is what stops the coin coming back.
+            finalised = await mark_utxos_confirmed_spent_by_tx(
+                data.wallet_id, utxo["spent_in_txid"]
+            )
+            if finalised:
+                await update_balance(
+                    data.wallet_id,
+                    await get_wallet_unspent_balance(data.wallet_id),
+                )
             raise HTTPException(
                 status_code=HTTPStatus.CONFLICT,
-                detail="The spending transaction has confirmed — this UTXO is genuinely spent.",
+                detail=(
+                    "The spending transaction has confirmed — this coin is "
+                    "genuinely spent, and is now recorded that way."
+                ),
             )
         raise HTTPException(
             status_code=HTTPStatus.CONFLICT,
@@ -4793,7 +4810,11 @@ async def _refuse_spent_tango_inputs(rnd) -> None:
     """
     import asyncio
 
-    from .crud import get_eligible_utxos, mark_utxos_spent_by_outpoints
+    from .crud import (
+        get_eligible_utxos,
+        mark_utxos_confirmed_spent_by_tx,
+        mark_utxos_spent_by_outpoints,
+    )
     from .helpers.scan import get_outspend_status
     from .helpers.tango import spent_input_refusal
 
@@ -4828,14 +4849,26 @@ async def _refuse_spent_tango_inputs(rnd) -> None:
                 if not isinstance(res, dict) or not res.get("spent"):
                     continue
                 mine.append(f"{t}:{v}")
-                repair.append(((t, v), res.get("spent_by")))
-            for (t, v), spender in repair:
+                # Only with a real spender. An invented txid would be worse
+                # than no record: reconcile_unconfirmed_spent asks the explorer
+                # about whatever is in spent_in_txid, gets "unknown" for a
+                # placeholder, reads that as a spend that never happened, and
+                # restores a genuinely spent coin to spendable.
+                if res.get("spent_by"):
+                    repair.append(((t, v), res["spent_by"], bool(res.get("confirmed"))))
+            for (t, v), spender, confirmed in repair:
                 try:
                     await mark_utxos_spent_by_outpoints(
                         wallet_id=wallet_id,
                         outpoints=[(t, v)],
-                        spending_txid=spender or "unknown",
+                        spending_txid=spender,
                     )
+                    # A spend already in a block is 'spent', not provisional.
+                    # Left at 'unconfirmed_spent' it waits for a reconciler
+                    # that only runs inside a scan, and until then the coin is
+                    # neither spendable nor restorable.
+                    if confirmed:
+                        await mark_utxos_confirmed_spent_by_tx(wallet_id, spender)
                 except Exception as e:
                     # The refusal below is the part that protects the round.
                     logger.warning(f"tango {rnd.id}: could not mark {t}:{v} spent: {e}")

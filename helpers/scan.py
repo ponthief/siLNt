@@ -468,9 +468,9 @@ def sync_block_reverse(compute_index, utxos, scan_key, spend_pub_key, labels):
 async def get_outspend_status(base_mempool_url: str, txid: str, vout: int) -> dict | None:
     """
     Exact-outpoint spent check via mempool.
-    Returns {"spent": bool, "spent_by": txid|None} when known, or None on
-    unknown/error (caller leaves the UTXO in unconfirmed_spent and retries next
-    scan).
+    Returns {"spent": bool, "spent_by": txid|None, "confirmed": bool} when
+    known, or None on unknown/error (caller leaves the UTXO in
+    unconfirmed_spent and retries next scan).
 
     `spent_by` is the transaction that took it, when the explorer says. The
     wallet's own record of a spend comes from scanning the block it is in, so
@@ -478,6 +478,11 @@ async def get_outspend_status(base_mempool_url: str, txid: str, vout: int) -> di
     unspent — and whoever tries to spend it hears about it from the node
     instead, as "bad-txns-inputs-missingorspent". This is how a caller can ask
     the chain directly and then fix its own record.
+
+    `confirmed` decides which record to write. A spend sitting in the mempool
+    is 'unconfirmed_spent', which can still be undone if it never lands; one in
+    a block is 'spent', and leaving it provisional means the coin sits in the
+    wallet forever as neither, with a Restore button that refuses it.
     """
     base = (base_mempool_url or "https://mempool.space").rstrip("/")
     url = f"{base}/api/tx/{txid}/outspend/{vout}"
@@ -493,6 +498,7 @@ async def get_outspend_status(base_mempool_url: str, txid: str, vout: int) -> di
             return {
                 "spent": bool(data.get("spent", False)),
                 "spent_by": data.get("txid") or None,
+                "confirmed": bool((data.get("status") or {}).get("confirmed")),
             }
     except Exception as e:
         logger.warning(f"outspend check failed for {txid}:{vout}: {e}")
