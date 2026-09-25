@@ -458,5 +458,45 @@
         "undoes": null
       }
     ]
+  },
+  "endings": {
+    "cancelled_by_a": "cancelled by a",
+    "cancelled_by_b": "cancelled by b",
+    "expired": "expired",
+    "connection_removed": "connection removed",
+    "cases": [
+      {
+        "reason": "cancelled by a",
+        "who": "a"
+      },
+      {
+        "reason": "cancelled by b",
+        "who": "b"
+      },
+      {
+        "reason": "Cancelled By A",
+        "who": "a"
+      },
+      {
+        "reason": "expired",
+        "who": null
+      },
+      {
+        "reason": "connection removed",
+        "who": null
+      },
+      {
+        "reason": "cancelled by carol",
+        "who": null
+      },
+      {
+        "reason": "",
+        "who": null
+      },
+      {
+        "reason": null,
+        "who": null
+      }
+    ]
   }
 }

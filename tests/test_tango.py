@@ -880,3 +880,50 @@ def test_tango_still_re_exports_all_of_it():
         "_party", "_strip_marker", "_MARKERS", "_named",
     ):
         assert hasattr(tango, name), name
+
+
+# ── why a round ended ────────────────────────────────────────────────────────
+# reject_reason is read by two clients and shown to a person, so the wording is
+# a contract. A cancellation keeps the SIDE rather than a name, because the name
+# depends on who is reading — and for a while the web printed the raw value, so
+# a stopped round read "Cancelled · cancelled by a".
+
+
+def test_a_cancellation_records_which_side_stopped_it():
+    assert tango.cancelled_by("a") == "cancelled by a"
+    assert tango.cancelled_by("b") == "cancelled by b"
+
+
+def test_only_a_party_can_be_recorded_as_cancelling():
+    for role in ("c", "", "A ", "alice", None):
+        with pytest.raises(ValueError):
+            tango.cancelled_by(role)
+
+
+def test_the_reason_reads_back_as_the_side_that_wrote_it():
+    for role in ("a", "b"):
+        assert tango.who_cancelled(tango.cancelled_by(role)) == role
+
+
+def test_rounds_cancelled_before_this_existed_still_read():
+    """The wording is unchanged on purpose: the endpoint has been writing this
+    exact string, and those rows are in the database now. Changing it would
+    leave every past cancellation unattributable."""
+    assert tango.who_cancelled("cancelled by a") == "a"
+    assert tango.who_cancelled("cancelled by b") == "b"
+
+
+def test_the_other_endings_are_nobody_cancelling():
+    """An expiry is not a refusal — the time ran out and the coins went back —
+    and a severed connection is the app closing the round, not a person."""
+    assert tango.who_cancelled(tango.EXPIRED) is None
+    assert tango.who_cancelled(tango.CONNECTION_REMOVED) is None
+
+
+def test_a_reason_that_is_not_one_of_ours_names_nobody():
+    for reason in ("cancelled by carol", "cancelled by", "cancelled", "", None):
+        assert tango.who_cancelled(reason) is None, reason
+
+
+def test_case_and_padding_do_not_hide_the_side():
+    assert tango.who_cancelled("  Cancelled By A  ") == "a"

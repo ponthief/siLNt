@@ -273,6 +273,35 @@ def labels() -> dict:
     }
 
 
+def endings() -> dict:
+    """Why a round ended, as the column holds it.
+
+    The clients turn these into a sentence naming whoever ended it, so the
+    exact stored text is the contract between the two. It is also what rounds
+    cancelled before the clients could read it are stored as, which is why the
+    wording is pinned here rather than left to whatever the endpoint writes.
+    """
+    return {
+        "cancelled_by_a": _t.cancelled_by("a"),
+        "cancelled_by_b": _t.cancelled_by("b"),
+        "expired": _t.EXPIRED,
+        "connection_removed": _t.CONNECTION_REMOVED,
+        "cases": [
+            {"reason": r, "who": _t.who_cancelled(r)}
+            for r in (
+                "cancelled by a",
+                "cancelled by b",
+                "Cancelled By A",
+                "expired",
+                "connection removed",
+                "cancelled by carol",
+                "",
+                None,
+            )
+        ],
+    }
+
+
 if __name__ == "__main__":
     data = {
         "_comment": (
@@ -285,6 +314,7 @@ if __name__ == "__main__":
         ),
         "cases": cases(),
         "labels": labels(),
+        "endings": endings(),
     }
     json.dump(data, sys.stdout, indent=2)
     sys.stdout.write("\n")

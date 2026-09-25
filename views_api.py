@@ -3561,6 +3561,8 @@ async def api_payjoin_contact_remove(
     place. The other order could sever the connection and leave the round it
     was supposed to take with it, which is the state this exists to prevent.
     """
+    from .helpers.tango import CONNECTION_REMOVED
+
     c = await get_payjoin_contact(cid)
     uid = key_info.wallet.user
     if not c or uid not in (c.requester_user_id, c.target_user_id):
@@ -3572,7 +3574,7 @@ async def api_payjoin_contact_remove(
     cancelled = 0
     for rnd in await list_live_tango_rounds_between(uid, other_uid, c.network):
         await update_tango_round(
-            rnd.id, status="CANCELLED", reject_reason="connection removed"
+            rnd.id, status="CANCELLED", reject_reason=CONNECTION_REMOVED
         )
         cancelled += 1
     if cancelled and other_uid:
@@ -5127,7 +5129,7 @@ async def api_tango_cancel(
     key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
 ):
     """Either side, until it is broadcast."""
-    from .helpers.tango import can_cancel
+    from .helpers.tango import can_cancel, cancelled_by
 
     uid = key_info.wallet.user
     rnd = await get_tango_round(rid)
@@ -5140,7 +5142,7 @@ async def api_tango_cancel(
             detail=f"This Tango is already {rnd.status.lower()}.",
         )
     updated = await update_tango_round(
-        rid, status="CANCELLED", reject_reason=f"cancelled by {role}"
+        rid, status="CANCELLED", reject_reason=cancelled_by(role)
     )
     other = rnd.b_user_id if role == "a" else rnd.a_user_id
     if other:
@@ -5179,6 +5181,7 @@ async def run_tango_sweep() -> dict:
         list_expired_tango_rounds,
         list_tango_rounds_awaiting_change_label,
     )
+    from .helpers.tango import EXPIRED
 
     now = int(time.time())
     expired = 0
@@ -5187,7 +5190,7 @@ async def run_tango_sweep() -> dict:
     for rnd in await list_expired_tango_rounds(now, TANGO_SWEEP_LIMIT):
         try:
             await update_tango_round(
-                rnd.id, status="CANCELLED", reject_reason="expired"
+                rnd.id, status="CANCELLED", reject_reason=EXPIRED
             )
             expired += 1
             # Both sides are told, not just one: each had coins held against

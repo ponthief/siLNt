@@ -125,6 +125,41 @@ def can_cancel(status: str) -> bool:
     return status not in TERMINAL
 
 
+# Why a round ended, as reject_reason. Three of the four are already sentences;
+# a cancellation is the one that needs to name somebody, and the name depends on
+# who is reading. So the column keeps the SIDE and each client turns it into
+# "You cancelled it" or "alice cancelled it" — which is what it always meant,
+# and what the web was printing raw as "cancelled by a".
+#
+# The wording below is unchanged from what shipped, deliberately: rounds
+# cancelled before this are in the database now, and the clients read them with
+# the same parser as the ones cancelled after it.
+EXPIRED = "expired"
+CONNECTION_REMOVED = "connection removed"
+_CANCELLED_BY = "cancelled by "
+
+
+def cancelled_by(role: str) -> str:
+    """The reject_reason for a round somebody stopped."""
+    if role not in ("a", "b"):
+        raise ValueError(f"{role!r} is not a party to a Tango.")
+    return f"{_CANCELLED_BY}{role}"
+
+
+def who_cancelled(reason: Optional[str]) -> Optional[str]:
+    """'a', 'b', or None when this reason is not a cancellation by a person.
+
+    The clients have their own copy of this (tangoTurns.ts) because they are
+    the ones doing the rendering; this one is here so the format has a single
+    definition on the side that writes it, and a test that reads it back.
+    """
+    text = (reason or "").strip().lower()
+    if not text.startswith(_CANCELLED_BY):
+        return None
+    role = text[len(_CANCELLED_BY):].strip()
+    return role if role in ("a", "b") else None
+
+
 def dust_to_fee(
     my_fee: Optional[int],
     my_change: Optional[int],
