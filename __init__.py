@@ -14,6 +14,7 @@ from .views_api import (
     run_background_scans,
     background_tip_advanced,
     run_send_confirmation_checks,
+    run_tango_labelling,
     run_tango_sweep,
     BACKGROUND_SCAN_POLL_SECONDS,
     BACKGROUND_SCAN_INTERVAL_SECONDS,
@@ -92,6 +93,14 @@ async def _background_scan_loop():
                 # a slow sweep can't delay it.
                 await run_send_confirmation_checks()
                 await run_background_scans()
+                # Name Tango coins the scans just found. Their round finished
+                # before they existed, and the send guard reads labels — an
+                # unlabelled share is one it cannot refuse. The five-minute
+                # sweep is the backstop, not the mechanism.
+                try:
+                    await run_tango_labelling()
+                except Exception as exc:
+                    logger.warning(f"[silnt] tango labelling after scans: {exc}")
                 last_sweep = time.monotonic()
         except Exception as exc:
             logger.error(f"[silnt] background scan loop error: {exc}")

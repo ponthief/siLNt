@@ -1280,3 +1280,59 @@ def test_the_stored_plan_carries_every_field_the_planner_produces():
     produced = set(pieces_plan(400_000, 400_000, pieces=2).keys())
     stored = set(re.findall(r'"(\w+)":', body))
     assert produced <= stored, sorted(produced - stored)
+
+
+# ── a coin's label has to arrive with the coin ───────────────────────────────
+# A round's coins do not exist when it broadcasts; the scanner finds them when
+# their block is scanned. So the labelling runs later — and "later" used to
+# mean the five-minute sweep, or somebody reopening a finished round, which is
+# the one thing nobody does.
+#
+# That is not only slow to look at. The send guard reads LABELS: an unlabelled
+# mix coin is not recognised as one, so for that whole window undoes_a_round
+# stays silent about the selection it exists to refuse. Pieces made it matter
+# more — two pieces of one round must not be spent together, and nothing else
+# in the coin list says so.
+
+
+def test_labelling_runs_after_a_scan_not_only_on_the_sweep():
+    """Both scan paths: the background loop and the one an app triggers."""
+    views = (ROOT / "views_api.py").read_text()
+    body = views[views.index("    async def _run_scan():"):]
+    body = body[: body.index("asyncio.create_task(_run_scan())")]
+    assert "run_tango_labelling()" in body, (
+        "a scan the app asked for does not name what it found"
+    )
+
+    init = (ROOT / "__init__.py").read_text()
+    loop = init[init.index("async def _background_scan_loop"):]
+    loop = loop[: loop.index("async def _tango_sweep_loop")]
+    assert "run_background_scans()" in loop
+    assert "run_tango_labelling()" in loop
+    assert loop.index("run_background_scans()") < loop.index("run_tango_labelling()"), (
+        "labelling runs before the scan that would find the coins"
+    )
+
+
+def test_the_sweep_still_labels_as_a_backstop():
+    """A round whose coins arrive by some path that does not scan still gets
+    named eventually. The sweep is the backstop, not the mechanism."""
+    views = (ROOT / "views_api.py").read_text()
+    body = views[views.index("async def run_tango_sweep"):]
+    body = body[: body.index("async def run_tango_labelling")]
+    assert "run_tango_labelling()" in body
+
+
+def test_labelling_survives_one_bad_round():
+    """Best-effort: the rounds after a failure still get their turn, or one
+    wallet with a problem leaves everybody else's coins unnamed.
+
+    The try/except is INSIDE the loop, which is the whole of it — outside, the
+    first failure ends the pass.
+    """
+    views = (ROOT / "views_api.py").read_text()
+    body = views[views.index("async def run_tango_labelling"):]
+    body = body[: body.index("    return labelled")]
+    loop = body[body.index("for rnd in"):]
+    assert "try:" in loop and "except Exception" in loop
+    assert loop.index("try:") < loop.index("_tango_label_change")

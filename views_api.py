@@ -947,6 +947,14 @@ async def api_scan_wallet(
             new_found = (result or {}).get("utxos_found", 0) if isinstance(result, dict) else 0
             if new_found > 0:
                 await _notify_payment_found(wallet, new_found, (result or {}).get("amount_found"))
+            # Name any Tango coins this scan just turned up, while it is still
+            # the moment they appeared. The send guard reads labels, so an
+            # unlabelled share is one the guard cannot refuse — see
+            # run_tango_labelling.
+            try:
+                await run_tango_labelling()
+            except Exception as e:
+                logger.warning(f"tango labelling after scan of {wallet_id}: {e}")
         # _mark_scan_failed used to be called here and DID NOT EXIST, so every
         # one of these handlers raised NameError instead of releasing the scan.
         # The wallet was left reporting active=True in memory for the lifetime
@@ -5409,6 +5417,35 @@ async def run_tango_sweep() -> dict:
         except Exception as e:
             logger.warning(f"tango sweep: could not expire {rnd.id}: {e}")
 
+    labelled = await run_tango_labelling()
+    return {"expired": expired, "labelled": labelled}
+
+
+async def run_tango_labelling() -> int:
+    """Name the coins of finished rounds the scanner has since found.
+
+    SEPARATE FROM THE SWEEP SO IT CAN RUN WHEN THE COINS APPEAR. A round's
+    coins do not exist when it broadcasts — the scanner finds them when their
+    block is scanned — so the labelling has to happen later, and until now
+    "later" meant the five-minute sweep or somebody reopening the round.
+
+    That is not only slow to look at. The send guard reads LABELS: an
+    unlabelled mix coin is not recognised as one, so during that window
+    services/tango.ts::undoesARound stays silent about the selection it exists
+    to refuse. Taking a share in several pieces made that matter more, because
+    the pieces of one round must not be spent together and nothing else says
+    so.
+
+    Called after every scan now, which is the moment the coins turn up, with
+    the sweep kept as the backstop for a round whose coins arrive by some path
+    that does not scan.
+
+    Best-effort and idempotent throughout: one bad row must not stop the rest,
+    and running twice must change nothing the first pass already did.
+    """
+    from .crud import list_tango_rounds_awaiting_change_label
+
+    labelled = 0
     for rnd in await list_tango_rounds_awaiting_change_label(TANGO_SWEEP_LIMIT):
         try:
             before = rnd.change_labelled
@@ -5417,6 +5454,5 @@ async def run_tango_sweep() -> dict:
             if fresh and fresh.change_labelled and not before:
                 labelled += 1
         except Exception as e:
-            logger.warning(f"tango sweep: could not label {rnd.id}: {e}")
-
-    return {"expired": expired, "labelled": labelled}
+            logger.warning(f"tango labelling: could not label {rnd.id}: {e}")
+    return labelled
