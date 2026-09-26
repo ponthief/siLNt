@@ -339,6 +339,18 @@ def plan(
     identical outputs rather than an arithmetic coincidence that may or may not
     exist. Two pieces takes a round from 1.00 to 2.58 bits for 86 more vbytes.
 
+    Those bits count READINGS — which p of the 2p identical outputs are yours.
+    Boltzmann counts more interpretations than that, because it also admits the
+    coarser ones where blocks merge, so its entropy for the same rounds is
+    higher: measured on a clean round, 1.585 / 2.807 / 4.392 bits at one, two
+    and three pieces, and no deterministic input-to-output link at any of them.
+    Both metrics move the same way. Neither is the one that decides a round:
+    change is, and change shows up as deterministic links rather than as lost
+    entropy — a round with change on both sides measures HIGHER entropy than a
+    clean one (3.459 at two pieces, against 2.807) while pinning two
+    input-to-output pairs in every reading, where the clean round pins none.
+    Read the link count, not the bits.
+
     The cost is that the pieces must never be spent together: two shares from
     ONE round in one transaction says they had one owner, and the reading
     collapses back. helpers/tangolabels.py::undoes_a_round refuses it, by txid
