@@ -1150,3 +1150,41 @@ async def m037_payjoin_contacts_network(db):
         "CREATE INDEX idx_payjoin_contacts_tgt ON silnt.payjoin_contacts "
         "(target_user_id, network, status);"
     )
+
+
+async def m038_tango_pieces(db):
+    """Each side's share, as however many equal coins it was taken in.
+
+    One output a side gives two readings of a round — which of the two
+    identical coins is yours. p a side gives C(2p, p). Measured across eight
+    realistic rounds it was the only change that paid the same on every one of
+    them, because it is combinatorics over identical outputs rather than an
+    arithmetic coincidence.
+
+    Rounds from before this had one piece and one script a side. The singular
+    columns are left exactly as they are — those transactions are on chain and
+    their coins still need naming — and backfilled into the new arrays so
+    nothing has to special-case a NULL later.
+    """
+    await db.execute("ALTER TABLE silnt.tango_rounds ADD COLUMN pieces INTEGER")
+    await db.execute("ALTER TABLE silnt.tango_rounds ADD COLUMN a_mix_spks TEXT")
+    await db.execute("ALTER TABLE silnt.tango_rounds ADD COLUMN b_mix_spks TEXT")
+    await db.execute("UPDATE silnt.tango_rounds SET pieces = 1")
+    # Written out twice rather than looped through an f-string: every
+    # interpolation in a migration has to be a db.* attribute, because these
+    # statements are f-strings and a stray brace is code. See
+    # tests/test_migrations_fstrings.py for the one that took LNbits down.
+    await db.execute(
+        """
+        UPDATE silnt.tango_rounds
+           SET a_mix_spks = '["' || a_mix_spk || '"]'
+         WHERE a_mix_spk IS NOT NULL AND a_mix_spk <> ''
+        """
+    )
+    await db.execute(
+        """
+        UPDATE silnt.tango_rounds
+           SET b_mix_spks = '["' || b_mix_spk || '"]'
+         WHERE b_mix_spk IS NOT NULL AND b_mix_spk <> ''
+        """
+    )

@@ -174,11 +174,17 @@ def _spk(point) -> bytes:
 
 
 def payment_script(
-    scan_secret: bytes, spend_pub: bytes, inputs: list[PayjoinInput]
+    scan_secret: bytes, spend_pub: bytes, inputs: list[PayjoinInput], k: int = 0
 ) -> bytes:
     """The payee's output. Derived by the PAYEE, who is the only party with the
-    scan key it needs; the payer cannot compute it and cannot check it."""
-    return _spk(own_output_point(scan_secret, spend_pub, inputs))
+    scan key it needs; the payer cannot compute it and cannot check it.
+
+    `k` is BIP-352's output counter on the plain chain. A PayJoin pays one
+    output and leaves it at zero; a Tango of several pieces a side walks it, so
+    each of that side's coins is a different address. Deriving them all at k=0
+    would pay one address repeatedly, which is one coin, not several, and no
+    readings at all."""
+    return _spk(own_output_point(scan_secret, spend_pub, inputs, k))
 
 
 def change_script(

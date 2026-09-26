@@ -868,7 +868,11 @@ def test_the_label_vocabulary_imports_nothing_of_its_own():
             imported.update(a.name.split(".")[0] for a in node.names)
         elif isinstance(node, ast.ImportFrom):
             imported.add((node.module or "").split(".")[0])
-    assert imported <= {"__future__", "typing"}, sorted(imported)
+    # json is stdlib and pure: the scripts a side derived are stored as an
+    # array and something has to read it. The rule this test exists for is
+    # about the SIGNING stack — curve, embit, wallet — not about whether the
+    # module may parse a list.
+    assert imported <= {"__future__", "typing", "json"}, sorted(imported)
 
 
 def test_tango_still_re_exports_all_of_it():
@@ -1070,3 +1074,185 @@ def test_the_utxo_list_says_which_coins_a_round_is_holding():
     body = body[: body.index("@silnt_api_router")]
     assert "tango_reserved" in body
     assert "get_reserved_tango_outpoints(" in body
+
+
+# ── taking your share in several pieces ──────────────────────────────────────
+# One output a side gives two readings of the round — which of the two
+# identical coins is yours — and that is one bit whatever else the transaction
+# looks like. p pieces a side gives C(2p, p): six at two, twenty at three.
+#
+# It is the only lever that measured the same on every round shape, because it
+# is combinatorics over identical outputs rather than an arithmetic coincidence
+# that may or may not be there. The fee-split idea scored +1.58 bits on one
+# constructed round and nothing at all on seven of eight realistic ones.
+
+def pieces_plan(a_amt, b_amt, denom=25_000, rate=2, pieces=2):
+    return tango.plan([coin(0xA0, a_amt, A_SECRET)],
+                      [coin(0xB0, b_amt, B_SECRET)], denom, rate, pieces)
+
+
+def spks(n, first=0x10):
+    return [bytes([0x51, 0x20]) + bytes([first + i]) * 32 for i in range(n)]
+
+
+def test_the_denomination_is_what_you_get_back_however_many_coins_it_is():
+    """`denom` keeps meaning the total. Changing that under the user would be
+    a different feature wearing the same field."""
+    for p in (1, 2, 5):
+        a = pieces_plan(400_000, 400_000, pieces=p)
+        assert a["denom"] == 25_000
+        assert a["pieces"] == p
+        assert a["share"] * p == 25_000
+
+
+def test_every_mixed_output_is_the_same_size_and_shape():
+    """The whole privacy claim, and it has to hold across BOTH sides' pieces:
+    2p outputs an observer cannot tell apart."""
+    a = pieces_plan(400_000, 400_000, denom=24_000, pieces=3)
+    tx = tango.assemble(
+        [coin(0xA0, 400_000, A_SECRET), coin(0xB0, 400_000, B_SECRET)],
+        a, spks(3, 0x10), spks(3, 0x40), A_CHG, B_CHG,
+    )
+    mixed = [o for o in tx.vout if o.value == a["share"]]
+    assert len(mixed) == 6, [o.value for o in tx.vout]
+    shapes = {(len(bytes(o.script_pubkey.data)), bytes(o.script_pubkey.data)[:2])
+              for o in mixed}
+    assert shapes == {(34, bytes([0x51, 0x20]))}
+
+
+def test_the_pieces_are_not_grouped_by_side_in_the_transaction():
+    """BIP-69 orders the identical outputs by script bytes, which are
+    unrelated fresh keys. If A's pieces came out adjacent, the readings the
+    pieces were added for would not exist."""
+    a = pieces_plan(400_000, 400_000, pieces=2)
+    a_spks, b_spks = spks(2, 0x10), spks(2, 0x11)
+    tx = tango.assemble(
+        [coin(0xA0, 400_000, A_SECRET), coin(0xB0, 400_000, B_SECRET)],
+        a, a_spks, b_spks, A_CHG, B_CHG,
+    )
+    order = [bytes(o.script_pubkey.data) for o in tx.vout if o.value == a["share"]]
+    assert order == sorted(order), "mixed outputs are not in BIP-69 order"
+
+
+def test_an_amount_that_does_not_divide_is_refused():
+    """Every output has to be the same size, so the remainder has nowhere to
+    go: not into one piece, which would make it identifiable, and not into the
+    fee, which is the dust leak by another name."""
+    with pytest.raises(ValueError) as e:
+        pieces_plan(400_000, 400_000, denom=25_001, pieces=2)
+    assert "equal coins" in str(e.value)
+
+
+def test_a_piece_below_the_dust_limit_is_refused():
+    """Splitting far enough turns the shares into coins nobody can spend."""
+    with pytest.raises(ValueError) as e:
+        pieces_plan(400_000, 400_000, denom=1000, pieces=4)
+    assert "dust limit" in str(e.value)
+
+
+def test_the_fee_pays_for_every_piece():
+    """Each extra pair of outputs is 86 more vbytes, and the plan has to price
+    them or the transaction underpays the rate the user chose."""
+    one = pieces_plan(400_000, 400_000, pieces=1)
+    two = pieces_plan(400_000, 400_000, pieces=2)
+    assert two["vsize"] - one["vsize"] == 86, (one["vsize"], two["vsize"])
+    assert two["fee"] > one["fee"]
+
+
+def test_a_side_that_derives_the_wrong_number_of_scripts_is_refused():
+    """Silently building a round with three outputs where four were planned
+    would pay somebody the wrong amount."""
+    a = pieces_plan(400_000, 400_000, pieces=2)
+    with pytest.raises(ValueError) as e:
+        tango.outputs_for(a, spks(1), spks(2, 0x40), A_CHG, B_CHG)
+    assert "needs its own output" in str(e.value)
+
+
+def test_one_piece_is_still_the_old_shape():
+    """Every round already broadcast was planned this way, and the columns
+    holding a single script still read back."""
+    a = pieces_plan(400_000, 400_000, pieces=1)
+    assert a["share"] == a["denom"]
+    tx = tango.assemble(
+        [coin(0xA0, 400_000, A_SECRET), coin(0xB0, 400_000, B_SECRET)],
+        a, A_MIX, B_MIX, A_CHG, B_CHG,
+    )
+    assert len([o for o in tx.vout if o.value == 25_000]) == 2
+
+
+def test_coins_are_named_by_what_a_piece_is_worth():
+    outs = {spks(1)[0].hex(): 12_500, A_CHG.hex(): 9_000}
+    got = tango.coin_labels(
+        outs, 12_500, [spks(1)[0].hex(), A_CHG.hex()], "bob", "2026-09-26",
+    )
+    assert got[spks(1)[0].hex()] == "Tango mix - bob · 2026-09-26"
+    assert got[A_CHG.hex()] == "Tango change - bob · 2026-09-26"
+
+
+# ── the guard the pieces need ────────────────────────────────────────────────
+
+
+def share(txid, who="bob"):
+    return {"txid": txid, "label": f"Tango mix - {who} · 2026-09-26"}
+
+
+def change(txid, who="bob"):
+    return {"txid": txid, "label": f"Tango change - {who} · 2026-09-26"}
+
+
+def test_two_pieces_of_one_round_together_undo_it():
+    """C(4,2) readings exist only while nobody can say which two of the four
+    identical coins were one person's. Spending two of them says it."""
+    assert tango.undoes_a_round([share("aa" * 32), share("aa" * 32)]) == "bob"
+
+
+def test_pieces_of_DIFFERENT_rounds_are_not_this_failure():
+    """Two rounds are two anonymity sets. Spending across them is the ordinary
+    cost of using mixed coins, not the round undoing itself."""
+    assert tango.undoes_a_round([share("aa" * 32), share("bb" * 32, "carol")]) is None
+
+
+def test_the_share_and_change_rule_still_holds_with_txids():
+    assert tango.undoes_a_round([share("aa" * 32), change("bb" * 32)]) == "bob"
+
+
+def test_a_selection_with_no_txids_still_gets_the_older_rule():
+    """Labels alone cannot say which round a coin is from, so they cannot trip
+    the same-round rule — and must still trip the one they always did."""
+    assert tango.undoes_a_round(
+        ["Tango mix - bob", "Tango change - bob"]) == "bob"
+    assert tango.undoes_a_round(["Tango mix - bob", "Tango mix - bob"]) is None
+
+
+def test_one_piece_of_a_round_beside_an_ordinary_coin_is_fine():
+    assert tango.undoes_a_round([share("aa" * 32), {"txid": "cc" * 32,
+                                                    "label": "rent"}]) is None
+
+
+def test_the_readings_a_round_offers_are_C_2p_choose_p():
+    """The claim the pieces were added for, asserted against a real plan.
+
+    An observer reading the transaction sees 2p outputs of one size and knows
+    each side took p of them. The number of ways that could have gone is
+    C(2p, p) — two at one piece, six at two, twenty at three — and that is the
+    round's anonymity, before anything else about it is considered.
+
+    Measured across eight realistic rounds this held on every one, which is
+    what distinguished it from the fee-split idea: that scored +1.58 bits on
+    one constructed round and nothing at all on seven of eight.
+
+    It is only the ceiling. Change still attaches to its owner, the coordinator
+    still sees everything, and spending two pieces together throws it away —
+    which undoes_a_round refuses.
+    """
+    from math import comb
+
+    for p, denom, expect in ((1, 24_000, 2), (2, 24_000, 6), (3, 24_000, 20)):
+        a = pieces_plan(400_000, 400_000, denom=denom, pieces=p)
+        tx = tango.assemble(
+            [coin(0xA0, 400_000, A_SECRET), coin(0xB0, 400_000, B_SECRET)],
+            a, spks(p, 0x10), spks(p, 0x40), A_CHG, B_CHG,
+        )
+        identical = [o for o in tx.vout if o.value == a["share"]]
+        assert len(identical) == 2 * p
+        assert comb(len(identical), p) == expect, (p, len(identical))

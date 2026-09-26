@@ -124,12 +124,18 @@ def expected(case: dict) -> dict:
     a_rows, b_rows = case["a"]["inputs"], case["b"]["inputs"]
     a_in, b_in = _inputs(a_rows), _inputs(b_rows)
     all_in = a_in + b_in
-    amounts = _t.plan(a_in, b_in, case["denom"], case["fee_rate"])
+    pieces = int(case.get("pieces") or 1)
+    amounts = _t.plan(a_in, b_in, case["denom"], case["fee_rate"], pieces)
 
-    a_mix = _t.payment_script(bytes.fromhex(A_SCAN),
-                              bytes.fromhex(spend_pub(A_SPEND)), all_in)
-    b_mix = _t.payment_script(bytes.fromhex(B_SCAN),
-                              bytes.fromhex(spend_pub(B_SPEND)), all_in)
+    # One script per piece, at successive BIP-352 counters on the plain chain.
+    # The clients derive the same way; a round of more than one piece is the
+    # case that would catch either side forgetting to advance k.
+    a_mix = [_t.payment_script(bytes.fromhex(A_SCAN),
+                               bytes.fromhex(spend_pub(A_SPEND)), all_in, k)
+             for k in range(pieces)]
+    b_mix = [_t.payment_script(bytes.fromhex(B_SCAN),
+                               bytes.fromhex(spend_pub(B_SPEND)), all_in, k)
+             for k in range(pieces)]
     a_chg = _t.change_script(bytes.fromhex(A_SCAN), bytes.fromhex(spend_pub(A_SPEND)),
                              bytes.fromhex(label_pub(A_SCAN)), all_in) \
         if amounts["a_change"] else None
@@ -142,11 +148,11 @@ def expected(case: dict) -> dict:
     ordered = _pj.canonical(all_in)
 
     return {
-        **{k: amounts[k] for k in ("denom", "a_in", "b_in", "a_change",
-                                   "b_change", "a_fee", "b_fee", "fee",
-                                   "vsize", "clean")},
-        "a_mix_spk": a_mix.hex(),
-        "b_mix_spk": b_mix.hex(),
+        **{k: amounts[k] for k in ("denom", "pieces", "share", "a_in", "b_in",
+                                   "a_change", "b_change", "a_fee", "b_fee",
+                                   "fee", "vsize", "clean")},
+        "a_mix_spks": [x.hex() for x in a_mix],
+        "b_mix_spks": [x.hex() for x in b_mix],
         "a_change_spk": a_chg.hex() if a_chg else None,
         "b_change_spk": b_chg.hex() if b_chg else None,
         "input_order": [f"{i.txid}:{i.vout}" for i in ordered],
@@ -218,6 +224,31 @@ def cases() -> list:
         "b": side(B_SCAN, B_SPEND, [utxo(B_SPEND, "d4" * 32, 0xB5, 0, 400_000)]),
     })
 
+    # TWO PIECES A SIDE. Four identical outputs, so six readings of the round
+    # instead of two. It is also the case that catches either client deriving
+    # both of its coins at the same BIP-352 counter, which would pay one
+    # address twice and leave the side with one coin rather than two.
+    out.append({
+        "name": "two pieces a side, change on both",
+        "denom": 25_000, "fee_rate": 2, "pieces": 2,
+        "a": side(A_SCAN, A_SPEND, [utxo(A_SPEND, "c5" * 32, 0xA6, 0, 400_000)]),
+        "b": side(B_SCAN, B_SPEND, [utxo(B_SPEND, "d5" * 32, 0xB6, 0, 300_000)]),
+    })
+
+    # Three pieces and a clean round: six identical outputs and nothing else,
+    # which is the strongest shape this can currently make.
+    r3 = _t.plan(_inputs([utxo(A_SPEND, "c6" * 32, 0xA7, 0, 400_000)]),
+                 _inputs([utxo(B_SPEND, "d6" * 32, 0xB7, 0, 400_000)]),
+                 24_000, 2, 3)
+    out.append({
+        "name": "three pieces a side, clean",
+        "denom": 24_000, "fee_rate": 2, "pieces": 3,
+        "a": side(A_SCAN, A_SPEND,
+                  [utxo(A_SPEND, "c6" * 32, 0xA7, 0, 24_000 + r3["a_fee"])]),
+        "b": side(B_SCAN, B_SPEND,
+                  [utxo(B_SPEND, "d6" * 32, 0xB7, 0, 24_000 + r3["b_fee"])]),
+    })
+
     for c in out:
         c["expected"] = expected(c)
     return out
@@ -239,6 +270,28 @@ def labels() -> dict:
         "dated_change": _t.change_label("alice", "2026-10-01"),
         "marker_only": _t.mix_label("", "2026-09-24"),
         "date_from_timestamp": _t.change_label("alice", "2026-09-24T13:05:00Z"),
+        # Coins with txids, for the rule that needs them: two pieces of ONE
+        # round together undo it, two pieces of different rounds do not. A
+        # label cannot express either, which is why the guard reads the txid.
+        "coin_cases": [
+            {"coins": cs, "undoes": _t.undoes_a_round(cs)}
+            for cs in (
+                [{"txid": "aa" * 32, "label": "Tango mix - bob"},
+                 {"txid": "aa" * 32, "label": "Tango mix - bob"}],
+                [{"txid": "aa" * 32, "label": "Tango mix - bob"},
+                 {"txid": "bb" * 32, "label": "Tango mix - carol"}],
+                [{"txid": "aa" * 32, "label": "Tango mix - bob"},
+                 {"txid": "bb" * 32, "label": "Tango change - carol"}],
+                [{"txid": "aa" * 32, "label": "Tango mix - bob"},
+                 {"txid": "cc" * 32, "label": "rent"}],
+                [{"txid": "aa" * 32, "label": "Tango mix - bob"},
+                 {"txid": "aa" * 32, "label": "Tango change - bob"}],
+                [{"txid": "aa" * 32, "label": "Tango mix"},
+                 {"txid": "aa" * 32, "label": "Tango mix"}],
+                [{"txid": "", "label": "Tango mix - bob"},
+                 {"txid": "", "label": "Tango mix - bob"}],
+            )
+        ],
         "cases": [
             {"labels": ls, "undoes": _t.undoes_a_round(ls)}
             for ls in (

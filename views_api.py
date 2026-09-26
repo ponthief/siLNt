@@ -4638,20 +4638,20 @@ def _tango_assemble(rnd):
     frozen input set and the four scripts, and rebuilding is what makes that
     true by construction rather than by hoping nothing wrote to the column.
     """
-    from .helpers.tango import assemble
+    from .helpers.tango import assemble, spk_list
 
     inputs = _pj_payjoin_inputs(_pj_inputs(rnd.a_inputs) + _pj_inputs(rnd.b_inputs))
     return assemble(
         inputs,
         _tango_amounts(rnd),
-        bytes.fromhex(rnd.a_mix_spk),
-        bytes.fromhex(rnd.b_mix_spk),
+        [bytes.fromhex(h) for h in spk_list(rnd.a_mix_spks or rnd.a_mix_spk)],
+        [bytes.fromhex(h) for h in spk_list(rnd.b_mix_spks or rnd.b_mix_spk)],
         bytes.fromhex(rnd.a_change_spk) if rnd.a_change_spk else None,
         bytes.fromhex(rnd.b_change_spk) if rnd.b_change_spk else None,
     )
 
 
-async def _tango_label_change(rnd) -> None:
+async def _tango_label_change(rnd) -> None:  # noqa: C901
     """Name both of each side's coins once the scanner has found them.
 
     The share as well as the change, and the share is the one that makes this
@@ -4679,7 +4679,7 @@ async def _tango_label_change(rnd) -> None:
     once every coin is named; it predates the share being labelled too, and the
     name stayed rather than spend a migration on it.
     """
-    from .helpers.tango import CHANGE_LABEL, MIX_LABEL, coin_labels
+    from .helpers.tango import CHANGE_LABEL, MIX_LABEL, coin_labels, spk_list
 
     # Labels this code wrote before, which it may replace. A coin already
     # carrying an older wording of ours should end up with the current one, and
@@ -4701,14 +4701,17 @@ async def _tango_label_change(rnd) -> None:
         return
 
     done = True
-    for wallet_id, mix_spk, change_spk, other in (
-        (rnd.a_wallet_id, rnd.a_mix_spk, rnd.a_change_spk, rnd.b_username),
-        (rnd.b_wallet_id, rnd.b_mix_spk, rnd.b_change_spk, rnd.a_username),
+    for wallet_id, mix_spks, change_spk, other in (
+        (rnd.a_wallet_id, rnd.a_mix_spks or rnd.a_mix_spk, rnd.a_change_spk,
+         rnd.b_username),
+        (rnd.b_wallet_id, rnd.b_mix_spks or rnd.b_mix_spk, rnd.b_change_spk,
+         rnd.a_username),
     ):
         if not wallet_id:
             continue
-        wanted = [s for s in (mix_spk, change_spk) if s]
-        labels = coin_labels(values, rnd.denom_sats, wanted, other, day)
+        wanted = [*spk_list(mix_spks), *([change_spk] if change_spk else [])]
+        share = rnd.denom_sats // max(1, rnd.pieces or 1)
+        labels = coin_labels(values, share, wanted, other, day)
         if len(labels) != len(wanted):
             # A script this side derived is not in the transaction it signed.
             # That is a real disagreement, not a slow scanner, and a label
@@ -4777,6 +4780,40 @@ async def _notify_tango(user_id: str, title: str, body: str) -> None:
             await send_fcm(tokens, title, body, {"type": "tango"})
     except Exception as e:
         logger.warning(f"tango push failed for {user_id}: {e}")
+
+
+def _tango_mix_spks(spks, pieces: int, field: str = "mix_spks") -> str:
+    """Validate a side's derived scripts and return them as the stored JSON.
+
+    The COUNT is checked here rather than on the model: models.py explains why
+    no length constraint may be written as a Field kwarg, and in any case the
+    only number it could be checked against is the round's own `pieces`.
+    """
+    from .helpers.payjoin_sp import validate_spk
+
+    got = list(spks or [])
+    if len(got) != int(pieces or 1):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=(
+                f"This Tango gives each side {pieces} coin(s) back, so it "
+                f"needs {pieces} derived script(s); {len(got)} arrived."
+            ),
+        )
+    for n, spk in enumerate(got):
+        try:
+            validate_spk(spk, f"{field}[{n}]")
+        except ValueError as e:
+            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+    lowered = [s.lower() for s in got]
+    if len(set(lowered)) != len(lowered):
+        # Two identical scripts would be two outputs to one key: the pieces
+        # would merge on chain and the readings they buy would not exist.
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Two of this side's coins would go to the same address.",
+        )
+    return json.dumps(lowered)
 
 
 async def _refuse_spent_tango_inputs(rnd) -> None:
@@ -4961,7 +4998,7 @@ async def api_tango_propose(
     # Provisional: the real fee depends on how many coins B brings.
     mine = _pj_payjoin_inputs(rows)
     try:
-        plan(mine, mine, data.denom_sats, data.fee_rate)
+        plan(mine, mine, data.denom_sats, data.fee_rate, data.pieces)
     except ValueError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
 
@@ -4976,6 +5013,7 @@ async def api_tango_propose(
         denom_sats=data.denom_sats,
         fee_rate=data.fee_rate,
         a_inputs=rows,
+        pieces=data.pieces,
         expiry_seconds=TANGO_EXPIRY_SECONDS,
     )
     await _notify_tango(
@@ -5090,11 +5128,11 @@ async def api_tango_accept(
     rows = [i.dict() for i in data.inputs]
     try:
         validate_wire_inputs(rows, "inputs")
-        validate_spk(data.mix_spk, "mix_spk")
         if data.change_spk:
             validate_spk(data.change_spk, "change_spk")
     except ValueError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+    b_mix_spks = _tango_mix_spks(data.mix_spks, rnd.pieces or 1)
     await _pj_validate_inputs(data.wallet_id, rows)
     await _refuse_tango_reserved(uid, rows)
 
@@ -5114,6 +5152,7 @@ async def api_tango_accept(
             _pj_payjoin_inputs(rows),
             rnd.denom_sats,
             rnd.fee_rate,
+            rnd.pieces or 1,
         )
     except ValueError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
@@ -5138,7 +5177,7 @@ async def api_tango_accept(
         fee_sats=amounts["fee"],
         vsize=amounts["vsize"],
         clean=amounts["clean"],
-        b_mix_spk=data.mix_spk.lower(),
+        b_mix_spks=b_mix_spks,
         b_change_spk=data.change_spk.lower() if data.change_spk else None,
     )
     await _notify_tango(
@@ -5187,14 +5226,14 @@ async def api_tango_sign(
 
     if role == "a":
         try:
-            validate_spk(data.mix_spk or "", "mix_spk")
             if rnd.a_change_sats:
                 validate_spk(data.change_spk or "", "change_spk")
         except ValueError as e:
             raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+        a_mix_spks = _tango_mix_spks(data.mix_spks, rnd.pieces or 1)
         rnd = await update_tango_round(
             rid,
-            a_mix_spk=data.mix_spk.lower(),
+            a_mix_spks=a_mix_spks,
             a_change_spk=data.change_spk.lower() if data.change_spk else None,
         )
 

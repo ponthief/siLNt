@@ -79,6 +79,7 @@ from .tangolabels import (  # noqa: F401
     coin_labels,
     day_marker,
     mix_label,
+    spk_list,
     undoes_a_round,
     wrote_label,
 )
@@ -321,13 +322,27 @@ def plan(
     b_inputs: list[PayjoinInput],
     denom: int,
     fee_rate: float,
+    pieces: int = 1,
 ) -> dict:
     """What each side puts in, takes out, and pays.
 
-    Both sides receive exactly `denom`. That is not negotiable and it is the
-    entire privacy claim: two outputs of different sizes are two outputs an
-    observer can tell apart, at which point this is a slow, expensive PayJoin
-    with nobody being paid.
+    Both sides receive exactly `denom`, as `pieces` equal outputs each. That is
+    not negotiable and it is the entire privacy claim: two outputs of different
+    sizes are two outputs an observer can tell apart, at which point this is a
+    slow, expensive PayJoin with nobody being paid.
+
+    WHY PIECES. With one output each there are two ways to read the round —
+    which of the two identical outputs is yours — and that is one bit, whatever
+    else the transaction looks like. With `pieces` each there are C(2p, p): six
+    readings at two pieces, twenty at three. It is the only lever measured that
+    pays the same on every round shape, because it is combinatorics over
+    identical outputs rather than an arithmetic coincidence that may or may not
+    exist. Two pieces takes a round from 1.00 to 2.58 bits for 86 more vbytes.
+
+    The cost is that the pieces must never be spent together: two shares from
+    ONE round in one transaction says they had one owner, and the reading
+    collapses back. helpers/tangolabels.py::undoes_a_round refuses it, by txid
+    rather than by label, so nothing had to go back into the coin names.
 
     The fee depends on how many change outputs there are, and whether there is
     change depends on the fee. Resolved the same way payjoin_sp.plan does it:
@@ -335,10 +350,20 @@ def plan(
     creating and reprice. A dropped change is absorbed into the fee by the
     party whose excess it was, so the other side never pays for it.
     """
-    if denom < DUST_SATS:
+    pieces = int(pieces or 1)
+    if pieces < 1:
+        raise ValueError("A side has to get at least one coin back.")
+    if denom % pieces:
         raise ValueError(
-            f"{denom} sats is below the {DUST_SATS} sat dust limit, so neither "
-            f"side could spend what they got back."
+            f"{denom} sats does not divide into {pieces} equal coins. Every "
+            f"output in a Tango has to be the same size, so the amount has to "
+            f"be a multiple of the number of coins you want back."
+        )
+    share = denom // pieces
+    if share < DUST_SATS:
+        raise ValueError(
+            f"{share} sats a coin is below the {DUST_SATS} sat dust limit, so "
+            f"neither side could spend what they got back."
         )
     if not a_inputs or not b_inputs:
         raise ValueError("A Tango needs coins from both sides.")
@@ -352,20 +377,24 @@ def plan(
         a_fee, b_fee = split_fee(fee)
         return vsize, fee, a_fee, b_fee
 
-    # Start by assuming both sides need change: four outputs, the dearest case.
-    vsize, fee, a_fee, b_fee = shares(4)
+    # Start by assuming both sides need change: every share plus two changes,
+    # the dearest case.
+    vsize, fee, a_fee, b_fee = shares(2 * pieces + 2)
     a_change = a_in - denom - a_fee
     b_change = b_in - denom - b_fee
 
-    for label, total, change, share in (
+    # `fee_share`, not `share`: `share` is what one mixed OUTPUT is worth, and
+    # this loop used to rebind it to the fee — which silently made every mixed
+    # output the size of a fee share the moment pieces arrived.
+    for label, total, change, fee_share in (
         ("Your", a_in, a_change, a_fee),
         ("Their", b_in, b_change, b_fee),
     ):
         if change < 0:
             raise ValueError(
                 f"{label} coins total {total} sats, which does not cover "
-                f"{denom} plus a {share} sat share of the fee. Pick more, or "
-                f"agree a smaller amount."
+                f"{denom} plus a {fee_share} sat share of the fee. Pick more, "
+                f"or agree a smaller amount."
             )
 
     # Now drop the changes that are not worth creating and reprice. Iterated
@@ -373,7 +402,7 @@ def plan(
     # lowers the fee, which can lift the OTHER change back above dust. Two
     # passes settle it, because there are only two changes to drop.
     for _ in range(2):
-        n_out = 2 + (1 if a_change >= DUST_SATS else 0) + (
+        n_out = 2 * pieces + (1 if a_change >= DUST_SATS else 0) + (
             1 if b_change >= DUST_SATS else 0
         )
         vsize, fee, a_fee, b_fee = shares(n_out)
@@ -397,6 +426,10 @@ def plan(
 
     return {
         "denom": denom,
+        "pieces": pieces,
+        # What each individual output is worth. The clients derive this many
+        # scripts and check every one of them against it.
+        "share": share,
         "a_in": a_in,
         "b_in": b_in,
         "a_change": a_change,
@@ -411,24 +444,49 @@ def plan(
     }
 
 
+def mix_scripts(spks) -> list:
+    """One script or several, always as a list.
+
+    A round with one piece a side is the shape this started as and the shape
+    every existing row holds, so a bare `bytes` is still accepted. The count is
+    checked against the plan below, which is what catches actually passing the
+    wrong number.
+    """
+    if spks is None:
+        return []
+    if isinstance(spks, (bytes, bytearray)):
+        return [bytes(spks)]
+    return [bytes(s) for s in spks]
+
+
 def outputs_for(
     amounts: dict,
-    a_mix_spk: bytes,
-    b_mix_spk: bytes,
+    a_mix_spk,
+    b_mix_spk,
     a_change_spk: Optional[bytes],
     b_change_spk: Optional[bytes],
 ) -> list:
     """The outputs, in BIP-69 order.
 
-    The two mixed outputs have the SAME value, so BIP-69 breaks the tie on the
-    script bytes — which are two unrelated fresh taproot keys. Neither position
-    says anything about who derived it, and neither party can influence it,
-    which is what stops "the initiator's output is always first" becoming the
-    thing that identifies them.
+    EVERY mixed output has the same value — all 2*pieces of them — so BIP-69
+    breaks the tie on the script bytes, which are unrelated fresh taproot keys.
+    No position says anything about who derived it and neither party can
+    influence it, which is what stops "the initiator's output is always first"
+    becoming the thing that identifies them. With more than one piece a side
+    that matters more, not less: the interleaving is what the extra readings
+    are made of.
     """
+    pieces = int(amounts.get("pieces") or 1)
+    share = int(amounts.get("share") or amounts["denom"])
+    a_spks, b_spks = mix_scripts(a_mix_spk), mix_scripts(b_mix_spk)
+    for who, spks in (("A", a_spks), ("B", b_spks)):
+        if len(spks) != pieces:
+            raise ValueError(
+                f"{who} derived {len(spks)} mixed script(s) for a round of "
+                f"{pieces}. Every piece needs its own output."
+            )
     outs = [
-        TransactionOutput(amounts["denom"], Script(a_mix_spk)),
-        TransactionOutput(amounts["denom"], Script(b_mix_spk)),
+        TransactionOutput(share, Script(spk)) for spk in (*a_spks, *b_spks)
     ]
     if amounts["a_change"]:
         if a_change_spk is None:
@@ -445,8 +503,8 @@ def outputs_for(
 def assemble(
     inputs: list[PayjoinInput],
     amounts: dict,
-    a_mix_spk: bytes,
-    b_mix_spk: bytes,
+    a_mix_spk,
+    b_mix_spk,
     a_change_spk: Optional[bytes] = None,
     b_change_spk: Optional[bytes] = None,
 ) -> Transaction:

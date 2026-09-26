@@ -37,6 +37,8 @@
       },
       "expected": {
         "denom": 25000,
+        "pieces": 1,
+        "share": 25000,
         "a_in": 400000,
         "b_in": 300000,
         "a_change": 374702,
@@ -46,8 +48,12 @@
         "fee": 596,
         "vsize": 298,
         "clean": false,
-        "a_mix_spk": "512002ff9c7b983481575be88eb176777eaceed33629a3f85c470aa2e77cbef8c80e",
-        "b_mix_spk": "51206459070e31af789b426ebe5f35c9dba0999b5feb7d65d300a2c373aadc1253dd",
+        "a_mix_spks": [
+          "512002ff9c7b983481575be88eb176777eaceed33629a3f85c470aa2e77cbef8c80e"
+        ],
+        "b_mix_spks": [
+          "51206459070e31af789b426ebe5f35c9dba0999b5feb7d65d300a2c373aadc1253dd"
+        ],
         "a_change_spk": "5120bec447e00152faa4ebc219a9de6f247f6c28c49134ac53ac5b533d7955ec8dec",
         "b_change_spk": "5120b397820dd30721c706354fd40111339248c37b46ea36c07a3baaa6b506456758",
         "input_order": [
@@ -115,6 +121,8 @@
       },
       "expected": {
         "denom": 25000,
+        "pieces": 1,
+        "share": 25000,
         "a_in": 25298,
         "b_in": 25298,
         "a_change": 0,
@@ -124,8 +132,12 @@
         "fee": 596,
         "vsize": 212,
         "clean": true,
-        "a_mix_spk": "51203580362c30ea2626fca84e19adb0aaba5898ae4fb82de9d24c42387f8809b3bb",
-        "b_mix_spk": "5120b2fc472fdc329968e9d7994d97c18c9588ca624f85bf6277fe55b15e7d357513",
+        "a_mix_spks": [
+          "51203580362c30ea2626fca84e19adb0aaba5898ae4fb82de9d24c42387f8809b3bb"
+        ],
+        "b_mix_spks": [
+          "5120b2fc472fdc329968e9d7994d97c18c9588ca624f85bf6277fe55b15e7d357513"
+        ],
         "a_change_spk": null,
         "b_change_spk": null,
         "input_order": [
@@ -203,6 +215,8 @@
       },
       "expected": {
         "denom": 50000,
+        "pieces": 1,
+        "share": 50000,
         "a_in": 130000,
         "b_in": 135000,
         "a_change": 78554,
@@ -212,8 +226,12 @@
         "fee": 2891,
         "vsize": 413,
         "clean": false,
-        "a_mix_spk": "5120cadf729351312be05387962b97ab5fcf2d64e0131bbbe64f8c2743d320a4d0ce",
-        "b_mix_spk": "51208908181e1905b18169c54b9522ababdaa34b9fa991f1d82d8ac30e6ffd848d58",
+        "a_mix_spks": [
+          "5120cadf729351312be05387962b97ab5fcf2d64e0131bbbe64f8c2743d320a4d0ce"
+        ],
+        "b_mix_spks": [
+          "51208908181e1905b18169c54b9522ababdaa34b9fa991f1d82d8ac30e6ffd848d58"
+        ],
         "a_change_spk": "5120e8e378e8dc362d7d01b7f1705c37bdca85954c837cd0a599f5a0ed5ad1a432c1",
         "b_change_spk": "512014c48200511d1dbd46008f7ccc4f8b2af7b75bb4f12b71235c3654cc3949b33b",
         "input_order": [
@@ -287,6 +305,8 @@
       },
       "expected": {
         "denom": 25000,
+        "pieces": 1,
+        "share": 25000,
         "a_in": 25647,
         "b_in": 400000,
         "a_change": 0,
@@ -296,8 +316,12 @@
         "fee": 1029,
         "vsize": 255,
         "clean": false,
-        "a_mix_spk": "5120d23ea1d44952977dee357e8bbac2f87d050e188a7e2da15a58bee3cdd230a6c2",
-        "b_mix_spk": "5120173a9bbb2766d14472a91fcb2b5135183160505fdc786e969f929c426088ec30",
+        "a_mix_spks": [
+          "5120d23ea1d44952977dee357e8bbac2f87d050e188a7e2da15a58bee3cdd230a6c2"
+        ],
+        "b_mix_spks": [
+          "5120173a9bbb2766d14472a91fcb2b5135183160505fdc786e969f929c426088ec30"
+        ],
         "a_change_spk": null,
         "b_change_spk": "5120a6702bebbd547be208dc7df58b7e35b3b5d37ff9cda56bd835fe8d83afb31c01",
         "input_order": [
@@ -326,6 +350,190 @@
           1
         ]
       }
+    },
+    {
+      "name": "two pieces a side, change on both",
+      "denom": 25000,
+      "fee_rate": 2,
+      "pieces": 2,
+      "a": {
+        "scan_secret": "1111111111111111111111111111111111111111111111111111111111111111",
+        "spend_secret": "1212121212121212121212121212121212121212121212121212121212121212",
+        "spend_pub": "036360e856310ce5d294e8be33fc807077dc56ac80d95d9cd4ddbd21325eff73f7",
+        "label_pub_0": "038b2709f0aa4014d750140cbdc445634f3e4b16e3c686806127d53a9c8cf29921",
+        "inputs": [
+          {
+            "txid": "a611111111111111111111111111111111111111111111111111111111111159",
+            "vout": 0,
+            "amount": 400000,
+            "pub_key": "c6075079d99f6549f8161435b60eaf09d7b11d6423265ad8c1d4e7ecee592873",
+            "priv_key_tweak": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5"
+          }
+        ]
+      },
+      "b": {
+        "scan_secret": "2121212121212121212121212121212121212121212121212121212121212121",
+        "spend_secret": "2222222222222222222222222222222222222222222222222222222222222222",
+        "spend_pub": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+        "label_pub_0": "028199fbb50ce35accbdd23e23dac7e6e730707ac91114a2e28aba824d5d6f5ec1",
+        "inputs": [
+          {
+            "txid": "b611111111111111111111111111111111111111111111111111111111111149",
+            "vout": 0,
+            "amount": 300000,
+            "pub_key": "bde750d93efe821813df9c15ee676f2e9c63386336c164f5a15cf240ac653c06",
+            "priv_key_tweak": "d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5"
+          }
+        ]
+      },
+      "expected": {
+        "denom": 25000,
+        "pieces": 2,
+        "share": 12500,
+        "a_in": 400000,
+        "b_in": 300000,
+        "a_change": 374616,
+        "b_change": 274616,
+        "a_fee": 384,
+        "b_fee": 384,
+        "fee": 768,
+        "vsize": 384,
+        "clean": false,
+        "a_mix_spks": [
+          "51201dde19f08dacae6e967dd4c4a263dfdca2ca4dbf0acca427e27969fe65483af7",
+          "51208fca5249edc33a7a8dee97d0598e0f2ba22ff49c3b0b32059c430b2a2c22e8ca"
+        ],
+        "b_mix_spks": [
+          "5120b7b8687ca1fd922ee425a3d0ba9084fc1ea3b9efed3e17d6f605fe59a1832eb8",
+          "51200e8aae85ab029cc1021c45e3560998126c0208f5076a4bab1d089d3893cac356"
+        ],
+        "a_change_spk": "5120e4755da66a6f0366dc82aa5a7a29d6a2920bfcf2c189747fbaf4443e2bc8dfcf",
+        "b_change_spk": "512020b5e3c83fb4a5b9569b84d42cef41b5df4ce55706eba0b330da1d3d785bb061",
+        "input_order": [
+          "a611111111111111111111111111111111111111111111111111111111111159:0",
+          "b611111111111111111111111111111111111111111111111111111111111149:0"
+        ],
+        "unsigned_tx": "020000000259111111111111111111111111111111111111111111111111111111111111a60000000000ffffffff49111111111111111111111111111111111111111111111111111111111111b60000000000ffffffff06d4300000000000002251200e8aae85ab029cc1021c45e3560998126c0208f5076a4bab1d089d3893cac356d4300000000000002251201dde19f08dacae6e967dd4c4a263dfdca2ca4dbf0acca427e27969fe65483af7d4300000000000002251208fca5249edc33a7a8dee97d0598e0f2ba22ff49c3b0b32059c430b2a2c22e8cad430000000000000225120b7b8687ca1fd922ee425a3d0ba9084fc1ea3b9efed3e17d6f605fe59a1832eb8b83004000000000022512020b5e3c83fb4a5b9569b84d42cef41b5df4ce55706eba0b330da1d3d785bb06158b7050000000000225120e4755da66a6f0366dc82aa5a7a29d6a2920bfcf2c189747fbaf4443e2bc8dfcf00000000",
+        "sighashes": [
+          "739e99bba98a83301a0d08fadf02ecfd5f52bbc82410caee8b3f0513b7e32300",
+          "3bffc39c8fd1dfbb0e293f664627aef68e8b26c124b5e4deaaf13e3a327c157d"
+        ],
+        "output_values": [
+          12500,
+          12500,
+          12500,
+          12500,
+          274616,
+          374616
+        ],
+        "output_scripts": [
+          "51200e8aae85ab029cc1021c45e3560998126c0208f5076a4bab1d089d3893cac356",
+          "51201dde19f08dacae6e967dd4c4a263dfdca2ca4dbf0acca427e27969fe65483af7",
+          "51208fca5249edc33a7a8dee97d0598e0f2ba22ff49c3b0b32059c430b2a2c22e8ca",
+          "5120b7b8687ca1fd922ee425a3d0ba9084fc1ea3b9efed3e17d6f605fe59a1832eb8",
+          "512020b5e3c83fb4a5b9569b84d42cef41b5df4ce55706eba0b330da1d3d785bb061",
+          "5120e4755da66a6f0366dc82aa5a7a29d6a2920bfcf2c189747fbaf4443e2bc8dfcf"
+        ],
+        "a_indices": [
+          0
+        ],
+        "b_indices": [
+          1
+        ]
+      }
+    },
+    {
+      "name": "three pieces a side, clean",
+      "denom": 24000,
+      "fee_rate": 2,
+      "pieces": 3,
+      "a": {
+        "scan_secret": "1111111111111111111111111111111111111111111111111111111111111111",
+        "spend_secret": "1212121212121212121212121212121212121212121212121212121212121212",
+        "spend_pub": "036360e856310ce5d294e8be33fc807077dc56ac80d95d9cd4ddbd21325eff73f7",
+        "label_pub_0": "038b2709f0aa4014d750140cbdc445634f3e4b16e3c686806127d53a9c8cf29921",
+        "inputs": [
+          {
+            "txid": "a711111111111111111111111111111111111111111111111111111111111158",
+            "vout": 0,
+            "amount": 24470,
+            "pub_key": "0359a6511e5dbb49ae189707456ebf96cbcb8cf886bcf03a9c3885552d2650f4",
+            "priv_key_tweak": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"
+          }
+        ]
+      },
+      "b": {
+        "scan_secret": "2121212121212121212121212121212121212121212121212121212121212121",
+        "spend_secret": "2222222222222222222222222222222222222222222222222222222222222222",
+        "spend_pub": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+        "label_pub_0": "028199fbb50ce35accbdd23e23dac7e6e730707ac91114a2e28aba824d5d6f5ec1",
+        "inputs": [
+          {
+            "txid": "b711111111111111111111111111111111111111111111111111111111111148",
+            "vout": 0,
+            "amount": 24470,
+            "pub_key": "0ea33708a3ce731353950e624bb916e3a3744ce27a61d7a26c0921451c3ce999",
+            "priv_key_tweak": "d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6"
+          }
+        ]
+      },
+      "expected": {
+        "denom": 24000,
+        "pieces": 3,
+        "share": 8000,
+        "a_in": 24470,
+        "b_in": 24470,
+        "a_change": 0,
+        "b_change": 0,
+        "a_fee": 470,
+        "b_fee": 470,
+        "fee": 940,
+        "vsize": 384,
+        "clean": true,
+        "a_mix_spks": [
+          "5120600410759c0bd7ad1cfdbedc979f8398a5dd4d9f01fac7090f211bca403c1628",
+          "512097e21a515f171a688f9f00f5e994afefd8a88b8e9bb8d2ac5535753ec4db44a1",
+          "512026ca0306948f7edb9d3e8c7f478d60919d798361539ff832b36b22c51342fa41"
+        ],
+        "b_mix_spks": [
+          "5120f723142f8473780fab950f5e18a5bc4e87a466ef17f331ca188f3252d426a804",
+          "5120096aaf2044c5fdb28879ecee60c2177cd3c17625b325fde247fa2b135c598ad2",
+          "51202b6046e9d561a1abd503692973555950074b1595c11431eeffbf691db3b87a56"
+        ],
+        "a_change_spk": null,
+        "b_change_spk": null,
+        "input_order": [
+          "a711111111111111111111111111111111111111111111111111111111111158:0",
+          "b711111111111111111111111111111111111111111111111111111111111148:0"
+        ],
+        "unsigned_tx": "020000000258111111111111111111111111111111111111111111111111111111111111a70000000000ffffffff48111111111111111111111111111111111111111111111111111111111111b70000000000ffffffff06401f000000000000225120096aaf2044c5fdb28879ecee60c2177cd3c17625b325fde247fa2b135c598ad2401f00000000000022512026ca0306948f7edb9d3e8c7f478d60919d798361539ff832b36b22c51342fa41401f0000000000002251202b6046e9d561a1abd503692973555950074b1595c11431eeffbf691db3b87a56401f000000000000225120600410759c0bd7ad1cfdbedc979f8398a5dd4d9f01fac7090f211bca403c1628401f00000000000022512097e21a515f171a688f9f00f5e994afefd8a88b8e9bb8d2ac5535753ec4db44a1401f000000000000225120f723142f8473780fab950f5e18a5bc4e87a466ef17f331ca188f3252d426a80400000000",
+        "sighashes": [
+          "af4a47f7a462a22947042b9884d4ccf48f96ab3cf1aaba05329bff18ae0798c7",
+          "53916196696935f2e8509e7fa45d86fe1fdc16ad74f335b8a67a07115589ec7f"
+        ],
+        "output_values": [
+          8000,
+          8000,
+          8000,
+          8000,
+          8000,
+          8000
+        ],
+        "output_scripts": [
+          "5120096aaf2044c5fdb28879ecee60c2177cd3c17625b325fde247fa2b135c598ad2",
+          "512026ca0306948f7edb9d3e8c7f478d60919d798361539ff832b36b22c51342fa41",
+          "51202b6046e9d561a1abd503692973555950074b1595c11431eeffbf691db3b87a56",
+          "5120600410759c0bd7ad1cfdbedc979f8398a5dd4d9f01fac7090f211bca403c1628",
+          "512097e21a515f171a688f9f00f5e994afefd8a88b8e9bb8d2ac5535753ec4db44a1",
+          "5120f723142f8473780fab950f5e18a5bc4e87a466ef17f331ca188f3252d426a804"
+        ],
+        "a_indices": [
+          0
+        ],
+        "b_indices": [
+          1
+        ]
+      }
     }
   ],
   "labels": {
@@ -337,6 +545,99 @@
     "dated_change": "Tango change - alice \u00b7 2026-10-01",
     "marker_only": "Tango mix \u00b7 2026-09-24",
     "date_from_timestamp": "Tango change - alice \u00b7 2026-09-24",
+    "coin_cases": [
+      {
+        "coins": [
+          {
+            "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "label": "Tango mix - bob"
+          },
+          {
+            "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "label": "Tango mix - bob"
+          }
+        ],
+        "undoes": "bob"
+      },
+      {
+        "coins": [
+          {
+            "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "label": "Tango mix - bob"
+          },
+          {
+            "txid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "label": "Tango mix - carol"
+          }
+        ],
+        "undoes": null
+      },
+      {
+        "coins": [
+          {
+            "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "label": "Tango mix - bob"
+          },
+          {
+            "txid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "label": "Tango change - carol"
+          }
+        ],
+        "undoes": "bob"
+      },
+      {
+        "coins": [
+          {
+            "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "label": "Tango mix - bob"
+          },
+          {
+            "txid": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "label": "rent"
+          }
+        ],
+        "undoes": null
+      },
+      {
+        "coins": [
+          {
+            "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "label": "Tango mix - bob"
+          },
+          {
+            "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "label": "Tango change - bob"
+          }
+        ],
+        "undoes": "bob"
+      },
+      {
+        "coins": [
+          {
+            "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "label": "Tango mix"
+          },
+          {
+            "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "label": "Tango mix"
+          }
+        ],
+        "undoes": "someone"
+      },
+      {
+        "coins": [
+          {
+            "txid": "",
+            "label": "Tango mix - bob"
+          },
+          {
+            "txid": "",
+            "label": "Tango mix - bob"
+          }
+        ],
+        "undoes": null
+      }
+    ],
     "cases": [
       {
         "labels": [

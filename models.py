@@ -649,6 +649,9 @@ class TangoRound(BaseModel):
     b_wallet_id: Optional[str] = None
     denom_sats: int
     fee_rate: float
+    # How many equal coins each side takes its denomination back as. One is
+    # the shape every round before this used, and what NULL reads as.
+    pieces: Optional[int] = 1
     a_in_sats: Optional[int] = None
     b_in_sats: Optional[int] = None
     a_change_sats: Optional[int] = None
@@ -660,6 +663,11 @@ class TangoRound(BaseModel):
     clean: Optional[bool] = None
     a_inputs: Optional[str] = None
     b_inputs: Optional[str] = None
+    # JSON arrays of hex scripts, one per piece. The singular columns below
+    # them hold what rounds broadcast before pieces existed derived, and
+    # helpers/tangolabels.py::spk_list reads either.
+    a_mix_spks: Optional[str] = None
+    b_mix_spks: Optional[str] = None
     a_mix_spk: Optional[str] = None
     a_change_spk: Optional[str] = None
     b_mix_spk: Optional[str] = None
@@ -683,6 +691,10 @@ class ProposeTangoData(BaseModel):
     partner_username: str
     denom_sats: int = Field(gt=0)
     fee_rate: float = Field(gt=0)
+    # Each extra piece a side is another pair of identical outputs, which is
+    # where the extra readings of the round come from — and 86 more vbytes.
+    # Capped because the gain is log2(C(2p, p)) and the cost is linear.
+    pieces: int = Field(default=1, ge=1, le=4)
     inputs: List[PayjoinSpInput]
     network: str = "signet"
 
@@ -696,19 +708,23 @@ class AcceptTangoData(BaseModel):
     """
     wallet_id: str
     inputs: List[PayjoinSpInput]
-    mix_spk: str
+    # One script per piece, in any order -- BIP-69 decides where they land.
+    # No length Field here: see the note above. The count is checked against
+    # the round's own `pieces` in the endpoint, which is the only number it
+    # could be checked against anyway.
+    mix_spks: List[str]
     change_spk: Optional[str] = None
 
 
 class SignTangoData(BaseModel):
     """Witnesses for the caller's own inputs.
 
-    A sends its two derived scripts with them, for the same reason B sent its
-    at accept time: A could not derive before the set was frozen. B sends only
-    witnesses -- its scripts are already on the row.
+    A sends its derived scripts with them -- one per piece -- for the same
+    reason B sent its at accept time: A could not derive before the set was
+    frozen. B sends only witnesses; its scripts are already on the row.
     """
     witnesses: dict
-    mix_spk: Optional[str] = None
+    mix_spks: Optional[List[str]] = None
     change_spk: Optional[str] = None
     # What this device assembled and signed, so the server can name a
     # disagreement instead of reporting that a signature failed. See

@@ -18,7 +18,28 @@ tango.py re-exports all of it, so every existing caller and test is unaffected.
 
 from __future__ import annotations
 
+import json
 from typing import Optional
+
+
+def spk_list(raw) -> list:
+    """The scripts a side derived, however the column holds them.
+
+    A JSON array is what rounds are stored as now. A bare hex string is what
+    every round from before pieces existed holds, and those rounds are on chain
+    — their coins still need naming and their history still needs reading.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [str(s).lower() for s in raw if s]
+    text = str(raw).strip()
+    if text.startswith("["):
+        try:
+            return [str(s).lower() for s in json.loads(text) if s]
+        except ValueError:
+            return []
+    return [text.lower()]
 
 
 MIX_LABEL = "Tango mix"
@@ -119,7 +140,7 @@ def _party(label: str, prefix: str) -> Optional[str]:
 
 def coin_labels(
     tx_outputs: dict,
-    denom: int,
+    share: int,
     scripts,
     other_username: Optional[str],
     when=None,
@@ -134,10 +155,11 @@ def coin_labels(
     guard refuses the safe pair and allows the dangerous one, and the label
     reads plausibly throughout.
 
-    The transaction cannot be wrong about it. Both shares are worth the
-    denomination — that is the whole privacy claim, checked on both devices
-    before either signs — so an output of this side's worth exactly `denom` is
-    its share and anything else is its change. Reading it off the chain makes
+    The transaction cannot be wrong about it. EVERY mixed output is worth
+    `share` — that is the whole privacy claim, checked on both devices before
+    either signs — so an output of this side's worth exactly that is a share
+    and anything else is its change. With one piece a side, `share` is the
+    denomination; with more, it is the denomination divided between them. Reading it off the chain makes
     the label true whatever the columns say, and disagreement becomes visible
     rather than silent.
 
@@ -155,7 +177,7 @@ def coin_labels(
         if not key or key not in outs:
             continue
         value = int(outs[key])
-        naming = mix_label if value == int(denom) else change_label
+        naming = mix_label if value == int(share) else change_label
         out[key] = naming(other_username, when)
     return out
 
@@ -179,8 +201,25 @@ def wrote_label(label: str) -> bool:
     )
 
 
-def undoes_a_round(labels) -> Optional[str]:
+def _coin(item) -> tuple:
+    """(txid, label) from whatever the caller had to hand.
+
+    A bare string is a label with no txid — every caller passed one of those
+    before rounds could have more than one share a side, and the fixtures still
+    do for the rules that do not need it.
+    """
+    if isinstance(item, str) or item is None:
+        return "", item or ""
+    if isinstance(item, dict):
+        return str(item.get("txid") or ""), str(item.get("label") or "")
+    return str(getattr(item, "txid", "") or ""), str(getattr(item, "label", "") or "")
+
+
+def undoes_a_round(coins) -> Optional[str]:
     """The round(s) a selection of coins would undo, named, or None.
+
+    TWO RULES, and they fail the same way: a transaction that says two coins
+    had one owner, when the whole point of the round was that nobody could say.
 
     ANY TANGO SHARE WITH ANY TANGO CHANGE. Not only a share with its own
     round's change, which is what this used to check and was too narrow.
@@ -194,24 +233,41 @@ def undoes_a_round(labels) -> Optional[str]:
     the mix. A share is the opposite: it is the coin that history was cut off
     from. Put the two in one transaction and the cut is repaired — the share
     inherits the change's attribution — whoever the round was with and whenever
-    it happened. Change from the alice round reconnects a share from the bob
-    round just as well.
+    it happened.
 
-    So the rule is by KIND, not by round, and the marker in the label is for
-    the human reading it rather than for this.
+    TWO SHARES FROM ONE ROUND. New, and the price of taking your share in
+    several pieces. A round of p pieces a side has C(2p, p) readings precisely
+    because nobody can say which p of the 2p identical outputs are yours;
+    spending two of them together says it. Six readings collapse to two, and
+    the round is worth what a single-piece round was worth.
+
+    BY TXID, NOT BY LABEL. Two coins from one round share a spending
+    transaction, so the round is identifiable without putting its id back into
+    the coin's name — which was removed on purpose, because "#fagk" in a coin
+    list tells the owner nothing. Coins with no txid (older callers, fixtures)
+    simply cannot trip this rule, which is the safe direction: the first rule
+    still applies to them.
 
     Returns the counterparty of the share(s) at risk, since the share is what
     loses its protection. None when the selection is safe.
     """
     mixed = set()
     has_change = False
-    for raw in labels:
-        who = _party(raw or "", MIX_LABEL)
+    by_txid: dict = {}
+    for item in coins:
+        txid, raw = _coin(item)
+        who = _party(raw, MIX_LABEL)
         if who is not None:
             mixed.add(who or "someone")
+            if txid:
+                by_txid.setdefault(txid, []).append(who or "someone")
             continue
-        if _party(raw or "", CHANGE_LABEL) is not None:
+        if _party(raw, CHANGE_LABEL) is not None:
             has_change = True
+
+    together = {names[0] for names in by_txid.values() if len(names) > 1}
+    if together:
+        return " and ".join(sorted(together))
     if not mixed or not has_change:
         return None
     return " and ".join(sorted(mixed))
