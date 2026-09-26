@@ -4616,9 +4616,21 @@ def _tango_role(rnd, uid: str) -> Optional[str]:
 
 
 def _tango_amounts(rnd) -> dict:
-    """The stored plan, in the shape helpers/tango.py returns."""
+    """The stored plan, in the shape helpers/tango.py returns.
+
+    EVERY KEY plan() returns, and tests/test_tango.py holds the two to the same
+    set. `pieces` and `share` were missing when pieces arrived, and the row is
+    the only place the transaction is rebuilt from: outputs_for read the
+    fallbacks and saw a round of one, which refused an honest two-piece round
+    at the approve step. Had the count happened to match it would instead have
+    valued every output at the whole denomination rather than a piece of it —
+    the same omission, paying double.
+    """
+    pieces = max(1, int(rnd.pieces or 1))
     return {
         "denom": rnd.denom_sats,
+        "pieces": pieces,
+        "share": rnd.denom_sats // pieces,
         "a_in": rnd.a_in_sats,
         "b_in": rnd.b_in_sats,
         "a_change": rnd.a_change_sats or 0,

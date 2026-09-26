@@ -10,6 +10,7 @@ being paid in.
 from __future__ import annotations
 
 import importlib.util
+import re
 import pathlib
 import sys
 import types
@@ -1256,3 +1257,26 @@ def test_the_readings_a_round_offers_are_C_2p_choose_p():
         identical = [o for o in tx.vout if o.value == a["share"]]
         assert len(identical) == 2 * p
         assert comb(len(identical), p) == expect, (p, len(identical))
+
+
+def test_the_stored_plan_carries_every_field_the_planner_produces():
+    """views_api.py::_tango_amounts is the row -> plan boundary, and the only
+    place the transaction is rebuilt from before either side signs.
+
+    Nothing tested it, so `pieces` and `share` were simply absent when pieces
+    were added: outputs_for fell back to a round of one and refused an honest
+    two-piece round at the approve step. The failure was loud this time. The
+    same omission with a matching count would have valued every output at the
+    whole denomination instead of a piece of it.
+
+    Read out of the source rather than called, because calling it needs a
+    TangoRound row and the point is to catch a field added to plan() and
+    forgotten here.
+    """
+    src = (ROOT / "views_api.py").read_text()
+    body = src[src.index("def _tango_amounts"):]
+    body = body[: body.index("def _tango_assemble")]
+
+    produced = set(pieces_plan(400_000, 400_000, pieces=2).keys())
+    stored = set(re.findall(r'"(\w+)":', body))
+    assert produced <= stored, sorted(produced - stored)
