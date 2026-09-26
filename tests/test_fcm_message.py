@@ -102,6 +102,69 @@ def test_no_push_text_carries_a_number():
         assert not re.search(r"\d", text), f"push text names a figure: {text!r}"
 
 
+# ── the `type` both clients switch on ────────────────────────────────────────
+#
+# Every push carries a data map with a `type`, and the Android client REFUSES
+# one it does not recognise. That refusal is not a fallback to a plain
+# notification: these are data-only messages (no `notification` block, see
+# above), so the firebase SDK displays nothing by itself and the app's own
+# notify/PaymentNotificationReceiver.kt is the only thing that can. A type
+# missing from its list therefore produces silence, on every phone, with the
+# app closed, with nothing logged anywhere.
+#
+# That is not hypothetical. `tango` was sent by every endpoint of a round for
+# as long as Tango existed and was absent from the receiver's list the whole
+# time, so a mix invitation reached nobody who was not already looking at the
+# app. This pins the set from the sending end: adding one here fails until the
+# list is updated, and the list says where the other two copies live.
+PUSH_TYPES = {"payment", "send_confirmed", "test", "tango"}
+
+
+def _push_types() -> set[str]:
+    """The `type` of every data map handed to send_fcm / send_fcm_report."""
+    tree = ast.parse((ROOT / "views_api.py").read_text(encoding="utf-8"))
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        name = getattr(fn, "attr", None) or getattr(fn, "id", None)
+        if name not in ("send_fcm", "send_fcm_report"):
+            continue
+        for arg in node.args:
+            if not isinstance(arg, ast.Dict):
+                continue
+            for k, v in zip(arg.keys, arg.values):
+                if (
+                    isinstance(k, ast.Constant)
+                    and k.value == "type"
+                    and isinstance(v, ast.Constant)
+                ):
+                    found.add(v.value)
+    return found
+
+
+def test_the_push_types_were_found():
+    """Guards the test below: if the call sites move, this fails rather than
+    quietly passing on an empty set."""
+    assert len(_push_types()) >= 3, _push_types()
+
+
+def test_no_push_carries_a_type_the_app_does_not_know():
+    """A new type needs THREE edits, not one:
+      * here, in PUSH_TYPES;
+      * thrilla src/services/push.ts, PUSH_TYPES (the foreground banner); and
+      * thrilla android/.../notify/PaymentNotificationReceiver.kt, KNOWN_TYPES
+        (the notification with the app closed — the one that silently does
+        nothing if you forget).
+    thrilla's scripts/check-settings-ui.cjs holds the last two to each other."""
+    unknown = _push_types() - PUSH_TYPES
+    assert not unknown, (
+        f"{sorted(unknown)} is sent but not in PUSH_TYPES — if the Android "
+        "receiver does not know it either, it shows nothing at all"
+    )
+
+
 # ── which rejections kill a token ────────────────────────────────────────────
 #
 # A token FCM will never accept again has to be deleted, because nothing else
