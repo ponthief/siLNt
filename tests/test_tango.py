@@ -1336,3 +1336,71 @@ def test_labelling_survives_one_bad_round():
     loop = body[body.index("for rnd in"):]
     assert "try:" in loop and "except Exception" in loop
     assert loop.index("try:") < loop.index("_tango_label_change")
+
+
+# ── what gets a push, and what deliberately does not ────────────────────────
+# Every step of a ROUND was pushed and the step before any round can exist —
+# asking to connect — was not, so the first thing either side does went
+# unannounced and a request sat waiting on somebody with no reason to open the
+# app.
+#
+# No push here carries an amount (they pass through Google) and none carries a
+# name: who is connecting to whom is exactly the graph this feature exists to
+# keep off other people's servers.
+
+
+def _endpoint(name: str) -> str:
+    """One endpoint body, to the next top-level definition.
+
+    Not to the next "@silnt_api_router": the last endpoint in the file has no
+    following decorator, and slicing to a marker that is not there raises
+    rather than failing the assertion it was written for.
+    """
+    import re
+
+    src = (ROOT / "views_api.py").read_text()
+    at = src.index(f"async def {name}")
+    m = re.search(r"\n(?=(@silnt_api_router|async def |def |# ─))", src[at:])
+    return src[at : at + m.start()] if m else src[at:]
+
+
+def test_asking_to_connect_tells_the_other_side():
+    assert "_notify_tango(" in _endpoint("api_payjoin_contact_request")
+
+
+def test_accepting_tells_the_one_who_asked():
+    body = _endpoint("api_payjoin_contact_approve")
+    assert "_notify_tango(" in body
+    assert "c.requester_user_id" in body, "the wrong side is told"
+
+
+def test_declining_is_deliberately_silent():
+    """A push is the wrong way to be told no. The outcome is listed under
+    Connections when they next open the app, which loses them nothing."""
+    assert "_notify_tango(" not in _endpoint("api_payjoin_contact_decline")
+
+
+def test_every_step_of_a_round_is_announced():
+    """propose, accept, A-signed, broadcast, cancel — each is the moment the
+    OTHER side has something to do or something to know."""
+    for name in (
+        "api_tango_propose", "api_tango_accept", "api_tango_sign",
+        "api_tango_cancel",
+    ):
+        assert "_notify_tango(" in _endpoint(name), name
+
+
+def test_no_push_carries_an_amount_or_a_name():
+    """CLAUDE.md: pushes must not mention amounts. Names are the same
+    argument — a lock screen reading "alice wants to mix" hands the social
+    graph to whoever is looking, and to Google either way.
+    """
+    import re
+
+    src = (ROOT / "views_api.py").read_text()
+    for call in re.findall(r"_notify_tango\((.*?)\)\n", src, re.S):
+        text = " ".join(re.findall(r'"([^"]*)"', call))
+        assert not re.search(r"\d", text), f"a number in a push: {text!r}"
+        assert "{" not in call.split("(", 1)[-1] or "f\"" not in call, (
+            f"an interpolated push body could carry a name: {call!r}"
+        )

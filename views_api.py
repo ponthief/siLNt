@@ -3506,6 +3506,18 @@ async def api_payjoin_contact_request(
         await reopen_payjoin_contact(existing.id, uid, target_id)
     elif target_id != uid:
         await create_payjoin_contact(uid, target_id, on)
+    # A request sits waiting on somebody who has no reason to open the app.
+    # Every step of a ROUND was pushed and this, the step before any round can
+    # exist, was not — so the first thing either side does went unannounced.
+    #
+    # No name and no amount, the same rule as every other push here: these go
+    # through Google, and who is connecting to whom is exactly the graph this
+    # feature exists to keep off other people's servers.
+    await _notify_tango(
+        target_id,
+        "Tango",
+        "Someone wants to connect so you can mix. Open WhiSPa to look.",
+    )
     return {"status": "sent", "username": username}
 
 
@@ -3566,6 +3578,11 @@ async def api_payjoin_contact_approve(
     if c.status != "PENDING":
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Not pending.")
     await set_payjoin_contact_status(cid, "ACCEPTED")
+    await _notify_tango(
+        c.requester_user_id,
+        "Tango",
+        "Your connection request was accepted. You can propose a mix now.",
+    )
     return {"status": "ACCEPTED"}
 
 
@@ -3580,6 +3597,11 @@ async def api_payjoin_contact_decline(
         raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Request not found.")
     if c.status != "PENDING":
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Not pending.")
+    # NOT NOTIFIED, on purpose. A push is the wrong way to be told no: it
+    # arrives on a lock screen, it cannot be softened, and the requester loses
+    # nothing by finding out when they next open the app, where the outcome is
+    # already listed under Connections. Accepting is news the other side is
+    # waiting for; declining is not.
     await set_payjoin_contact_status(cid, "DECLINED")
     return {"status": "DECLINED"}
 
