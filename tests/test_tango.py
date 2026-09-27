@@ -1404,3 +1404,39 @@ def test_no_push_carries_an_amount_or_a_name():
         assert "{" not in call.split("(", 1)[-1] or "f\"" not in call, (
             f"an interpolated push body could carry a name: {call!r}"
         )
+
+
+# ── what the transaction list is told about a round ──────────────────────────
+
+
+def _mix_summary_source() -> str:
+    src = (ROOT / "crud.py").read_text()
+    at = src.index("async def get_tango_txids_for_wallet")
+    nxt = src.index("async def ", at + 10)
+    return src[at:nxt]
+
+
+def test_the_mix_summary_carries_the_other_side_apart_from_this_one():
+    """Every output of a Tango that this wallet does not own used to be listed
+    under "alice's share" — including alice's CHANGE. A 14,000 round with 2,503
+    of change on her side reported her as taking 16,503 out of a round where
+    both sides took 14,000.
+
+    Telling a share from a change needs two things the summary did not carry:
+    how many outputs one share is split into, and how much the other side's
+    change was."""
+    body = _mix_summary_source()
+    for field in ("pieces", "their_change_sats"):
+        assert f'"{field}"' in body, f"the summary does not carry {field}"
+    # Theirs, not a second copy of ours.
+    assert 'their_change = r["b_change_sats"] if mine_is_a else r["a_change_sats"]' in body
+    assert 'my_change = r["a_change_sats"] if mine_is_a else r["b_change_sats"]' in body
+
+
+def test_the_mix_summary_selects_what_it_returns():
+    """A field read off a row the query never selected is a KeyError at
+    runtime, on the transaction list, for every wallet that has ever mixed."""
+    body = _mix_summary_source()
+    select = body[body.index("SELECT"):body.index("FROM")]
+    for col in ("denom_sats", "pieces", "a_change_sats", "b_change_sats"):
+        assert col in select, f"{col} is read but not selected"

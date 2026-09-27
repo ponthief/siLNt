@@ -3274,8 +3274,9 @@ async def list_tango_rounds_for_user(
 
 
 async def get_tango_txids_for_wallet(wallet_id: str) -> dict:
-    """{txid: {denom_sats, partner, fee_sats, change_sats, dust_to_fee}} for
-    this wallet's broadcast rounds, from THIS wallet's side.
+    """{txid: {denom_sats, pieces, partner, fee_sats, change_sats,
+    their_change_sats, dust_to_fee}} for this wallet's broadcast rounds, from
+    THIS wallet's side.
 
     So the transaction list can say a mix happened. Without it a Tango is a
     send of the fee with a change coin's label on it — arithmetically true and
@@ -3285,10 +3286,16 @@ async def get_tango_txids_for_wallet(wallet_id: str) -> dict:
     whenever one side's change was dropped as dust, and that side's is the one
     its owner is trying to account for. dust_to_fee is how much of it was that
     dropped change, so a wallet with no change coin can say where it went.
+
+    `pieces` and `their_change_sats` are what let a client tell the other
+    side's SHARE from the other side's CHANGE. Both are outputs this wallet
+    does not own, so without them the detail view listed every one of them
+    under "alice's share" — reporting a 14,000 round as 16,503 to alice,
+    because her 2,503 of change was in the list too.
     """
     rows = await db.fetchall(
         """
-        SELECT txid, denom_sats, a_wallet_id, a_username, b_username,
+        SELECT txid, denom_sats, pieces, a_wallet_id, a_username, b_username,
                a_fee_sats, b_fee_sats, a_change_sats, b_change_sats,
                vsize, fee_rate
         FROM silnt.tango_rounds
@@ -3302,11 +3309,16 @@ async def get_tango_txids_for_wallet(wallet_id: str) -> dict:
         mine_is_a = r["a_wallet_id"] == wallet_id
         my_fee = r["a_fee_sats"] if mine_is_a else r["b_fee_sats"]
         my_change = r["a_change_sats"] if mine_is_a else r["b_change_sats"]
+        their_change = r["b_change_sats"] if mine_is_a else r["a_change_sats"]
         out[r["txid"]] = {
             "denom_sats": int(r["denom_sats"] or 0),
+            # Rounds that predate pieces have no count; one each is what they
+            # were.
+            "pieces": int(r["pieces"] or 1),
             "partner": (r["b_username"] if mine_is_a else r["a_username"]) or "",
             "fee_sats": int(my_fee or 0),
             "change_sats": int(my_change or 0),
+            "their_change_sats": int(their_change or 0),
             "dust_to_fee": tango.dust_to_fee(
                 my_fee, my_change, r["vsize"], r["fee_rate"], mine_is_a
             ),
