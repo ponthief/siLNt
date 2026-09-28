@@ -1440,3 +1440,18 @@ def test_the_mix_summary_selects_what_it_returns():
     select = body[body.index("SELECT"):body.index("FROM")]
     for col in ("denom_sats", "pieces", "a_change_sats", "b_change_sats"):
         assert col in select, f"{col} is read but not selected"
+
+
+def test_the_broadcast_push_says_the_round_completed():
+    """"Your Tango has been broadcast." described the mechanism. What the person
+    is waiting to hear is that the round is over.
+
+    Asserted on the _notify_tango calls rather than on send_fcm: every Tango
+    push goes through that helper, so the literals never reach send_fcm
+    directly and test_fcm_message's collector cannot see them."""
+    src = (ROOT / "views_api.py").read_text()
+    calls = re.findall(r"_notify_tango\((.*?)\)\n", src, re.S)
+    assert calls, "no _notify_tango calls found"
+    texts = " ".join(" ".join(re.findall(r'"([^"]*)"', c)) for c in calls)
+    assert "Your Tango round has completed." in texts, texts
+    assert "has been broadcast" not in texts

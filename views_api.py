@@ -5351,7 +5351,7 @@ async def api_tango_sign(
     final = await get_tango_round(rid)
     await _tango_label_change(final)
     await _notify_tango(
-        rnd.a_user_id, "Tango done", "Your Tango has been broadcast."
+        rnd.a_user_id, "Tango done", "Your Tango round has completed."
     )
     return (await get_tango_round(rid)).dict()
 
