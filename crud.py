@@ -2809,6 +2809,71 @@ async def create_sp_contact(
     )
     return await get_sp_contact(cid)
 
+async def update_sp_contact_value(cid: str, user_id: str, value: str) -> None:
+    """Point an existing contact at a different recipient, keeping its name.
+
+    WHY THIS EXISTS. A raw SP address in the address book is frozen at the
+    moment it was saved. The person it belongs to can delete that wallet and
+    make another, and nothing on either side says so — the sender keeps a name
+    they trust pointing at an address whose keys nobody holds any more, and a
+    payment to it is simply gone. Deleting and re-adding the contact loses its
+    name and its place in the list, so the fix has to be an edit.
+
+    A BitMail contact does not have this problem: the name is resolved through
+    DNS at send time, so the recipient's own record is what decides where it
+    goes, and updating it is theirs to do.
+    """
+    value = (value or "").strip()
+    if not value:
+        raise ValueError("Recipient is required.")
+    row = await db.fetchone(
+        "SELECT network FROM silnt.sp_contacts WHERE id = :id AND user_id = :uid",
+        {"id": cid, "uid": user_id},
+    )
+    if not row:
+        raise ValueError("No such contact.")
+    # The same recipient must not end up saved twice under two names.
+    vhash = _spc_hash(value)
+    clash = await db.fetchone(
+        "SELECT id FROM silnt.sp_contacts "
+        "WHERE user_id = :uid AND network = :net AND id != :cid AND value_sha256 = :h",
+        {"uid": user_id, "net": row["network"], "cid": cid, "h": vhash},
+    )
+    if clash:
+        raise ValueError("Another contact already points at that recipient.")
+    await db.execute(
+        "UPDATE silnt.sp_contacts SET kind = :k, value = :v, value_sha256 = :h "
+        "WHERE id = :id AND user_id = :uid",
+        {"k": _classify_recipient(value), "v": _pj_encrypt(value), "h": vhash,
+         "id": cid, "uid": user_id},
+    )
+
+
+async def sp_addresses_in_use(addresses: set, network: str) -> set:
+    """Which of these SP addresses a WhiSPa wallet on this network holds RIGHT
+    NOW, lowercased.
+
+    This is the whole of what the server can honestly say about a saved
+    address. It cannot say "this used to be alice and is not any more":
+    deleting a wallet removes the row, by design, so a wallet that is gone and
+    an address that was never WhiSPa's look identical from here. Absence means
+    "not verifiable", not "wrong" — and the clients say exactly that.
+
+    Only ever called with addresses the caller already has in their own
+    address book, so it answers a question about the caller's own data rather
+    than being an oracle for mapping arbitrary addresses to WhiSPa accounts.
+    """
+    wanted = {a.strip().lower() for a in addresses if a and a.strip()}
+    if not wanted:
+        return set()
+    rows = await db.fetchall(
+        "SELECT sp_address FROM silnt.wallets WHERE network = :net",
+        {"net": network},
+    )
+    have = {(r["sp_address"] or "").strip().lower() for r in rows}
+    return wanted & have
+
+
 async def get_sp_contact(cid: str) -> Optional["SpContact"]:
     from .models import SpContact
     row = await db.fetchone("SELECT * FROM silnt.sp_contacts WHERE id = :id", {"id": cid})

@@ -193,6 +193,8 @@ from .crud import (
     get_payjoin_contact_labels,
     create_sp_contact,
     list_sp_contacts,
+    sp_addresses_in_use,
+    update_sp_contact_value,
     update_sp_contact_label,
     delete_sp_contact,
     touch_sp_contact,
@@ -4065,7 +4067,28 @@ async def api_sp_contacts_list(
             detail="A `network` query parameter is required (e.g. ?network=mainnet).",
         )
     rows = await list_sp_contacts(key_info.wallet.user, network)
-    return {"contacts": [c.dict() for c in rows]}
+    # Is a saved SP address still one a WhiSPa wallet holds?
+    #
+    # A raw address is frozen at the moment it was saved. Its owner can delete
+    # that wallet and make another, and nothing tells the sender: the name in
+    # their address book still looks right, and a payment to it is gone. So
+    # each one is checked against the wallets that exist now.
+    #
+    # `whispa` is TRUE (a live WhiSPa wallet holds it), FALSE (no live WhiSPa
+    # wallet does — which is a non-WhiSPa recipient OR a wallet that is gone,
+    # and the server cannot tell those apart), or NULL for a BitMail contact,
+    # which is resolved through DNS at send time and so is never stale.
+    out = []
+    verified = await sp_addresses_in_use(
+        {c.value for c in rows if c.kind == "sp"}, network
+    )
+    for c in rows:
+        d = c.dict()
+        d["whispa"] = (
+            None if c.kind != "sp" else (c.value or "").strip().lower() in verified
+        )
+        out.append(d)
+    return {"contacts": out}
 
 
 @silnt_api_router.post("/api/v1/contacts")
@@ -4103,8 +4126,27 @@ async def api_sp_contacts_update(
     data: UpdateSpContactData,
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
+    if data.label is None and data.value is None:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Nothing to change.",
+        )
     try:
-        await update_sp_contact_label(cid, key_info.wallet.user, data.label)
+        if data.value is not None:
+            value = (data.value or "").strip()
+            # Same shapes create accepts: a BitMail name or an SP address.
+            if "@" in value:
+                user, _, domain = value.partition("@")
+                if not user or not domain or "." not in domain:
+                    raise ValueError("Invalid BitMail name.")
+            elif not (value.startswith("sp1") or value.startswith("tsp1")):
+                raise ValueError(
+                    "Recipient must be a BitMail name (name@domain) or an SP "
+                    "address (sp1…/tsp1…)."
+                )
+            await update_sp_contact_value(cid, key_info.wallet.user, value)
+        if data.label is not None:
+            await update_sp_contact_label(cid, key_info.wallet.user, data.label)
     except ValueError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
     return {"ok": True}

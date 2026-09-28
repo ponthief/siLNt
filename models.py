@@ -560,7 +560,11 @@ class CreateSpContactData(BaseModel):
 
 
 class UpdateSpContactData(BaseModel):
-    label: str
+    # Both optional: a rename sends only the label, and repointing a contact at
+    # a recipient's new address sends only the value. No Field constraints —
+    # see the note at the top of this file about pydantic v1/v2.
+    label: Optional[str] = None
+    value: Optional[str] = None
 
 
 class BackgroundScanData(BaseModel):
