@@ -3551,7 +3551,7 @@ async def api_payjoin_contact_request(
     await _notify_tango(
         target_id,
         "Tango",
-        "Someone wants to connect so you can mix. Open WhiSPa to look.",
+        "Someone wants to connect so you can Tango. Open WhiSPa to look.",
     )
     return {"status": "sent", "username": username}
 
@@ -3616,7 +3616,7 @@ async def api_payjoin_contact_approve(
     await _notify_tango(
         c.requester_user_id,
         "Tango",
-        "Your connection request was accepted. You can propose a mix now.",
+        "Your connection request was accepted. You can send a Tango offer now.",
     )
     return {"status": "ACCEPTED"}
 
@@ -5094,7 +5094,7 @@ async def api_tango_propose(
         expiry_seconds=TANGO_EXPIRY_SECONDS,
     )
     await _notify_tango(
-        partner.id, "Tango", "Someone wants to mix with you. Open WhiSPa to look."
+        partner.id, "Tango offer", "Someone has sent you a Tango offer. Open WhiSPa to look."
     )
     return rnd.dict()
 
@@ -5258,8 +5258,8 @@ async def api_tango_accept(
         b_change_spk=data.change_spk.lower() if data.change_spk else None,
     )
     await _notify_tango(
-        rnd.a_user_id, "Tango accepted",
-        "Your Tango was matched and is waiting for you to sign.",
+        rnd.a_user_id, "Tango matched",
+        "The other side matched your Tango offer. Open WhiSPa to approve it.",
     )
     return updated.dict()
 
@@ -5352,7 +5352,7 @@ async def api_tango_sign(
         )
         await _notify_tango(
             rnd.b_user_id, "Tango ready",
-            "The other side has signed. Open WhiSPa to finish it.",
+            "Your partner approved the Tango. Open WhiSPa to complete it.",
         )
         return updated.dict()
 

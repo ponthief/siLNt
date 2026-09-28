@@ -1565,3 +1565,16 @@ def test_the_users_own_words_are_still_theirs_either_spelling():
 def test_new_coins_do_not_say_mix():
     assert "mix" not in tango.mix_label("alice", "2026-09-24").lower()
     assert tango.mix_label("alice") == "Tango share - alice"
+
+
+def test_no_push_calls_it_a_mix_or_says_who_signed():
+    """A proposal is an OFFER — sent, matched or not, nobody committed until
+    it is — and the pushes say so. "The other side has signed" also described
+    the mechanism rather than what the reader has to do next, which is finish
+    the round."""
+    src = (ROOT / "views_api.py").read_text()
+    calls = re.findall(r"_notify_tango\((.*?)\)\n", src, re.S)
+    texts = " ".join(" ".join(re.findall(r'"([^"]*)"', c)) for c in calls)
+    assert "mix" not in texts.lower(), texts
+    assert "has signed" not in texts
+    assert "matched your Tango offer" in texts
