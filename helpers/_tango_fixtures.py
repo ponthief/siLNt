@@ -276,20 +276,20 @@ def labels() -> dict:
         "coin_cases": [
             {"coins": cs, "undoes": _t.undoes_a_round(cs)}
             for cs in (
-                [{"txid": "aa" * 32, "label": "Tango mix - bob"},
-                 {"txid": "aa" * 32, "label": "Tango mix - bob"}],
-                [{"txid": "aa" * 32, "label": "Tango mix - bob"},
-                 {"txid": "bb" * 32, "label": "Tango mix - carol"}],
-                [{"txid": "aa" * 32, "label": "Tango mix - bob"},
+                [{"txid": "aa" * 32, "label": "Tango share - bob"},
+                 {"txid": "aa" * 32, "label": "Tango share - bob"}],
+                [{"txid": "aa" * 32, "label": "Tango share - bob"},
+                 {"txid": "bb" * 32, "label": "Tango share - carol"}],
+                [{"txid": "aa" * 32, "label": "Tango share - bob"},
                  {"txid": "bb" * 32, "label": "Tango change - carol"}],
-                [{"txid": "aa" * 32, "label": "Tango mix - bob"},
+                [{"txid": "aa" * 32, "label": "Tango share - bob"},
                  {"txid": "cc" * 32, "label": "rent"}],
-                [{"txid": "aa" * 32, "label": "Tango mix - bob"},
+                [{"txid": "aa" * 32, "label": "Tango share - bob"},
                  {"txid": "aa" * 32, "label": "Tango change - bob"}],
-                [{"txid": "aa" * 32, "label": "Tango mix"},
-                 {"txid": "aa" * 32, "label": "Tango mix"}],
-                [{"txid": "", "label": "Tango mix - bob"},
-                 {"txid": "", "label": "Tango mix - bob"}],
+                [{"txid": "aa" * 32, "label": "Tango share"},
+                 {"txid": "aa" * 32, "label": "Tango share"}],
+                [{"txid": "", "label": "Tango share - bob"},
+                 {"txid": "", "label": "Tango share - bob"}],
             )
         ],
         "cases": [
@@ -298,27 +298,27 @@ def labels() -> dict:
                 # A share with change: refused, whoever each was with and
                 # whenever it happened. The change carries an attribution the
                 # share exists to be free of.
-                ["Tango mix - alice", "Tango change - alice"],
-                ["Tango mix - alice", "Tango change - alice", "rent"],
-                ["Tango mix - alice", "Tango change - bob"],
+                ["Tango share - alice", "Tango change - alice"],
+                ["Tango share - alice", "Tango change - alice", "rent"],
+                ["Tango share - alice", "Tango change - bob"],
                 # The date marker, and the round-id tag it replaced: coins
                 # carrying the old one are still in wallets.
-                ["Tango mix - alice · 2026-09-24",
+                ["Tango share - alice · 2026-09-24",
                  "Tango change - alice · 2026-10-01"],
-                ["Tango mix - alice #7c2e", "Tango change - alice #3f9a"],
-                ["Tango mix · 2026-09-24", "Tango change"],
-                ["Tango mix #7c2e", "Tango change"],
-                ["Tango mix", "Tango change · 2026-09-24"],
-                ["Tango mix - alice", "Tango mix - bob", "Tango change - carol"],
+                ["Tango share - alice #7c2e", "Tango change - alice #3f9a"],
+                ["Tango share · 2026-09-24", "Tango change"],
+                ["Tango share #7c2e", "Tango change"],
+                ["Tango share", "Tango change · 2026-09-24"],
+                ["Tango share - alice", "Tango share - bob", "Tango change - carol"],
                 # Not this failure.
-                ["Tango mix - alice", "Tango mix - bob"],
-                ["Tango mix - alice · 2026-09-24",
-                 "Tango mix - alice · 2026-10-01"],
+                ["Tango share - alice", "Tango share - bob"],
+                ["Tango share - alice · 2026-09-24",
+                 "Tango share - alice · 2026-10-01"],
                 ["Tango change - alice", "Tango change - bob"],
                 # The user's own words, not ours.
-                ["my Tango mix - alice", "Tango change - alice"],
-                ["Tango mixer fund", "Tango change - alice"],
-                ["Tango mix money for alice", "Tango change - alice"],
+                ["my Tango share - alice", "Tango change - alice"],
+                ["Tango shareer fund", "Tango change - alice"],
+                ["Tango share money for alice", "Tango change - alice"],
                 ["salary", "Tango", ""],
                 [],
             )

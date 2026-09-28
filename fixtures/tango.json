@@ -537,24 +537,24 @@
     }
   ],
   "labels": {
-    "mix": "Tango mix - alice",
+    "mix": "Tango share - alice",
     "change": "Tango change - alice",
-    "bare_mix": "Tango mix",
+    "bare_mix": "Tango share",
     "bare_change": "Tango change",
-    "dated_mix": "Tango mix - alice \u00b7 2026-09-24",
+    "dated_mix": "Tango share - alice \u00b7 2026-09-24",
     "dated_change": "Tango change - alice \u00b7 2026-10-01",
-    "marker_only": "Tango mix \u00b7 2026-09-24",
+    "marker_only": "Tango share \u00b7 2026-09-24",
     "date_from_timestamp": "Tango change - alice \u00b7 2026-09-24",
     "coin_cases": [
       {
         "coins": [
           {
             "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "label": "Tango mix - bob"
+            "label": "Tango share - bob"
           },
           {
             "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "label": "Tango mix - bob"
+            "label": "Tango share - bob"
           }
         ],
         "undoes": "bob"
@@ -563,11 +563,11 @@
         "coins": [
           {
             "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "label": "Tango mix - bob"
+            "label": "Tango share - bob"
           },
           {
             "txid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "label": "Tango mix - carol"
+            "label": "Tango share - carol"
           }
         ],
         "undoes": null
@@ -576,7 +576,7 @@
         "coins": [
           {
             "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "label": "Tango mix - bob"
+            "label": "Tango share - bob"
           },
           {
             "txid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -589,7 +589,7 @@
         "coins": [
           {
             "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "label": "Tango mix - bob"
+            "label": "Tango share - bob"
           },
           {
             "txid": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -602,7 +602,7 @@
         "coins": [
           {
             "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "label": "Tango mix - bob"
+            "label": "Tango share - bob"
           },
           {
             "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -615,11 +615,11 @@
         "coins": [
           {
             "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "label": "Tango mix"
+            "label": "Tango share"
           },
           {
             "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "label": "Tango mix"
+            "label": "Tango share"
           }
         ],
         "undoes": "someone"
@@ -628,11 +628,11 @@
         "coins": [
           {
             "txid": "",
-            "label": "Tango mix - bob"
+            "label": "Tango share - bob"
           },
           {
             "txid": "",
-            "label": "Tango mix - bob"
+            "label": "Tango share - bob"
           }
         ],
         "undoes": null
@@ -641,14 +641,14 @@
     "cases": [
       {
         "labels": [
-          "Tango mix - alice",
+          "Tango share - alice",
           "Tango change - alice"
         ],
         "undoes": "alice"
       },
       {
         "labels": [
-          "Tango mix - alice",
+          "Tango share - alice",
           "Tango change - alice",
           "rent"
         ],
@@ -656,65 +656,65 @@
       },
       {
         "labels": [
-          "Tango mix - alice",
+          "Tango share - alice",
           "Tango change - bob"
         ],
         "undoes": "alice"
       },
       {
         "labels": [
-          "Tango mix - alice \u00b7 2026-09-24",
+          "Tango share - alice \u00b7 2026-09-24",
           "Tango change - alice \u00b7 2026-10-01"
         ],
         "undoes": "alice"
       },
       {
         "labels": [
-          "Tango mix - alice #7c2e",
+          "Tango share - alice #7c2e",
           "Tango change - alice #3f9a"
         ],
         "undoes": "alice"
       },
       {
         "labels": [
-          "Tango mix \u00b7 2026-09-24",
+          "Tango share \u00b7 2026-09-24",
           "Tango change"
         ],
         "undoes": "someone"
       },
       {
         "labels": [
-          "Tango mix #7c2e",
+          "Tango share #7c2e",
           "Tango change"
         ],
         "undoes": "someone"
       },
       {
         "labels": [
-          "Tango mix",
+          "Tango share",
           "Tango change \u00b7 2026-09-24"
         ],
         "undoes": "someone"
       },
       {
         "labels": [
-          "Tango mix - alice",
-          "Tango mix - bob",
+          "Tango share - alice",
+          "Tango share - bob",
           "Tango change - carol"
         ],
         "undoes": "alice and bob"
       },
       {
         "labels": [
-          "Tango mix - alice",
-          "Tango mix - bob"
+          "Tango share - alice",
+          "Tango share - bob"
         ],
         "undoes": null
       },
       {
         "labels": [
-          "Tango mix - alice \u00b7 2026-09-24",
-          "Tango mix - alice \u00b7 2026-10-01"
+          "Tango share - alice \u00b7 2026-09-24",
+          "Tango share - alice \u00b7 2026-10-01"
         ],
         "undoes": null
       },
@@ -727,21 +727,21 @@
       },
       {
         "labels": [
-          "my Tango mix - alice",
+          "my Tango share - alice",
           "Tango change - alice"
         ],
         "undoes": null
       },
       {
         "labels": [
-          "Tango mixer fund",
+          "Tango shareer fund",
           "Tango change - alice"
         ],
         "undoes": null
       },
       {
         "labels": [
-          "Tango mix money for alice",
+          "Tango share money for alice",
           "Tango change - alice"
         ],
         "undoes": null

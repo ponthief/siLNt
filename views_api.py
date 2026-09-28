@@ -83,7 +83,10 @@ from .crud import (
     get_silnt_wallets,
     record_plain_incoming,
     create_silnt_wallet,
+    count_silnt_wallets_for_user_network,
+    delete_payjoin_contacts_for_user_network,
     delete_silnt_wallet,
+    list_live_tango_rounds_for_wallet,
     delete_utxos_for_wallet,
     get_sp_address,
     get_hr_address,
@@ -590,8 +593,40 @@ async def api_wallet_delete(wallet_id: str):
                     logger.info(f"Removed BitMail DNS {hr} for deleted wallet {wallet_id}")
                 except Exception as e:
                     logger.warning(f"Could not remove BitMail DNS {hr} for deleted wallet {wallet_id}: {e}")
+    # 3. Tango. Tell anyone mid-round before their round disappears: the rows
+    #    are about to go, which frees their coins, but nothing would say so and
+    #    their client would show a live round until it next reloaded and found
+    #    it missing. Best effort — a push that fails must not block a deletion
+    #    the user asked for.
+    try:
+        live = await list_live_tango_rounds_for_wallet(wallet_id)
+        told = set()
+        for rnd in live:
+            other = (
+                rnd.b_user_id if rnd.a_wallet_id == wallet_id else rnd.a_user_id
+            )
+            if other and other != wallet.user and other not in told:
+                told.add(other)
+                await _notify_tango(
+                    other,
+                    "Tango cancelled",
+                    "The other side removed their wallet, so an unfinished "
+                    "Tango is off and your coins are free again.",
+                )
+    except Exception as e:
+        logger.warning(f"Could not announce Tango cancellations for {wallet_id}: {e}")
+
     await delete_silnt_wallet(wallet_id)
     await delete_utxos_for_wallet(wallet_id)
+    # Connections are per user and per network, so they go with the LAST wallet
+    # on that network rather than with any wallet. Checked after the delete
+    # above, so the wallet being removed is not counted.
+    try:
+        net = getattr(wallet, "network", "") or ""
+        if net and not await count_silnt_wallets_for_user_network(wallet.user, net):
+            await delete_payjoin_contacts_for_user_network(wallet.user, net)
+    except Exception as e:
+        logger.warning(f"Could not remove connections for deleted wallet {wallet_id}: {e}")
     await delete_wallet_label_addresses(wallet_id)
     # Purge records that reference this wallet by id so nothing is left orphaned:
     # its BitMail requests (else the tamper sweep keeps checking a dead wallet and

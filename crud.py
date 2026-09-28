@@ -83,6 +83,22 @@ async def delete_silnt_wallet(wallet_id: str) -> None:
         "DELETE FROM silnt.plain_incoming WHERE wallet_id = :id",
         {"id": wallet_id},
     )
+    # And its Tango rounds. These carry the wallet's own outpoints in
+    # a_inputs/b_inputs — which coins it put into which round — so leaving them
+    # keeps the most identifying part of a deleted wallet on the server for
+    # good. The endpoint tells the other side before this runs; see
+    # api_delete_silnt_wallet.
+    #
+    # The row is shared with the partner, so removing it also takes the Tango
+    # labelling off THEIR transaction list: their row becomes a plain send of
+    # the fee, and their coins keep the labels the scan wrote on them. That is
+    # the cost of the wallet's side not lingering, and it is the side that
+    # asked.
+    await db.execute(
+        "DELETE FROM silnt.tango_rounds "
+        "WHERE a_wallet_id = :id OR b_wallet_id = :id",
+        {"id": wallet_id},
+    )
 
 
 # ── Background scanning (opt-in "Remote Scanner") ─────────────────────────────
@@ -1776,6 +1792,16 @@ async def delete_all_silnt_data_for_user(user_id: str) -> dict:
         await db.execute("DELETE FROM silnt.utxos WHERE wallet_id = :wid", {"wid": wid})
         await db.execute("DELETE FROM silnt.wallet_addresses WHERE wallet_id = :wid", {"wid": wid})
         await db.execute("DELETE FROM silnt.plain_incoming WHERE wallet_id = :wid", {"wid": wid})
+        # The encrypted scan key, and the rounds carrying this wallet's
+        # outpoints. Deleting a whole account left both behind: the wallet row
+        # went and the detection key for it stayed, which is the one piece of
+        # server-side material a deleted account most needs gone.
+        await db.execute("DELETE FROM silnt.background_scan WHERE wallet_id = :wid", {"wid": wid})
+        await db.execute(
+            "DELETE FROM silnt.tango_rounds "
+            "WHERE a_wallet_id = :wid OR b_wallet_id = :wid",
+            {"wid": wid},
+        )
         await db.execute("DELETE FROM silnt.wallets WHERE id = :wid", {"wid": wid})
 
     # Per-user data (keyed by user_id, not wallet_id) — these must be cleaned even
@@ -3324,6 +3350,66 @@ async def get_tango_txids_for_wallet(wallet_id: str) -> dict:
             ),
         }
     return out
+
+
+async def list_live_tango_rounds_for_wallet(wallet_id: str) -> list[TangoRound]:
+    """Unfinished rounds this wallet is a party to, either side.
+
+    Same "unfinished" as list_live_tango_rounds_between: a broadcast round is
+    on chain and there is nothing left to stop. Used when the wallet is being
+    deleted, so the other side can be told before its rounds disappear —
+    otherwise their coins stay reserved in their own client until it next
+    reloads and finds the round simply gone.
+    """
+    states = tuple(s for s in TANGO_LIVE if s != "BROADCAST")
+    placeholders = ", ".join(f"'{s}'" for s in states)
+    rows = await db.fetchall(
+        f"""
+        SELECT * FROM silnt.tango_rounds
+        WHERE status IN ({placeholders})
+          AND (a_wallet_id = :wid OR b_wallet_id = :wid)
+        """,
+        {"wid": wallet_id},
+    )
+    return [TangoRound(**r) for r in rows]
+
+
+async def count_silnt_wallets_for_user_network(user_id: str, network: str) -> int:
+    """Whether this user still has a wallet on a network, after one has gone.
+
+    Connections are per network and not per wallet, so they only go when the
+    last wallet on that network does — removing a signet wallet must not take
+    the user's mainnet connections, nor their signet ones while a second
+    signet wallet still uses them.
+    """
+    row = await db.fetchone(
+        'SELECT COUNT(*) AS n FROM silnt.wallets '
+        'WHERE "user" = :uid AND network = :net',
+        {"uid": user_id, "net": network},
+    )
+    return int((row or {}).get("n") or 0)
+
+
+async def delete_payjoin_contacts_for_user_network(user_id: str, network: str) -> None:
+    """This user's connections on one network, both directions, and the private
+    labels they wrote on them."""
+    rows = await db.fetchall(
+        """SELECT id FROM silnt.payjoin_contacts
+           WHERE network = :net
+             AND (requester_user_id = :uid OR target_user_id = :uid)""",
+        {"uid": user_id, "net": network},
+    )
+    for r in rows:
+        await db.execute(
+            "DELETE FROM silnt.payjoin_contact_labels WHERE contact_id = :cid",
+            {"cid": r["id"]},
+        )
+    await db.execute(
+        """DELETE FROM silnt.payjoin_contacts
+           WHERE network = :net
+             AND (requester_user_id = :uid OR target_user_id = :uid)""",
+        {"uid": user_id, "net": network},
+    )
 
 
 async def list_live_tango_rounds_between(

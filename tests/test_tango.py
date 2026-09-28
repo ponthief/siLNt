@@ -412,15 +412,15 @@ def test_a_round_with_no_deadline_never_expires():
 
 
 def test_both_coins_are_named_after_the_counterparty():
-    assert tango.mix_label("alice") == "Tango mix - alice"
+    assert tango.mix_label("alice") == "Tango share - alice"
     assert tango.change_label("alice") == "Tango change - alice"
 
 
 def test_a_missing_username_still_names_the_coin():
-    """Better an unattributed "Tango mix" than "Tango mix - ", which looks like
+    """Better an unattributed "Tango share" than "Tango share - ", which looks like
     the wallet lost something."""
     for f, bare in (
-        (tango.mix_label, "Tango mix"),
+        (tango.mix_label, "Tango share"),
         (tango.change_label, "Tango change"),
     ):
         assert f(None) == bare
@@ -430,7 +430,7 @@ def test_a_missing_username_still_names_the_coin():
 
 def test_a_share_with_its_own_change_is_refused():
     assert tango.undoes_a_round(
-        ["Tango mix - alice", "Tango change - alice"]
+        ["Tango share - alice", "Tango change - alice"]
     ) == "alice"
 
 
@@ -439,14 +439,14 @@ def test_a_share_with_someone_elses_change_is_refused_too():
     them links coins whose whole purpose was to be unlinkable, so the name is
     the unit to refuse on rather than the round."""
     assert tango.undoes_a_round(
-        ["Tango mix - alice", "Tango change - alice", "rent"]
+        ["Tango share - alice", "Tango change - alice", "rent"]
     ) == "alice"
 
 
 def test_two_shares_together_are_not_this_failure():
     """Spending two mixed shares links them, which the generic multi-input
     caution already says. It does not hand anyone the arithmetic."""
-    assert tango.undoes_a_round(["Tango mix - alice", "Tango mix - bob"]) is None
+    assert tango.undoes_a_round(["Tango share - alice", "Tango share - bob"]) is None
 
 
 def test_two_changes_together_are_not_this_failure():
@@ -467,7 +467,7 @@ def test_a_share_with_another_rounds_change_is_refused_too():
     came from.
     """
     assert tango.undoes_a_round(
-        ["Tango mix - alice", "Tango change - bob"]
+        ["Tango share - alice", "Tango change - bob"]
     ) == "alice"
 
 
@@ -475,14 +475,14 @@ def test_the_share_at_risk_is_the_one_named():
     """The share is what loses its protection, so that is whose round the
     warning is about — not the change coin's."""
     assert tango.undoes_a_round(
-        ["Tango mix - alice", "Tango mix - bob", "Tango change - carol"]
+        ["Tango share - alice", "Tango share - bob", "Tango change - carol"]
     ) == "alice and bob"
 
 
 def test_unnamed_tango_coins_still_pair():
     """Labelled before the username was carried, or by a wallet that had no
     name to use. Still the same two coins."""
-    assert tango.undoes_a_round(["Tango mix", "Tango change"]) == "someone"
+    assert tango.undoes_a_round(["Tango share", "Tango change"]) == "someone"
 
 
 def test_ordinary_coins_are_left_alone():
@@ -493,7 +493,7 @@ def test_ordinary_coins_are_left_alone():
 def test_a_label_that_merely_mentions_tango_is_not_one():
     """Substring matching here would refuse a coin the user named themselves."""
     assert tango.undoes_a_round(
-        ["my Tango mix - alice", "Tango change - alice"]
+        ["my Tango share - alice", "Tango change - alice"]
     ) is None
 
 
@@ -511,7 +511,7 @@ def test_the_marker_is_the_day():
         "Tango change - alice · 2026-09-24"
     )
     assert tango.mix_label("alice", datetime(2026, 9, 24, 13, 5)) == (
-        "Tango mix - alice · 2026-09-24"
+        "Tango share - alice · 2026-09-24"
     )
 
 
@@ -539,12 +539,12 @@ def test_the_marker_is_optional():
     """Callers without a date, and every coin labelled before the marker
     existed, still get a usable name."""
     assert tango.change_label("alice") == "Tango change - alice"
-    assert tango.mix_label("alice", "") == "Tango mix - alice"
-    assert tango.mix_label(None, None) == "Tango mix"
+    assert tango.mix_label("alice", "") == "Tango share - alice"
+    assert tango.mix_label(None, None) == "Tango share"
 
 
 def test_a_marker_without_a_name_still_reads():
-    assert tango.mix_label("", "2026-09-24") == "Tango mix · 2026-09-24"
+    assert tango.mix_label("", "2026-09-24") == "Tango share · 2026-09-24"
 
 
 def test_every_shape_this_has_ever_written_is_recognised():
@@ -552,9 +552,9 @@ def test_every_shape_this_has_ever_written_is_recognised():
     sitting in a wallet right now — including the round-id marker the date
     replaced. If the rule stopped recognising them it would stop refusing
     them, silently."""
-    for mix in ("Tango mix", "Tango mix #7c2e", "Tango mix · 2026-09-24",
-                "Tango mix - alice", "Tango mix - alice #7c2e",
-                "Tango mix - alice · 2026-09-24"):
+    for mix in ("Tango share", "Tango share #7c2e", "Tango share · 2026-09-24",
+                "Tango share - alice", "Tango share - alice #7c2e",
+                "Tango share - alice · 2026-09-24"):
         for change in ("Tango change", "Tango change #3f9a",
                        "Tango change · 2026-09-24",
                        "Tango change - bob", "Tango change - bob #3f9a",
@@ -566,13 +566,13 @@ def test_a_coin_the_user_named_is_left_alone():
     """Only separators this module writes count. Anything else after the
     prefix is the user's own words."""
     assert tango.undoes_a_round(
-        ["my Tango mix - alice", "Tango change - alice"]
+        ["my Tango share - alice", "Tango change - alice"]
     ) is None
     assert tango.undoes_a_round(
-        ["Tango mixer fund", "Tango change - alice"]
+        ["Tango shareer fund", "Tango change - alice"]
     ) is None
     assert tango.undoes_a_round(
-        ["Tango mix money for alice", "Tango change - alice"]
+        ["Tango share money for alice", "Tango change - alice"]
     ) is None
 
 
@@ -593,7 +593,7 @@ OUTS = {MIX_A: 4000, MIX_B: 4000, CHG_A: 1702, CHG_B: 4024}
 
 def test_the_share_is_the_output_worth_the_denomination():
     got = tango.coin_labels(OUTS, 4000, [MIX_A, CHG_A], "bob", "2026-09-24")
-    assert got[MIX_A] == "Tango mix - bob · 2026-09-24"
+    assert got[MIX_A] == "Tango share - bob · 2026-09-24"
     assert got[CHG_A] == "Tango change - bob · 2026-09-24"
 
 
@@ -602,7 +602,7 @@ def test_swapped_columns_still_produce_the_right_labels():
     scripts in, the values decide — so a client or a column that had them the
     wrong way round cannot make the wallet call a change coin a share."""
     got = tango.coin_labels(OUTS, 4000, [CHG_A, MIX_A], "bob", "2026-09-24")
-    assert got[MIX_A] == "Tango mix - bob · 2026-09-24"
+    assert got[MIX_A] == "Tango share - bob · 2026-09-24"
     assert got[CHG_A] == "Tango change - bob · 2026-09-24"
 
 
@@ -610,7 +610,7 @@ def test_a_clean_round_has_only_a_share_to_name():
     got = tango.coin_labels(
         {MIX_A: 4000, MIX_B: 4000}, 4000, [MIX_A], "bob", "2026-09-24"
     )
-    assert got == {MIX_A: "Tango mix - bob · 2026-09-24"}
+    assert got == {MIX_A: "Tango share - bob · 2026-09-24"}
 
 
 def test_a_script_that_is_not_an_output_is_left_out():
@@ -626,7 +626,7 @@ def test_case_and_padding_do_not_matter():
         {MIX_A.upper(): 4000}, 4000, ["  " + MIX_A.upper() + " "], "bob",
         "2026-09-24",
     )
-    assert got[MIX_A] == "Tango mix - bob · 2026-09-24"
+    assert got[MIX_A] == "Tango share - bob · 2026-09-24"
 
 
 def test_change_that_happens_to_equal_the_denomination_reads_as_a_share():
@@ -636,7 +636,7 @@ def test_change_that_happens_to_equal_the_denomination_reads_as_a_share():
     one is not a lie, and the guard still refuses it beside a change coin."""
     outs = {MIX_A: 4000, CHG_A: 4000}
     got = tango.coin_labels(outs, 4000, [MIX_A, CHG_A], "bob", "2026-09-24")
-    assert got[CHG_A] == "Tango mix - bob · 2026-09-24"
+    assert got[CHG_A] == "Tango share - bob · 2026-09-24"
 
 
 # ── the round that was labelled wrongly, as it happened ──────────────────────
@@ -661,7 +661,7 @@ def test_the_real_round_labels_its_1702_as_change():
         REAL_OUTS, 4000, [REAL_A_MIX, REAL_A_CHANGE], "bob", "2026-09-24"
     )
     assert got[REAL_A_CHANGE] == "Tango change - bob · 2026-09-24"
-    assert got[REAL_A_MIX] == "Tango mix - bob · 2026-09-24"
+    assert got[REAL_A_MIX] == "Tango share - bob · 2026-09-24"
 
 
 def test_and_still_does_with_the_scripts_the_wrong_way_round():
@@ -670,7 +670,7 @@ def test_and_still_does_with_the_scripts_the_wrong_way_round():
         REAL_OUTS, 4000, [REAL_A_CHANGE, REAL_A_MIX], "bob", "2026-09-24"
     )
     assert got[REAL_A_CHANGE] == "Tango change - bob · 2026-09-24"
-    assert got[REAL_A_MIX] == "Tango mix - bob · 2026-09-24"
+    assert got[REAL_A_MIX] == "Tango share - bob · 2026-09-24"
 
 
 def test_the_two_coins_of_that_round_are_refused_together():
@@ -825,17 +825,17 @@ def test_dust_to_fee_claims_nothing_when_a_field_is_missing():
 
 
 def test_our_own_coin_labels_are_recognised():
-    assert tango.wrote_label("Tango mix - bob · 2026-09-25")
+    assert tango.wrote_label("Tango share - bob · 2026-09-25")
     assert tango.wrote_label("Tango change - bob · 2026-09-25")
-    assert tango.wrote_label("Tango mix - bob #fagk")     # the old marker
+    assert tango.wrote_label("Tango share - bob #fagk")     # the old marker
     assert tango.wrote_label("Tango change")             # bare, no counterparty
 
 
 def test_a_label_the_user_wrote_is_not_ours_to_drop():
     """The row drops what this module wrote. Dropping the user's text because
     it begins with the same word would lose the only note they kept."""
-    assert not tango.wrote_label("Tango mix money")
-    assert not tango.wrote_label("my Tango mix - bob · 2026-09-25")
+    assert not tango.wrote_label("Tango share money")
+    assert not tango.wrote_label("my Tango share - bob · 2026-09-25")
     assert not tango.wrote_label("rent")
     assert not tango.wrote_label("")
 
@@ -1186,7 +1186,7 @@ def test_coins_are_named_by_what_a_piece_is_worth():
     got = tango.coin_labels(
         outs, 12_500, [spks(1)[0].hex(), A_CHG.hex()], "bob", "2026-09-26",
     )
-    assert got[spks(1)[0].hex()] == "Tango mix - bob · 2026-09-26"
+    assert got[spks(1)[0].hex()] == "Tango share - bob · 2026-09-26"
     assert got[A_CHG.hex()] == "Tango change - bob · 2026-09-26"
 
 
@@ -1194,7 +1194,7 @@ def test_coins_are_named_by_what_a_piece_is_worth():
 
 
 def share(txid, who="bob"):
-    return {"txid": txid, "label": f"Tango mix - {who} · 2026-09-26"}
+    return {"txid": txid, "label": f"Tango share - {who} · 2026-09-26"}
 
 
 def change(txid, who="bob"):
@@ -1221,8 +1221,8 @@ def test_a_selection_with_no_txids_still_gets_the_older_rule():
     """Labels alone cannot say which round a coin is from, so they cannot trip
     the same-round rule — and must still trip the one they always did."""
     assert tango.undoes_a_round(
-        ["Tango mix - bob", "Tango change - bob"]) == "bob"
-    assert tango.undoes_a_round(["Tango mix - bob", "Tango mix - bob"]) is None
+        ["Tango share - bob", "Tango change - bob"]) == "bob"
+    assert tango.undoes_a_round(["Tango share - bob", "Tango share - bob"]) is None
 
 
 def test_one_piece_of_a_round_beside_an_ordinary_coin_is_fine():
@@ -1455,3 +1455,113 @@ def test_the_broadcast_push_says_the_round_completed():
     texts = " ".join(" ".join(re.findall(r'"([^"]*)"', c)) for c in calls)
     assert "Your Tango round has completed." in texts, texts
     assert "has been broadcast" not in texts
+
+
+# ── what a deleted wallet leaves behind ─────────────────────────────────────
+
+
+def _crud_fn(name: str) -> str:
+    src = (ROOT / "crud.py").read_text()
+    at = src.index(f"async def {name}(")
+    nxt = src.index("async def ", at + 10)
+    return src[at:nxt]
+
+
+def test_deleting_a_wallet_takes_its_rounds():
+    """a_inputs and b_inputs are the outpoints the wallet put into each round —
+    which coins, in which mix, with whom. Left behind, they are the most
+    identifying thing a deleted wallet can leave on the server."""
+    body = _crud_fn("delete_silnt_wallet")
+    assert "silnt.tango_rounds" in body
+    assert "a_wallet_id = :id OR b_wallet_id = :id" in body
+
+
+def test_deleting_a_wallet_takes_its_scan_key():
+    """CLAUDE.md: private keys are never stored. The scan key is the one piece
+    of key material the server does hold, and only while background scanning
+    is on."""
+    assert "silnt.background_scan" in _crud_fn("delete_silnt_wallet")
+
+
+def test_deleting_an_account_takes_them_too():
+    """The account purge deleted the wallet row and left the scan key for it,
+    and every round it had ever been in."""
+    body = _crud_fn("delete_all_silnt_data_for_user")
+    assert "silnt.background_scan" in body, "the encrypted scan key survives"
+    assert "silnt.tango_rounds" in body, "the rounds survive"
+
+
+def test_connections_go_with_the_last_wallet_on_a_network():
+    """Connections are per user and per network, not per wallet. Removing a
+    signet wallet must not take the user's mainnet connections, nor their
+    signet ones while a second signet wallet still uses them."""
+    src = (ROOT / "views_api.py").read_text()
+    at = src.index("async def api_wallet_delete")
+    body = src[at:src.index("@silnt_api_router", at + 10)]
+    assert "count_silnt_wallets_for_user_network" in body
+    assert "delete_payjoin_contacts_for_user_network" in body
+    # The count has to be taken AFTER the wallet row is gone, or the wallet
+    # being deleted counts itself and the connections never go.
+    assert body.index("delete_silnt_wallet(") < body.index(
+        "count_silnt_wallets_for_user_network("
+    ), "the wallet is still counted when the check runs"
+
+
+def test_the_other_side_is_told_before_its_round_disappears():
+    """Deleting the rows frees the partner's coins, and nothing would say so:
+    their client shows a live round until it reloads and finds it gone."""
+    src = (ROOT / "views_api.py").read_text()
+    at = src.index("async def api_wallet_delete")
+    body = src[at:src.index("@silnt_api_router", at + 10)]
+    assert "list_live_tango_rounds_for_wallet" in body
+    assert "_notify_tango(" in body
+    assert body.index("_notify_tango(") < body.index("delete_silnt_wallet("), (
+        "the rounds are gone before anyone is told"
+    )
+
+
+# ── coins labelled before the rename ────────────────────────────────────────
+
+
+def test_a_coin_labelled_tango_mix_is_still_one_of_ours():
+    """The label is written once, at the scan that found the coin, and is never
+    revised. Every coin mixed before this rename says "Tango mix" and always
+    will, so the rules that read a label have to know both spellings.
+
+    The one that matters is undoes_a_round: it is what refuses to spend two
+    shares of a round together, and a rule that stopped recognising those coins
+    would stop refusing them in silence."""
+    for legacy in (
+        "Tango mix",
+        "Tango mix - alice",
+        "Tango mix - alice · 2026-09-24",
+        "Tango mix - alice #7c2e",
+    ):
+        assert tango.wrote_label(legacy), legacy
+
+    # Two old shares of ONE round, still refused.
+    assert tango.undoes_a_round([
+        {"txid": "aa", "label": "Tango mix - alice"},
+        {"txid": "aa", "label": "Tango mix - alice"},
+    ]) == "alice"
+    # An old share with its change, still refused.
+    assert tango.undoes_a_round(
+        ["Tango mix - alice", "Tango change - alice"]
+    ) == "alice"
+    # And one of each spelling, from one round, is still one round.
+    assert tango.undoes_a_round([
+        {"txid": "bb", "label": "Tango mix - bob"},
+        {"txid": "bb", "label": "Tango share - bob"},
+    ]) == "bob"
+
+
+def test_the_users_own_words_are_still_theirs_either_spelling():
+    """wrote_label decides whether a label is ours to strip off a row. A coin
+    the user named must never match, under either spelling."""
+    for mine in ("my Tango mix - alice", "Tango mixer fund", "Tango shared fund"):
+        assert not tango.wrote_label(mine), mine
+
+
+def test_new_coins_do_not_say_mix():
+    assert "mix" not in tango.mix_label("alice", "2026-09-24").lower()
+    assert tango.mix_label("alice") == "Tango share - alice"

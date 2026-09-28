@@ -42,8 +42,17 @@ def spk_list(raw) -> list:
     return [text.lower()]
 
 
-MIX_LABEL = "Tango mix"
+MIX_LABEL = "Tango share"
 CHANGE_LABEL = "Tango change"
+
+# What this label used to be called. Coins carrying it are in wallets right
+# now, and they can never be rewritten: the label is written once, at the scan
+# that found the coin. Every rule that reads a label has to know both spellings
+# or it stops seeing those coins — and the rule that matters is the one that
+# refuses to spend two shares of one round together, which would start letting
+# them through in silence. Same reason _MARKERS still knows the "#" tag.
+LEGACY_MIX_LABEL = "Tango mix"
+_MIX_LABELS = (MIX_LABEL, LEGACY_MIX_LABEL)
 
 
 def day_marker(when) -> str:
@@ -88,7 +97,7 @@ def _named(prefix: str, other_username: Optional[str], when) -> str:
 
 
 def mix_label(other_username: Optional[str], when=None) -> str:
-    """The mixed share: "Tango mix - alice · 2026-09-24"."""
+    """A share coming back: "Tango share - alice · 2026-09-24"."""
     return _named(MIX_LABEL, other_username, when)
 
 
@@ -137,6 +146,16 @@ def _party(label: str, prefix: str) -> Optional[str]:
         return None
     return _strip_marker(rest)
 
+
+
+def _mix_party(label: str) -> Optional[str]:
+    """_party against every spelling this label has had. None if it is not one
+    of ours at all."""
+    for prefix in _MIX_LABELS:
+        who = _party(label, prefix)
+        if who is not None:
+            return who
+    return None
 
 def coin_labels(
     tx_outputs: dict,
@@ -196,7 +215,7 @@ def wrote_label(label: str) -> bool:
     """
     text = label or ""
     return (
-        _party(text, MIX_LABEL) is not None
+        _mix_party(text) is not None
         or _party(text, CHANGE_LABEL) is not None
     )
 
@@ -256,7 +275,7 @@ def undoes_a_round(coins) -> Optional[str]:
     by_txid: dict = {}
     for item in coins:
         txid, raw = _coin(item)
-        who = _party(raw, MIX_LABEL)
+        who = _mix_party(raw)
         if who is not None:
             mixed.add(who or "someone")
             if txid:
