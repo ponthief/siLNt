@@ -47,6 +47,7 @@ from .crud import (
     delete_boltz_swap    
 )
 from .boltz_refund import build_refund_tx
+from .helpers.errors import exc_text
 from .models import RefundRequest
 from .swap_crypto import decrypt_refund_key
 
@@ -381,7 +382,17 @@ async def refund_due_swaps(default_fee_sats: int = 300) -> list:
     refund_address are skipped (a destination is required).
     """
     results = []
-    height = await _chain_height()
+    # No height, no decision: every refundability test below compares against
+    # it. When the chain-height source is unreachable that is a third party
+    # being down, not a fault here, so the pass ends quietly and the caller
+    # tries again on its own schedule. Raising instead aborted the pass at
+    # exactly the same point but reached the loop as an ERROR with an empty
+    # message, because httpx timeouts carry no message at all.
+    try:
+        height = await _chain_height()
+    except httpx.HTTPError as exc:
+        logger.warning(f"auto-refund pass skipped: chain height unavailable ({exc_text(exc)})")
+        return results
     for state in ("created", "funded", "failed"):
         for rec in await list_boltz_swaps_by_status(state):
             ok, _ = await _is_refundable(rec, height)

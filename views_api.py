@@ -42,6 +42,7 @@ from .helpers.email_verification import (
 )
 from mnemonic import Mnemonic
 from .helpers.dust_check import evaluate_dust_for_wallet
+from .helpers.errors import exc_text as _exc_text
 from .helpers.scan_rate_limiter import (
     check_scan_allowed,
     clear_wallet_limits,
@@ -1201,7 +1202,19 @@ async def check_send_confirmation(wallet, txid: str):
     async with httpx.AsyncClient(timeout=20) as c:
         r = await c.get(f"{mempool}/api/tx/{txid}/status")
         if r.status_code == 200:
-            st = r.json()
+            # A 200 whose body is not the JSON we asked for is an interposed
+            # error page, not a status — treated like a non-200 rather than
+            # raising, because it says exactly as much: nothing about this tx.
+            # It stays a warning: the difference matters when someone is asking
+            # why a confirmed send still reads as pending.
+            try:
+                st = r.json()
+            except ValueError:
+                logger.warning(
+                    f"[silnt] tx status for {txid}: 200 from {mempool} with a "
+                    f"non-JSON body ({r.headers.get('content-type')})"
+                )
+                st = {}
             confirmed = bool(st.get("confirmed"))
             block_height = st.get("block_height")
 
@@ -1309,7 +1322,8 @@ async def run_send_confirmation_checks() -> int:
         except Exception as e:
             # One bad tx must not stop the sweep for everyone else.
             logger.warning(
-                f"[silnt] send confirmation check failed for {row.get('txid')}: {e}"
+                f"[silnt] send confirmation check failed for {row.get('txid')}: "
+                f"{_exc_text(e)}"
             )
     return confirmed_count
 
@@ -1660,20 +1674,31 @@ async def api_broadcast_transaction(
                         key_info.wallet.user, data.recipient.strip(), _bwallet.network
                     )
                 except Exception as e:
-                    logger.warning(f"could not record sp contact after broadcast: {e}")
+                    logger.warning(
+                        f"could not record sp contact after broadcast: {_exc_text(e)}"
+                    )
 
             return {"txid": txid}
 
     except HTTPException:
         raise
-    except httpx.ConnectError:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_GATEWAY,
-            detail=f"Could not connect to {base}",
-        )
+    # Timeout first: httpx.TimeoutException is itself a TransportError, so the
+    # broader clause below would otherwise swallow it and lose the distinction.
     except httpx.TimeoutException:
         raise HTTPException(
             status_code=HTTPStatus.GATEWAY_TIMEOUT, detail="mempool.space timed out"
+        )
+    # Was ConnectError alone, which left a read error, a protocol error or a
+    # proxy failure to surface as a 500 with a traceback. They all mean the
+    # same thing to the caller — the transaction did not go out, and nothing
+    # has been marked spent, because that happens after the txid comes back.
+    except httpx.TransportError as exc:
+        # The type goes to the log, not to the user: "ProxyError" tells an
+        # operator which leg failed and tells whoever is sending coins nothing.
+        logger.warning(f"broadcast to {base} failed: {_exc_text(exc)}")
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_GATEWAY,
+            detail=f"Could not connect to {base}",
         )
 
 
@@ -2946,6 +2971,16 @@ async def api_tx_confirmation(
         confirmed, block_height, new_balance = await check_send_confirmation(wallet, txid)
     except MempoolNotConfigured:
         raise HTTPException(HTTPStatus.SERVICE_UNAVAILABLE, "Mempool URL not configured.")
+    # mempool.space being unreachable is an outage, not a bug, and this endpoint
+    # is polled every few seconds by every open app — so an unhandled
+    # httpx.ConnectTimeout here logged a full ASGI traceback with an Exception
+    # ID for what is a third party being slow. Answer the same way /tx/broadcast
+    # does. Both clients already treat a failed poll as "ask again shortly".
+    except httpx.TimeoutException:
+        raise HTTPException(HTTPStatus.GATEWAY_TIMEOUT, "mempool.space timed out")
+    except httpx.HTTPError as e:
+        logger.warning(f"confirmation check for {txid} could not reach mempool: {_exc_text(e)}")
+        raise HTTPException(HTTPStatus.BAD_GATEWAY, "Could not reach mempool.space")
 
     return {"confirmed": confirmed, "block_height": block_height, "balance": new_balance}
 

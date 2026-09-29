@@ -2906,11 +2906,25 @@ async def update_sp_contact_label(cid: str, user_id: str, label: str) -> None:
     )
 
 async def touch_sp_contact(user_id: str, value: str, network: str) -> None:
-    """Bump last_used_at when a saved recipient is sent to (for ordering)."""
+    """Bump last_used_at when a saved recipient is sent to (for ordering).
+
+    The timestamp is written by the database, not passed in. `last_used_at` is
+    a TIMESTAMP column and this used to bind `int(time.time())` to it, which is
+    the one thing migrations.py says the codebase never does: SQLite stores
+    whatever it is handed, so it worked in tests and on a SQLite instance, and
+    Postgres refused every single write with
+
+        asyncpg.exceptions.DataError: invalid input for query argument $1:
+        1790619858 (expected a datetime.date or datetime.datetime instance)
+
+    inside the best-effort try/except at the broadcast site. The send went
+    through, the warning went to the log, and contacts silently never
+    reordered — for every send, on every Postgres deployment.
+    """
     await db.execute(
-        "UPDATE silnt.sp_contacts SET last_used_at = :ts "
+        f"UPDATE silnt.sp_contacts SET last_used_at = {db.timestamp_now} "
         "WHERE user_id = :uid AND network = :net AND value_sha256 = :h",
-        {"ts": int(time.time()), "uid": user_id, "net": network, "h": _spc_hash(value)},
+        {"uid": user_id, "net": network, "h": _spc_hash(value)},
     )
 
 async def delete_sp_contact(cid: str, user_id: str) -> None:

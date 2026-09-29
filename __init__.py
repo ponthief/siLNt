@@ -22,6 +22,7 @@ from .views_api import (
 from .boltz_swap import silnt_boltz_router
 from .boltz_refund_api import silnt_refund_router
 from .boltz_refund_api import refund_due_swaps
+from .helpers.errors import exc_text
 
 
 siLNt_static_files = [
@@ -48,7 +49,7 @@ async def _tamper_sweep_loop():
             if res and res.get("mismatches"):
                 logger.warning(f"[silnt] tamper sweep: {res}")
         except Exception as exc:
-            logger.error(f"[silnt] tamper sweep loop error: {exc}")
+            logger.error(f"[silnt] tamper sweep loop error: {exc_text(exc)}")
         await asyncio.sleep(300)   # every 5 min
 
 async def _refund_loop():
@@ -58,7 +59,7 @@ async def _refund_loop():
             if results:
                 logger.info(f"[silnt] auto-refund pass: {results}")
         except Exception as exc:
-            logger.error(f"[silnt] auto-refund loop error: {exc}")
+            logger.error(f"[silnt] auto-refund loop error: {exc_text(exc)}")
         await asyncio.sleep(120)   # every 2 min; tune as you like
 
 async def _health_monitor_loop():
@@ -69,7 +70,7 @@ async def _health_monitor_loop():
         try:
             await run_health_probes()
         except Exception as exc:
-            logger.error(f"[silnt] health monitor loop error: {exc}")
+            logger.error(f"[silnt] health monitor loop error: {exc_text(exc)}")
         await asyncio.sleep(60)   # every 2 min
 
 async def _background_scan_loop():
@@ -100,10 +101,10 @@ async def _background_scan_loop():
                 try:
                     await run_tango_labelling()
                 except Exception as exc:
-                    logger.warning(f"[silnt] tango labelling after scans: {exc}")
+                    logger.warning(f"[silnt] tango labelling after scans: {exc_text(exc)}")
                 last_sweep = time.monotonic()
         except Exception as exc:
-            logger.error(f"[silnt] background scan loop error: {exc}")
+            logger.error(f"[silnt] background scan loop error: {exc_text(exc)}")
         await asyncio.sleep(BACKGROUND_SCAN_POLL_SECONDS)
 
 async def _tango_sweep_loop():
@@ -118,7 +119,7 @@ async def _tango_sweep_loop():
             if res and (res.get("expired") or res.get("labelled")):
                 logger.info(f"[silnt] tango sweep: {res}")
         except Exception as exc:
-            logger.error(f"[silnt] tango sweep loop error: {exc}")
+            logger.error(f"[silnt] tango sweep loop error: {exc_text(exc)}")
         await asyncio.sleep(300)   # every 5 min
 
 
