@@ -13,6 +13,7 @@ at send time, so the recipient's own record decides where it goes.
 from __future__ import annotations
 
 import ast
+import re
 import pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -57,6 +58,39 @@ def test_verification_is_against_wallets_that_exist_now():
     # Case-insensitive both ways: bech32 is usually lowercase but nothing
     # guarantees what a user pasted.
     assert body.count(".lower()") >= 2
+
+
+def test_a_labelled_sub_address_counts_as_a_whispa_wallet():
+    """A BIP-352 label (m≥2) derives a DIFFERENT sp1… from the same seed, and
+    it is the address a person hands out when they want the payment tagged —
+    so a contact saved from one is the ordinary case, not an edge case.
+
+    Checking only silnt.wallets, which holds the base m=0 address, reported
+    every labelled sub-address as not belonging to a WhiSPa wallet: the exact
+    false warning the feature exists to avoid.
+    """
+    body = _fn("crud.py", "sp_addresses_in_use")
+    assert "silnt.wallet_addresses" in body
+    # Scoped per network through the join, because wallet_addresses has no
+    # network column of its own.
+    assert "JOIN silnt.wallets w ON w.id = a.wallet_id" in body
+    assert "WHERE w.network = :net" in body
+    # Unioned, not replacing the base-address lookup.
+    assert "have |=" in body
+
+
+def test_the_sub_address_table_really_has_no_network_column():
+    """The join above is load-bearing. If wallet_addresses ever gains a network
+    column, the query should filter on it directly — and if this test starts
+    failing, that is what happened."""
+    src = (ROOT / "migrations.py").read_text()
+    at = src.index("CREATE TABLE IF NOT EXISTS silnt.wallet_addresses")
+    create = src[at:src.index(")", at)]
+    assert "network" not in create, create
+    alters = re.findall(
+        r"ALTER TABLE silnt\.wallet_addresses[^\"']*", src
+    )
+    assert not any("network" in a for a in alters), alters
 
 
 def test_a_contact_can_be_repointed_without_losing_its_name():

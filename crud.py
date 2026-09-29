@@ -2862,6 +2862,13 @@ async def sp_addresses_in_use(addresses: set, network: str) -> set:
     Only ever called with addresses the caller already has in their own
     address book, so it answers a question about the caller's own data rather
     than being an oracle for mapping arbitrary addresses to WhiSPa accounts.
+
+    BOTH TABLES, and that is the point. A BIP-352 label (m≥2) derives a
+    different sp1… from the same seed, and it is the address a person hands out
+    when they want the payment tagged — so a contact saved from one is the
+    ordinary case. Checking only silnt.wallets, which holds the base m=0
+    address, reported every labelled sub-address as not belonging to a WhiSPa
+    wallet: the exact warning the feature exists to avoid giving falsely.
     """
     wanted = {a.strip().lower() for a in addresses if a and a.strip()}
     if not wanted:
@@ -2871,6 +2878,15 @@ async def sp_addresses_in_use(addresses: set, network: str) -> set:
         {"net": network},
     )
     have = {(r["sp_address"] or "").strip().lower() for r in rows}
+    # wallet_addresses has no network column — its key is the address, whose
+    # HRP already carries the network — so the scope comes from the join.
+    rows = await db.fetchall(
+        "SELECT a.sp_address FROM silnt.wallet_addresses a "
+        "JOIN silnt.wallets w ON w.id = a.wallet_id "
+        "WHERE w.network = :net",
+        {"net": network},
+    )
+    have |= {(r["sp_address"] or "").strip().lower() for r in rows}
     return wanted & have
 
 
