@@ -9,38 +9,47 @@ instead, and crediting the owner's LNbits wallet.
 
 ## The problem it addresses
 
-The change coin is a liability that follows its owner around. It is
-attributable **by construction**: its value is fixed by the round's arithmetic.
-The moment it is spent — to anyone, for anything — its owner has shown which of
-the two change outputs was theirs, and therefore which input subset was theirs,
-and therefore which of the identical shares are theirs. Retroactively, from a
-transaction made months later.
+**The change coin is the strongest remaining linkability problem in Tango.**
 
-`helpers/tangolabels.py::undoes_a_round` refuses to spend a share together with
-a change coin, but that only covers co-spending inside one wallet. It cannot
-stop the coin being spent at all, and eventually it has to be.
+It is attributable **by construction**: its value is fixed by the round's
+arithmetic. Two ways it gives the round away, and the wallet can only defend
+against one of them.
+
+* **Spent alongside a Tangoed coin**, it links them directly — a share and its
+  own round's change add up to what that side put in.
+  `helpers/tangolabels.py::undoes_a_round` refuses exactly this.
+* **Spent on its own**, later, to anyone, it still shows which of the two
+  change outputs was its owner's. That resolves the input partition, and
+  therefore which of the identical shares were theirs. Retroactively, from a
+  transaction made months afterwards. Nothing in the wallet can prevent this:
+  the guard covers co-spending inside one wallet, and the coin has to be spent
+  eventually.
+
+Getting that coin out of the owner's wallet is the only clean fix. No
+reshaping of the round achieves it, because the coin is the problem.
 
 ## What it fixes, and what it does not
 
-Measured with a Boltzmann implementation over the real signet round
-`76d0a639…` (8 inputs, 25,000 a side as 2×12,500, change 750 and 751):
+What it fixes is the whole of the above: after the round the owner holds only
+the indistinguishable shares, and there is no coin left that can identify their
+side whenever it is eventually spent.
+
+What it does not change is the round's own shape. Measured with a Boltzmann
+implementation over the real signet round `76d0a639…` (8 inputs, 25,000 a side
+as 2×12,500, change 750 and 751):
 
 | outputs | nb_cmbn | entropy | deterministic links |
 | --- | --- | --- | --- |
 | 12500×4, 750, 751 — as broadcast | 25 | 4.64 | 0 |
 | 12500×4, 750, 751 — paid to the service instead | 25 | 4.64 | 0 |
 
-**Identical.** Linkability is a property of the transaction's shape — the set
-of output values — and this changes only who can spend them. An LN credit is a
-bookkeeping entry; the sats still have to land in an output.
-
-So the gain is entirely **after** the transaction: the owner's wallet no longer
-holds a coin that is provably from that round. That is worth having, and it is
-the only thing this buys. It must not be described as making the round itself
-less linkable.
+Identical, because linkability of the transaction is a property of its output
+*values* and this changes only who can spend them. Worth recording so the
+feature is not sold on the wrong claim — but the transaction was never where
+the change did its damage.
 
 A separate, non-custodial change — equalising the two change amounts and
-burning the difference to the miner — is what fixes the in-transaction leak,
+burning the difference to the miner — addresses the in-transaction arithmetic,
 and only in lopsided rounds:
 
 | A excess | B excess | as-is (links) | equalised |
@@ -50,7 +59,10 @@ and only in lopsided rounds:
 | 750 / 4,750 | | 2 | 0 |
 | 200 / 9,000 | | 1 | 0 |
 
-The two are independent and can be done together.
+The two are independent and can be done together. Note that equalising does
+**not** help with the problem above: if you later spend one of two equal change
+coins, you have identified it as yours and the arithmetic resolves anyway. It
+buys silence only until the coin is touched.
 
 ## On-chain shape
 
@@ -89,8 +101,13 @@ the configured address, or a coordinator could redirect them.
 
 ## The fee
 
-0.15% of the change, configurable. **As specified it is economically
-inverted**, and this is the main thing to settle before building.
+0.15% of the change, configurable. Charged only when there is a change output
+to route — a clean round costs the user nothing, and there is nothing for the
+instance to collect or later spend.
+
+On the rounds where it does apply, the percentage does not cover what the
+instance will spend moving that output. That is a pricing decision rather than
+a flaw, and it should be made deliberately.
 
 0.15% of a realistic change:
 
@@ -110,14 +127,25 @@ input, 57.5 vB:
 | 10 sat/vB | 575 sats | 383,333 sats |
 | 20 sat/vB | 1,150 sats | 766,667 sats |
 
-A typical change is hundreds to a few thousand sats, so at every realistic fee
-rate the instance loses money on every credit. Three ways out:
+A typical change is hundreds to a few thousand sats, so on every realistic
+round the percentage comes to a fraction of what the output will cost to move.
+
+Two things to weigh against that. The sweep cost is **not new** — if the change
+stays with its owner, they pay the same ~57.5 vB to spend it themselves one
+day, so routing it transfers an existing cost rather than creating one, which
+makes charging for it legitimate. And the instance is being paid in a second
+currency here: rounds that would otherwise leave a change coin in a user's
+wallet stop doing so, which is the feature.
+
+Three ways to price it:
 
 1. `fee = max(pct × change, 57.5 × fee_rate)` — the percentage is revenue, the
    floor is cost recovery. Recommended.
 2. A flat fee.
-3. Percentage only, instance absorbs the rest — viable, but it is a subsidy and
-   should be a deliberate, documented one rather than an accident.
+3. Percentage only, instance absorbs the difference. Perfectly defensible —
+   the cost was the user's before and the instance is taking it on — as long as
+   it is chosen rather than stumbled into, and the operator knows roughly what
+   a round costs them at a given fee rate.
 
 Under (1), what the user actually receives:
 
@@ -211,8 +239,9 @@ It is their money going to a third party, so it cannot be silent:
 
 ## Open decisions
 
-1. **Which fee model** — the floor (recommended), flat, or a deliberate
-   subsidy.
+1. **Which fee model** — percentage plus a cost floor, flat, or percentage
+   only with the instance absorbing the difference. Any of the three works;
+   the operator should know which one they picked and what it costs them.
 2. **Always or opt-in per round.** Always is simpler and gives every round the
    same shape. Opt-in keeps a non-custodial path, at the cost of two behaviours
    and an asymmetric output set when the two sides disagree — which is a new
