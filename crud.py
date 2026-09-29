@@ -2832,6 +2832,13 @@ async def update_sp_contact_value(cid: str, user_id: str, value: str) -> None:
     )
     if not row:
         raise ValueError("No such contact.")
+    # Repointing must not be the way round the chain check that create
+    # enforces.
+    from .helpers.chains import recipient_chain_mismatch
+
+    wrong_chain = recipient_chain_mismatch(value, row["network"])
+    if wrong_chain:
+        raise ValueError(wrong_chain)
     # The same recipient must not end up saved twice under two names.
     vhash = _spc_hash(value)
     clash = await db.fetchone(

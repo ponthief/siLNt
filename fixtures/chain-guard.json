@@ -1,0 +1,460 @@
+{
+  "cases": [
+    {
+      "address": "sp1qqw508d6qejxtdg4y5r3zarvary0c5xw7k",
+      "network": "mainnet",
+      "family": "main",
+      "refusal": null
+    },
+    {
+      "address": "sp1qqw508d6qejxtdg4y5r3zarvary0c5xw7k",
+      "network": "signet",
+      "family": "main",
+      "refusal": "That is a mainnet address and this wallet is on signet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "sp1qqw508d6qejxtdg4y5r3zarvary0c5xw7k",
+      "network": "testnet",
+      "family": "main",
+      "refusal": "That is a mainnet address and this wallet is on testnet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "sp1qqw508d6qejxtdg4y5r3zarvary0c5xw7k",
+      "network": "regtest",
+      "family": "main",
+      "refusal": "That is a mainnet address and this wallet is on regtest. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+      "network": "mainnet",
+      "family": "main",
+      "refusal": null
+    },
+    {
+      "address": "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+      "network": "signet",
+      "family": "main",
+      "refusal": "That is a mainnet address and this wallet is on signet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+      "network": "testnet",
+      "family": "main",
+      "refusal": "That is a mainnet address and this wallet is on testnet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+      "network": "regtest",
+      "family": "main",
+      "refusal": "That is a mainnet address and this wallet is on regtest. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "bc1p5d7rjq7g6rdk2yhzks9smlaqtedr4dekq08ge8ztwac72sfr9rusxg3297",
+      "network": "mainnet",
+      "family": "main",
+      "refusal": null
+    },
+    {
+      "address": "bc1p5d7rjq7g6rdk2yhzks9smlaqtedr4dekq08ge8ztwac72sfr9rusxg3297",
+      "network": "signet",
+      "family": "main",
+      "refusal": "That is a mainnet address and this wallet is on signet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "bc1p5d7rjq7g6rdk2yhzks9smlaqtedr4dekq08ge8ztwac72sfr9rusxg3297",
+      "network": "testnet",
+      "family": "main",
+      "refusal": "That is a mainnet address and this wallet is on testnet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "bc1p5d7rjq7g6rdk2yhzks9smlaqtedr4dekq08ge8ztwac72sfr9rusxg3297",
+      "network": "regtest",
+      "family": "main",
+      "refusal": "That is a mainnet address and this wallet is on regtest. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
+      "network": "mainnet",
+      "family": "main",
+      "refusal": null
+    },
+    {
+      "address": "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
+      "network": "signet",
+      "family": "main",
+      "refusal": "That is a mainnet address and this wallet is on signet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
+      "network": "testnet",
+      "family": "main",
+      "refusal": "That is a mainnet address and this wallet is on testnet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
+      "network": "regtest",
+      "family": "main",
+      "refusal": "That is a mainnet address and this wallet is on regtest. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy",
+      "network": "mainnet",
+      "family": "main",
+      "refusal": null
+    },
+    {
+      "address": "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy",
+      "network": "signet",
+      "family": "main",
+      "refusal": "That is a mainnet address and this wallet is on signet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy",
+      "network": "testnet",
+      "family": "main",
+      "refusal": "That is a mainnet address and this wallet is on testnet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy",
+      "network": "regtest",
+      "family": "main",
+      "refusal": "That is a mainnet address and this wallet is on regtest. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "tsp1qqw508d6qejxtdg4y5r3zarvary0c5xw7k",
+      "network": "mainnet",
+      "family": "test",
+      "refusal": "That is a testnet/signet address and this wallet is on mainnet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "tsp1qqw508d6qejxtdg4y5r3zarvary0c5xw7k",
+      "network": "signet",
+      "family": "test",
+      "refusal": null
+    },
+    {
+      "address": "tsp1qqw508d6qejxtdg4y5r3zarvary0c5xw7k",
+      "network": "testnet",
+      "family": "test",
+      "refusal": null
+    },
+    {
+      "address": "tsp1qqw508d6qejxtdg4y5r3zarvary0c5xw7k",
+      "network": "regtest",
+      "family": "test",
+      "refusal": null
+    },
+    {
+      "address": "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx",
+      "network": "mainnet",
+      "family": "test",
+      "refusal": "That is a testnet/signet address and this wallet is on mainnet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx",
+      "network": "signet",
+      "family": "test",
+      "refusal": null
+    },
+    {
+      "address": "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx",
+      "network": "testnet",
+      "family": "test",
+      "refusal": null
+    },
+    {
+      "address": "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx",
+      "network": "regtest",
+      "family": "test",
+      "refusal": null
+    },
+    {
+      "address": "tb1p5d7rjq7g6rdk2yhzks9smlaqtedr4dekq08ge8ztwac72sfr9rus5ss4wd",
+      "network": "mainnet",
+      "family": "test",
+      "refusal": "That is a testnet/signet address and this wallet is on mainnet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "tb1p5d7rjq7g6rdk2yhzks9smlaqtedr4dekq08ge8ztwac72sfr9rus5ss4wd",
+      "network": "signet",
+      "family": "test",
+      "refusal": null
+    },
+    {
+      "address": "tb1p5d7rjq7g6rdk2yhzks9smlaqtedr4dekq08ge8ztwac72sfr9rus5ss4wd",
+      "network": "testnet",
+      "family": "test",
+      "refusal": null
+    },
+    {
+      "address": "tb1p5d7rjq7g6rdk2yhzks9smlaqtedr4dekq08ge8ztwac72sfr9rus5ss4wd",
+      "network": "regtest",
+      "family": "test",
+      "refusal": null
+    },
+    {
+      "address": "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn",
+      "network": "mainnet",
+      "family": "test-or-regtest",
+      "refusal": "That is a test-or-regtest address and this wallet is on mainnet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn",
+      "network": "signet",
+      "family": "test-or-regtest",
+      "refusal": null
+    },
+    {
+      "address": "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn",
+      "network": "testnet",
+      "family": "test-or-regtest",
+      "refusal": null
+    },
+    {
+      "address": "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn",
+      "network": "regtest",
+      "family": "test-or-regtest",
+      "refusal": null
+    },
+    {
+      "address": "2N2JD6wb56AfK4tfmM6PwdVmoYk2dCKf4Br",
+      "network": "mainnet",
+      "family": "test-or-regtest",
+      "refusal": "That is a test-or-regtest address and this wallet is on mainnet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "2N2JD6wb56AfK4tfmM6PwdVmoYk2dCKf4Br",
+      "network": "signet",
+      "family": "test-or-regtest",
+      "refusal": null
+    },
+    {
+      "address": "2N2JD6wb56AfK4tfmM6PwdVmoYk2dCKf4Br",
+      "network": "testnet",
+      "family": "test-or-regtest",
+      "refusal": null
+    },
+    {
+      "address": "2N2JD6wb56AfK4tfmM6PwdVmoYk2dCKf4Br",
+      "network": "regtest",
+      "family": "test-or-regtest",
+      "refusal": null
+    },
+    {
+      "address": "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080",
+      "network": "mainnet",
+      "family": "regtest",
+      "refusal": "That is a regtest address and this wallet is on mainnet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080",
+      "network": "signet",
+      "family": "regtest",
+      "refusal": "That is a regtest address and this wallet is on signet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080",
+      "network": "testnet",
+      "family": "regtest",
+      "refusal": "That is a regtest address and this wallet is on testnet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080",
+      "network": "regtest",
+      "family": "regtest",
+      "refusal": null
+    },
+    {
+      "address": "alice@example.com",
+      "network": "mainnet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "alice@example.com",
+      "network": "signet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "alice@example.com",
+      "network": "testnet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "alice@example.com",
+      "network": "regtest",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "",
+      "network": "mainnet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "",
+      "network": "signet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "",
+      "network": "testnet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "",
+      "network": "regtest",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "   ",
+      "network": "mainnet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "   ",
+      "network": "signet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "   ",
+      "network": "testnet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "   ",
+      "network": "regtest",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "garbage",
+      "network": "mainnet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "garbage",
+      "network": "signet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "garbage",
+      "network": "testnet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "garbage",
+      "network": "regtest",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "not-an-address",
+      "network": "mainnet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "not-an-address",
+      "network": "signet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "not-an-address",
+      "network": "testnet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "not-an-address",
+      "network": "regtest",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "11111",
+      "network": "mainnet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "11111",
+      "network": "signet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "11111",
+      "network": "testnet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "11111",
+      "network": "regtest",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "doge1qqqq",
+      "network": "mainnet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "doge1qqqq",
+      "network": "signet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "doge1qqqq",
+      "network": "testnet",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "doge1qqqq",
+      "network": "regtest",
+      "family": null,
+      "refusal": null
+    },
+    {
+      "address": "BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4",
+      "network": "mainnet",
+      "family": "main",
+      "refusal": null
+    },
+    {
+      "address": "BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4",
+      "network": "signet",
+      "family": "main",
+      "refusal": "That is a mainnet address and this wallet is on signet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4",
+      "network": "testnet",
+      "family": "main",
+      "refusal": "That is a mainnet address and this wallet is on testnet. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    },
+    {
+      "address": "BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4",
+      "network": "regtest",
+      "family": "main",
+      "refusal": "That is a mainnet address and this wallet is on regtest. Coins sent to it would be unspendable by the recipient and unrecoverable by you."
+    }
+  ]
+}

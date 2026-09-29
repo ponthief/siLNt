@@ -67,7 +67,11 @@ from .helpers.device_auth import (
 from .helpers.user import is_lnbits_admin, require_admin, validate_born_height
 from .helpers.scan import BlindBitOracleClient
 from .helpers.fee_rates_backend import  get_recommended_fees, get_btc_usd_rate
-from .helpers.send_guards import resolve_recipient, validate_spendable_utxos
+from .helpers.send_guards import (
+    require_recipient_network,
+    resolve_recipient,
+    validate_spendable_utxos,
+)
 from .helpers.payjoin_wallet import sync_wallet, next_unused_receive_index
 from .helpers.payjoin_merge import build_merged_payjoin
 from .helpers.psbt_combine import combine_and_finalize
@@ -1497,7 +1501,7 @@ async def api_prepare_transaction(
     # A coin a live Tango is holding is not spendable here either. Without
     # this, the send succeeds and the round dies at its last step.
     await _refuse_tango_reserved(key_info.wallet.user, data.utxos)
-    recipient = await resolve_recipient(data.recipient)
+    recipient = await resolve_recipient(data.recipient, wallet.network)
 
     # The client only implements the Silent Payments derivation. Every other
     # address type is turned into a scriptPubKey here, where the conversion
@@ -1586,7 +1590,7 @@ async def api_build_transaction(
             bool(get_scan_progress(data.wallet_id).get("active")),
         )
         await _refuse_tango_reserved(key_info.wallet.user, data.utxos)
-        data.recipient = await resolve_recipient(data.recipient)
+        data.recipient = await resolve_recipient(data.recipient, wallet.network)
 
         result = build_transaction(
             spend_key_hex=data.spend_key,
@@ -4149,6 +4153,10 @@ async def api_sp_contacts_create(
             status_code=HTTPStatus.BAD_REQUEST,
             detail="Recipient must be a BitMail name (name@domain) or an SP address (sp1…/tsp1…).",
         )
+    # A contact is stored per network and only ever offered on that network, so
+    # one on the wrong chain is a send that cannot succeed, saved under a name
+    # that says it can. Same rule and same wording as the send itself.
+    require_recipient_network(value, network)
     try:
         c = await create_sp_contact(key_info.wallet.user, data.label, value, network)
     except ValueError as e:

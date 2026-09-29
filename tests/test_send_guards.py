@@ -135,8 +135,13 @@ async def test_a_plain_address_passes_through_untouched():
     """No @ means no lookup — and no chance for a DNS failure to block a send
     that never needed DNS."""
     g.bip353_resolve = _dns("should not be called")
-    for addr in ("sp1qqtest", "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"):
-        assert await g.resolve_recipient(addr) == addr
+    for addr, net in (
+        ("sp1qqtest", "mainnet"),
+        ("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", "mainnet"),
+        ("tsp1qqtest", "signet"),
+        ("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", "signet"),
+    ):
+        assert await g.resolve_recipient(addr, net) == addr
 
 
 @pytest.mark.asyncio
@@ -147,7 +152,7 @@ async def test_a_bitmail_resolves_to_its_sp_address():
         raise RuntimeError("no cloudflare configured")
 
     g.get_cloudflare_config = no_cf
-    assert await g.resolve_recipient("alice@example.com") == "sp1qqresolved"
+    assert await g.resolve_recipient("alice@example.com", "mainnet") == "sp1qqresolved"
 
 
 @pytest.mark.asyncio
@@ -159,7 +164,7 @@ async def test_a_record_that_is_not_a_silent_payment_is_refused():
 
     g.get_cloudflare_config = no_cf
     with pytest.raises(HTTPException, match="Silent Payment"):
-        await g.resolve_recipient("alice@example.com")
+        await g.resolve_recipient("alice@example.com", "mainnet")
 
 
 @pytest.mark.asyncio
@@ -190,7 +195,7 @@ async def test_a_tampered_bitmail_on_our_own_domain_blocks_the_send():
     g.send_ntfy_notification = ntfy
 
     with pytest.raises(HTTPException) as e:
-        await g.resolve_recipient("bob@whispawallet.com")
+        await g.resolve_recipient("bob@whispawallet.com", "mainnet")
 
     assert "does not match what was registered" in e.value.detail
     assert "Do not retry" in e.value.detail
@@ -224,7 +229,7 @@ async def test_the_block_survives_a_broken_alerting_path():
     g.send_ntfy_notification = boom
 
     with pytest.raises(HTTPException, match="does not match"):
-        await g.resolve_recipient("bob@whispawallet.com")
+        await g.resolve_recipient("bob@whispawallet.com", "mainnet")
 
 
 @pytest.mark.asyncio
@@ -245,4 +250,4 @@ async def test_a_bitmail_on_another_domain_is_not_second_guessed():
 
     g.get_cloudflare_config = cf
     g.get_issued_bitmail_sp_address = issued
-    assert await g.resolve_recipient("bob@someoneelse.net") == "sp1qqelsewhere"
+    assert await g.resolve_recipient("bob@someoneelse.net", "mainnet") == "sp1qqelsewhere"

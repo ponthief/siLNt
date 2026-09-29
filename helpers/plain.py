@@ -58,6 +58,7 @@ from .electrum_client import (
     address_to_scriptpubkey,
     electrum_scripthash,
 )
+from .chains import recipient_chain_mismatch
 from .wallet import sp_scriptpubkey_from_inputs
 
 # A P2WPKH input is 68 vB (41 base + 27 witness) and the version/counts/locktime
@@ -321,6 +322,14 @@ def plan_plain_spend(
     dest = (destination or "").strip()
     if not dest:
         raise ValueError("A destination is required.")
+    # The same chain check the SP send path runs. This planner holds every rule
+    # for a plain spend precisely so a client that signs for itself cannot skip
+    # one, and a destination on the other chain is the rule with no second
+    # chance: it builds, signs and confirms, and the recipient is scanning
+    # somewhere else. See helpers/chains.py.
+    wrong_chain = recipient_chain_mismatch(dest, network)
+    if wrong_chain:
+        raise ValueError(wrong_chain)
     is_sp = dest.startswith("sp1") or dest.startswith("tsp1")
     dest_vbytes = destination_vbytes(dest)
     dest_script = (

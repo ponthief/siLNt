@@ -27,6 +27,19 @@ from ..crud import (
     send_ntfy_notification,
 )
 from .address_resolver import bip353_resolve
+from .chains import recipient_chain_mismatch
+
+
+def require_recipient_network(recipient: str, network: str) -> None:
+    """The same judgement as recipient_chain_mismatch, as a refusal.
+
+    Sending to the other chain is the failure with no feedback loop anywhere:
+    it builds, it signs, it confirms, and the recipient is scanning a chain
+    that transaction is not on. See helpers/chains.py.
+    """
+    problem = recipient_chain_mismatch(recipient, network)
+    if problem:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=problem)
 
 
 async def validate_spendable_utxos(
@@ -76,7 +89,7 @@ async def validate_spendable_utxos(
     return rows
 
 
-async def resolve_recipient(recipient: str) -> str:
+async def resolve_recipient(recipient: str, network: str) -> str:
     """Resolve a BitMail to its Silent Payment address, refusing a tampered one.
 
     A plain sp1…/bc1… recipient comes back unchanged. A name@domain is resolved
@@ -87,8 +100,14 @@ async def resolve_recipient(recipient: str) -> str:
 
     The alert and the notification are best-effort — neither failing may stop
     the block, which is the part that protects the money.
+
+    `network` is the sending wallet's, and it is checked on BOTH the address
+    given and the address a BitMail resolves to. Both can be the wrong chain,
+    and the resolved one is not the caller's mistake to make — see
+    recipient_chain_mismatch for why nothing downstream would notice.
     """
     recipient = (recipient or "").strip()
+    require_recipient_network(recipient, network)
     if "@" not in recipient:
         return recipient
 
@@ -151,4 +170,8 @@ async def resolve_recipient(recipient: str) -> str:
                 ),
             )
 
+    # The resolved address gets the same check as a pasted one: a BitMail can
+    # point at the other chain just as easily, and by here it is what the
+    # builder will be handed.
+    require_recipient_network(result, network)
     return result
