@@ -125,8 +125,33 @@ async def _tango_sweep_loop():
 
 # in async def silnt_start() / wherever the ext starts its tasks:
 def siLNt_start():
-    task = create_permanent_unique_task("ext_silnt", _refund_loop)
-    scheduled_tasks.append(task)
+    # PAUSED 2026-09-29 — _refund_loop is not started.
+    #
+    # It exists for Boltz submarine swaps, and Boltz is offline, so every pass
+    # was a round trip to a chain-height source to decide nothing: there are no
+    # live swaps for it to act on. It is the loop that produced
+    # `[silnt] auto-refund loop error:` every two minutes in the 2026-09-28
+    # logs.
+    #
+    # WHAT IS STILL THERE, because pausing the timer is not removing the
+    # feature: _refund_loop and refund_due_swaps are unchanged, and all four
+    # endpoints on silnt_refund_router stay mounted —
+    #   GET    /api/v1/swap/refundable
+    #   POST   /api/v1/swap/{swap_id}/refund
+    #   GET    /api/v1/swap/list
+    #   DELETE /api/v1/swap/{swap_id}
+    # so a swap that is past its timeout can still be refunded, by hand,
+    # whenever someone asks for it.
+    #
+    # WHAT IS NOT: nothing refunds a timed-out swap on its own any more. If a
+    # lockup is sitting out there with a refund address on record, it now waits
+    # for a person. Check GET /api/v1/swap/refundable before assuming there is
+    # nothing to collect.
+    #
+    # TO RESUME when Boltz is back: uncomment the two lines below. Nothing else
+    # changed.
+    # task = create_permanent_unique_task("ext_silnt", _refund_loop)
+    # scheduled_tasks.append(task)
     tamper_task = create_permanent_unique_task("ext_silnt_tamper", _tamper_sweep_loop)
     scheduled_tasks.append(tamper_task)
     health_task = create_permanent_unique_task("ext_silnt_health", _health_monitor_loop)
