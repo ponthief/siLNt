@@ -46,6 +46,42 @@ class BackendConfig(BaseModel):
     login_scan_enabled: bool = True            # auto catch-up scan on wallet open
     login_scan_auto_threshold: int = 432       # gap < this => scan silently; >= => prompt
 
+    # ── Tango change paid out over Lightning ─────────────────────────────────
+    # A user who supplies a Lightning address has their round's change output
+    # paid to tango_change_sp_address instead of their own wallet, and the
+    # value sent to that address minus a fee. Optional per user; see
+    # TANGO_CHANGE_CREDIT.md and helpers/tangopayout.py.
+    #
+    # Off by default, and off regardless without an address configured: the
+    # feature takes a coin out of someone's wallet, so it does not start
+    # working because a version was deployed.
+    tango_change_payout_enabled: bool = False
+    # The INSTANCE's Silent Payments address for this network. An SP address
+    # and not a fixed on-chain one: a reused address tags every Tango publicly
+    # the instant two of them pay it, and retroactively identifies the protocol
+    # on every round this instance has ever coordinated.
+    tango_change_sp_address: str = ""
+    tango_change_fee_pct: float = 0.005        # 0.5% of the change
+    tango_change_fee_floor_sats: int = 100     # cost recovery; see tangopayout
+    # A one-confirmation payout can be reversed by a reorg, and a Lightning
+    # payment cannot be clawed back.
+    tango_change_min_confirmations: int = 3
+
+    def tango_payout_ready(self, network: str) -> bool:
+        """Is the change payout usable on this network right now?
+
+        Three things, and the network is not one an operator can override —
+        see helpers/tangopayout.PAYOUT_NETWORKS for why paying out signet
+        change over mainnet Lightning is free money.
+        """
+        from .helpers.tangopayout import payout_offered
+
+        return bool(
+            self.tango_change_payout_enabled
+            and (self.tango_change_sp_address or "").strip()
+            and payout_offered(network)
+        )
+
     def explorer_base(self) -> str:
         """Base URL for links handed to a user's browser, no trailing slash.
 
