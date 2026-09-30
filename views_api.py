@@ -43,6 +43,11 @@ from .helpers.email_verification import (
 from mnemonic import Mnemonic
 from .helpers.dust_check import evaluate_dust_for_wallet
 from .helpers.errors import exc_text as _exc_text
+from .helpers.lnaddress import (
+    LnAddressError,
+    resolve as resolve_ln_address,
+)
+from .helpers.tangopayout import min_change_to_route, payout_offered, payout_plan
 from .helpers.scan_rate_limiter import (
     check_scan_allowed,
     clear_wallet_limits,
@@ -202,6 +207,9 @@ from .crud import (
     update_sp_contact_value,
     update_sp_contact_label,
     delete_sp_contact,
+    get_tango_ln_address,
+    set_tango_ln_address,
+    delete_tango_ln_address,
     touch_sp_contact,
     list_silnt_user_ids,
     get_ntfy_config,
@@ -273,6 +281,7 @@ from .models import (
     ContactLabelData,
     CreateSpContactData,
     UpdateSpContactData,
+    TangoLnAddressData,
     BackgroundScanData,
     FcmTokenData,
     AdminDeleteAccountData,
@@ -4202,6 +4211,128 @@ async def api_sp_contacts_delete(
 ):
     await delete_sp_contact(cid, key_info.wallet.user)
     return {"ok": True}
+
+
+# ── Tango change: the Lightning address it is sent to ───────────────────────
+#
+# Optional, per user, per network. With one set, a round's change output is
+# paid to the INSTANCE's SP address and the value sent here minus a fee;
+# without one, the change lands in the user's own wallet exactly as it does
+# today. See TANGO_CHANGE_CREDIT.md and helpers/tangopayout.py.
+
+def _require_payout_network(network: str) -> None:
+    """A Lightning address is a mainnet endpoint and signet change is
+    worthless, so routing it would have the instance paying real sats for
+    faucet coins. Not an operator preference — see tangopayout.PAYOUT_NETWORKS.
+    """
+    if not payout_offered(network):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=(
+                f"Tango change cannot be paid out on {network}. A Lightning "
+                f"address is a mainnet endpoint, and {network} coins are not "
+                f"worth real sats."
+            ),
+        )
+
+
+@silnt_api_router.get("/api/v1/tango/ln-address")
+async def api_tango_ln_address_get(
+    network: str = Query(...),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """What is saved, and what this instance would do with it.
+
+    Returns the configuration alongside the address so the clients do not
+    hardcode a fee or a threshold that the backend can change under them —
+    and so the setting can state the smallest change worth routing rather
+    than leaving the user to discover it.
+    """
+    cfg = await get_backend_config(network)
+    offered = payout_offered(network)
+    saved = (
+        await get_tango_ln_address(key_info.wallet.user, network)
+        if offered
+        else None
+    )
+    return {
+        "offered": offered,
+        "ready": cfg.tango_payout_ready(network),
+        "address": (saved or {}).get("address") or "",
+        "min_sendable": (saved or {}).get("min_sendable"),
+        "max_sendable": (saved or {}).get("max_sendable"),
+        "fee_pct": cfg.tango_change_fee_pct,
+        "fee_floor_sats": cfg.tango_change_fee_floor_sats,
+        "min_change_sats": min_change_to_route(
+            cfg.tango_change_fee_pct, cfg.tango_change_fee_floor_sats
+        ),
+    }
+
+
+@silnt_api_router.put("/api/v1/tango/ln-address")
+async def api_tango_ln_address_set(
+    data: TangoLnAddressData,
+    network: str = Query(...),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """Save it, having proved it can actually be paid.
+
+    RESOLVED HERE AND NOT AT PAYOUT TIME. By payout the change output has left
+    the user's wallet and become ours, so an address that turns out to be
+    unreachable, or a provider whose minimum is above a typical change, is a
+    problem we cannot hand back. Both are cheap to find out now, while the
+    person is looking at the field.
+    """
+    _require_payout_network(network)
+    cfg = await get_backend_config(network)
+    try:
+        endpoint = await resolve_ln_address(data.address)
+    except LnAddressError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+
+    # The smallest payout this instance would ever send, against the smallest
+    # this provider will accept. A provider with a 1,000-sat minimum cannot
+    # take a 546-sat change, and saying so now beats a failed payout later.
+    floor = min_change_to_route(
+        cfg.tango_change_fee_pct, cfg.tango_change_fee_floor_sats
+    )
+    if floor is not None:
+        smallest = payout_plan(
+            floor,
+            fee_pct=cfg.tango_change_fee_pct,
+            fee_floor_sats=cfg.tango_change_fee_floor_sats,
+        )
+        if smallest.routed and not endpoint.accepts_sats(smallest.net_sats):
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail=(
+                    f"That address accepts at least "
+                    f"{endpoint.min_sendable_msat // 1000} sats, and the "
+                    f"smallest change payout is {smallest.net_sats}. Use an "
+                    f"address that accepts small payments."
+                ),
+            )
+
+    await set_tango_ln_address(
+        key_info.wallet.user,
+        network,
+        data.address.strip().lower(),
+        endpoint.min_sendable_msat,
+        endpoint.max_sendable_msat,
+    )
+    return {"ok": True, **endpoint.dict()}
+
+
+@silnt_api_router.delete("/api/v1/tango/ln-address")
+async def api_tango_ln_address_delete(
+    network: str = Query(...),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """Stop routing. The change goes back to landing in their own wallet,
+    which is the behaviour every round had before this existed."""
+    await delete_tango_ln_address(key_info.wallet.user, network)
+    return {"ok": True}
+
 
 # ── Admin: delete a user account ──────────────────────────────────────────────
 async def _resolve_account(identifier: str):

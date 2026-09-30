@@ -595,6 +595,14 @@ class CreateSpContactData(BaseModel):
     value: str                     # 'name@domain' or 'sp1...'/'tsp1...'
 
 
+class TangoLnAddressData(BaseModel):
+    # The Lightning address a round's change is sent to. No Field constraints
+    # — see the note at the top of this file about pydantic v1/v2 — so the
+    # shape is checked by helpers/lnaddress.py, which has to parse it into a
+    # URL anyway and can say what is wrong with it in words.
+    address: str
+
+
 class UpdateSpContactData(BaseModel):
     # Both optional: a rename sends only the label, and repointing a contact at
     # a recipient's new address sends only the value. No Field constraints —

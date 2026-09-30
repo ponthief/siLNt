@@ -1809,6 +1809,14 @@ async def delete_all_silnt_data_for_user(user_id: str) -> dict:
     await db.execute("DELETE FROM silnt.bip353_requests WHERE user_id = :uid", {"uid": user_id})
     await db.execute("DELETE FROM silnt.trusted_devices  WHERE user_id = :uid", {"uid": user_id})
     await db.execute("DELETE FROM silnt.user_prefs        WHERE user_id = :uid", {"uid": user_id})
+    # Where their Tango change was to be sent. A Lightning address is the one
+    # piece of off-chain identity this extension holds about a user, so it goes
+    # with the account rather than outliving it — this list is where
+    # tango_rounds and background_scan were both found missing, so a new table
+    # joins it in the same change that creates it.
+    await db.execute(
+        "DELETE FROM silnt.tango_ln_addresses WHERE user_id = :uid", {"uid": user_id}
+    )
     # Admin alerts reference the user only inside their meta JSON (no column), so
     # clean them via the meta-aware helper rather than a DELETE ... WHERE.
     await delete_admin_alerts_for_user(user_id)
@@ -3684,3 +3692,74 @@ async def label_utxo_at_outpoint(
         },
     )
     return bool(row)
+
+
+# ── Tango change: where to send it over Lightning ───────────────────────────
+#
+# Optional, per user, per network. The address is encrypted at rest for the
+# same reason a saved contact is: it is a recipient identity, and it is the
+# one piece of off-chain metadata this extension holds about its users. The
+# provider's limits are stored beside it, from the moment it was verified, so
+# a payout too small for that provider can be declined before the round rather
+# than after the coin has already become ours.
+
+async def get_tango_ln_address(user_id: str, network: str) -> Optional[dict]:
+    row = await db.fetchone(
+        "SELECT * FROM silnt.tango_ln_addresses "
+        "WHERE user_id = :uid AND network = :net",
+        {"uid": user_id, "net": network},
+    )
+    if not row:
+        return None
+    return {
+        "address": _pj_decrypt(row["address"]) or "",
+        "min_sendable": row["min_sendable"],
+        "max_sendable": row["max_sendable"],
+        "checked_at": row["checked_at"],
+    }
+
+
+async def set_tango_ln_address(
+    user_id: str,
+    network: str,
+    address: str,
+    min_sendable: Optional[int],
+    max_sendable: Optional[int],
+) -> None:
+    """Upsert. Written by hand rather than with ON CONFLICT so the statement
+    is the same on SQLite and Postgres, which is how the rest of this module
+    upserts."""
+    enc = _pj_encrypt((address or "").strip())
+    existing = await db.fetchone(
+        "SELECT user_id FROM silnt.tango_ln_addresses "
+        "WHERE user_id = :uid AND network = :net",
+        {"uid": user_id, "net": network},
+    )
+    values = {
+        "uid": user_id, "net": network, "addr": enc,
+        "lo": int(min_sendable) if min_sendable is not None else None,
+        "hi": int(max_sendable) if max_sendable is not None else None,
+    }
+    if existing:
+        await db.execute(
+            f"UPDATE silnt.tango_ln_addresses "
+            f"SET address = :addr, min_sendable = :lo, max_sendable = :hi, "
+            f"checked_at = {db.timestamp_now} "
+            f"WHERE user_id = :uid AND network = :net",
+            values,
+        )
+    else:
+        await db.execute(
+            "INSERT INTO silnt.tango_ln_addresses "
+            "(user_id, network, address, min_sendable, max_sendable) "
+            "VALUES (:uid, :net, :addr, :lo, :hi)",
+            values,
+        )
+
+
+async def delete_tango_ln_address(user_id: str, network: str) -> None:
+    await db.execute(
+        "DELETE FROM silnt.tango_ln_addresses "
+        "WHERE user_id = :uid AND network = :net",
+        {"uid": user_id, "net": network},
+    )

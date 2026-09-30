@@ -1188,3 +1188,40 @@ async def m038_tango_pieces(db):
          WHERE b_mix_spk IS NOT NULL AND b_mix_spk <> ''
         """
     )
+
+
+async def m039_tango_ln_address(db):
+    """Where a user wants their Tango change sent, over Lightning.
+
+    A round's change output is the strongest remaining linkability problem in
+    Tango: its value is fixed by the round's arithmetic, so spending it later
+    identifies which of the two identical shares were its owner's. A user who
+    gives a Lightning address has that output paid to the INSTANCE's SP address
+    instead, and the value sent on minus a fee.
+
+    Per network even though the feature is mainnet-only today, because the
+    alternative is a signet setting that silently pays out real sats, and a
+    column is cheaper than that conversation.
+
+    The address is encrypted at rest, like a saved contact and a PayJoin
+    descriptor: it is a recipient identity, and it is the one piece of
+    off-chain metadata this extension holds about its users.
+
+    min_sendable/max_sendable are what the provider said when the address was
+    saved, in millisatoshis, so a payout too small for it can be declined
+    before the round rather than after the coin has left.
+    """
+    await db.execute(
+        f"""
+        CREATE TABLE silnt.tango_ln_addresses (
+            user_id      TEXT NOT NULL,
+            network      TEXT NOT NULL,
+            address      TEXT NOT NULL,
+            min_sendable {db.big_int},
+            max_sendable {db.big_int},
+            checked_at   TIMESTAMP NOT NULL DEFAULT {db.timestamp_now},
+            created_at   TIMESTAMP NOT NULL DEFAULT {db.timestamp_now},
+            PRIMARY KEY (user_id, network)
+        );
+        """
+    )
