@@ -187,3 +187,47 @@ def payout_change_spks(
         spk, tweak = derive_payout_output(sp_address, scan_secret, inputs, role)
         out[role] = {"spk": spk.hex(), "tweak": tweak.hex()}
     return out
+
+
+def scan_key_matches(sp_address: str, scan_secret: str) -> bool:
+    """Is `scan_secret` the scan key OF `sp_address`?
+
+    WHY THIS HAD TO EXIST. An SP address carries B_scan as a PUBLIC key, and
+    the scan SECRET cannot be derived from it — that is the discrete log, and
+    if it were possible Silent Payments would be worthless, because anyone
+    could scan anyone's payments. So the two config values are entered
+    separately, and nothing stopped them being from different wallets.
+
+    A mismatch is the worst kind of wrong, because nothing notices:
+
+      * derive_payout_output uses the SECRET for the shared secret and the
+        address's B_SPEND for the point, so with a mismatched pair it still
+        produces a valid output, spendable by the holder of B_spend;
+      * verify_payout_output only checks B_spend, so both clients accept it and
+        the round completes;
+      * the instance then cannot FIND that coin, because it would scan with
+        the key the output was not derived against.
+
+    Money arrives somewhere real and invisible. One scalar multiplication
+    rules it out, so it is checked when the config is saved.
+    """
+    try:
+        b_scan_pub, _ = parse_sp_address((sp_address or "").strip())
+    except Exception:
+        return False
+    text = (scan_secret or "").strip()
+    try:
+        secret = bytes.fromhex(text)
+    except ValueError:
+        return False
+    if len(secret) != 32:
+        return False
+    k = int.from_bytes(secret, "big")
+    if k == 0 or k >= SECP256K1_N:
+        return False
+    try:
+        point = pubkey_point_gen_from_int(k)
+    except Exception:
+        return False
+    derived = bytes([0x02 + (point[1] % 2)]) + ser256(point[0])
+    return derived == b_scan_pub

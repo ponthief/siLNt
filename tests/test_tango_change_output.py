@@ -114,10 +114,20 @@ def test_the_fixture_is_current():
 
 
 def _fn(path: str, name: str) -> str:
+    """One function's source. Stops at the next def OR the next route
+    decorator — an async endpoint followed by another decorated one has no
+    bare `def` after it, and an overshooting slice makes every assertion in
+    these tests read the rest of the file."""
     src = (ROOT / path).read_text()
     at = src.index(f"def {name}(")
-    nxt = src.find("\ndef ", at + 10)
-    return src[at:nxt] if nxt != -1 else src[at:]
+    ends = [
+        i for i in (
+            src.find("\ndef ", at + 10),
+            src.find("\nasync def ", at + 10),
+            src.find("\n@silnt_api_router", at + 10),
+        ) if i != -1
+    ]
+    return src[at:min(ends)] if ends else src[at:]
 
 
 def test_the_verifier_needs_no_secret():
@@ -274,3 +284,100 @@ def test_the_payout_wallet_is_an_id_and_not_a_key():
     src = (ROOT / "models.py").read_text()
     assert "tango_change_payout_wallet_id: str" in src
     assert "tango_change_payout_adminkey" not in src
+
+
+# ── the two config values have to be from the same wallet ───────────────────
+#
+# A MISMATCH IS THE WORST KIND OF WRONG, because nothing notices.
+# derive_payout_output uses the SECRET for the shared secret and the address's
+# B_SPEND for the point, so a mismatched pair still produces a valid output,
+# spendable by the holder of B_spend. verify_payout_output only checks B_spend,
+# so both clients accept it and the round completes. And the instance then
+# cannot FIND that coin, because it would scan with a key the output was never
+# derived against. Money arrives somewhere real and invisible.
+#
+# The verdicts are computed by the fixture generator rather than here: conftest
+# stubs helpers/wallet.py, so the real curve code cannot be imported in the
+# test process.
+
+
+def test_the_real_pair_matches():
+    assert FX["scan_key_match"]["right_pair"] is True
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "other_wallets_scan",
+        # The mistake most likely to be made at a config field with two hex
+        # boxes on it.
+        "the_spend_key_instead",
+        "not_hex",
+        "too_short",
+        "too_long",
+        "zero",
+        "empty",
+        "blank",
+        "junk_address",
+        "empty_address",
+    ],
+)
+def test_everything_else_is_caught(case):
+    assert FX["scan_key_match"][case] is False, case
+
+
+def test_the_scan_secret_cannot_be_derived_from_the_address():
+    """The thing this check exists INSTEAD of. An SP address carries B_scan as
+    a PUBLIC key; recovering b_scan from it is the discrete log, and if that
+    were possible Silent Payments would be worthless, because anyone could
+    scan anyone's payments. So there is no deriving it — only checking a pair.
+
+    Asserted against the module surface so nobody adds a plausible-looking
+    derive_scan_key(address) later.
+    """
+    src = (ROOT / "helpers" / "tangochange.py").read_text()
+    assert "def derive_scan_key" not in src
+    assert "discrete log" in src, (
+        "the reason there is no such function belongs beside the one there is"
+    )
+
+
+def test_the_config_save_refuses_a_mismatched_pair():
+    src = (ROOT / "views_api.py").read_text()
+    body = src[src.index("async def api_update_backend_config"):]
+    body = body[: body.index("\n@silnt_api_router")]
+    assert "scan_key_matches(" in body
+
+
+def test_a_payout_address_can_be_generated_instead_of_typed():
+    """The question behind "can the scan key be derived from the address?" —
+    which it cannot. Generating both from one seed is the thing that actually
+    removes the copying."""
+    body = _fn("views_api.py", "api_admin_tango_change_address")
+    assert "generate_silent_wallet_address(" in body
+    for field in ('"sp_address"', '"scan_secret"', '"mnemonic"'):
+        assert field in body, field
+
+
+def test_the_generator_stores_nothing():
+    """The mnemonic is the only way to ever spend what the address collects, so
+    it is shown once and kept by the operator. A server that saved it would be
+    holding the spend key for every coin it collects."""
+    body = _fn("views_api.py", "api_admin_tango_change_address")
+    assert "update_backend_config" not in body
+    assert "_spend_key" in body, "the spend key is derived and discarded"
+    # And it is not in the response.
+    assert '"spend' not in body
+
+
+def test_the_generator_is_admin_only_and_mainnet_only():
+    body = _fn("views_api.py", "api_admin_tango_change_address")
+    assert "require_admin(key_info)" in body
+    assert "payout_offered(net)" in body
+
+
+def test_the_generated_pair_is_checked_before_it_is_handed_over():
+    """Otherwise a mismatch would leave the operator holding a mnemonic for a
+    configuration the save will refuse."""
+    body = _fn("views_api.py", "api_admin_tango_change_address")
+    assert "scan_key_matches(sp_address, scan_key)" in body

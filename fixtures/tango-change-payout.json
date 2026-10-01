@@ -43,5 +43,18 @@
     "foreign_tweak": "a7b8fb394cd2bd5988a1755bbe00d04a73953416138eba78f1eb3e962d6fb5b5",
     "zero_tweak": "0000000000000000000000000000000000000000000000000000000000000000",
     "short_tweak": "ababababababababababababababababababababababababababababababab"
+  },
+  "scan_key_match": {
+    "right_pair": true,
+    "other_wallets_scan": false,
+    "the_spend_key_instead": false,
+    "not_hex": false,
+    "too_short": false,
+    "too_long": false,
+    "zero": false,
+    "empty": false,
+    "blank": false,
+    "junk_address": false,
+    "empty_address": false
   }
 }

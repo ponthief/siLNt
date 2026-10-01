@@ -911,9 +911,93 @@ async def api_update_backend_config(
     data: BackendConfig,  network: Optional[str] = Query(None),
     key_info: WalletTypeInfo = Depends(require_trusted_device_admin)
 ) -> BackendConfig:
-    require_admin(key_info)
     """Only admin can write blindbit connection settings."""
+    require_admin(key_info)
+
+    # THE TWO TANGO CHANGE VALUES HAVE TO BE FROM THE SAME WALLET.
+    #
+    # An SP address carries B_scan as a public key, so the scan SECRET cannot
+    # be derived from it — that is the discrete log, and if it were possible
+    # Silent Payments would be worthless. The two are therefore entered
+    # separately, and a mismatch is the worst kind of wrong because nothing
+    # downstream notices: the output still derives, both clients still accept
+    # it (they check B_spend, which is right), the round completes, and the
+    # instance cannot find the coin because it would scan with a key the
+    # output was never derived against. Money arrives somewhere real and
+    # invisible. One scalar multiplication rules it out.
+    addr = (data.tango_change_sp_address or "").strip()
+    secret = (data.tango_change_scan_secret or "").strip()
+    if addr and secret:
+        from .helpers.tangochange import scan_key_matches
+
+        if not scan_key_matches(addr, secret):
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail=(
+                    "That scan key does not belong to that Silent Payments "
+                    "address. Both must come from the same wallet — otherwise "
+                    "this server would derive change outputs it cannot "
+                    "afterwards find."
+                ),
+            )
+    if addr and not payout_offered(network or DEFAULT_CONFIG_NETWORK) and (
+        data.tango_change_payout_enabled
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=(
+                f"Tango change cannot be routed on "
+                f"{network or DEFAULT_CONFIG_NETWORK}. A Lightning address is "
+                f"a mainnet endpoint, and these coins are not worth real sats."
+            ),
+        )
     return await update_backend_config(data, network or DEFAULT_CONFIG_NETWORK)
+
+
+@silnt_api_router.post("/api/v1/admin/tango/change-address")
+async def api_admin_tango_change_address(
+    network: Optional[str] = Query(None),
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """Make a fresh payout wallet and hand back everything needed to set it up.
+
+    THE QUESTION THIS ANSWERS, and the one it cannot. The scan key cannot be
+    derived from an address — see above. What CAN be done is generate both
+    from one seed, so the operator never has to copy two values and hope they
+    match.
+
+    Returns the address, the scan key, and the MNEMONIC. Saves nothing and
+    stores no spending key: the mnemonic is shown once, the operator writes it
+    down, and it is the only way to ever spend what this address collects. The
+    spend key derived here is discarded with the request.
+    """
+    require_admin(key_info)
+    net = network or DEFAULT_CONFIG_NETWORK
+    if not payout_offered(net):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"Tango change payouts are not available on {net}.",
+        )
+    mnemo = Mnemonic("english").generate(strength=128)
+    sp_address, scan_key, _spend_key = await generate_silent_wallet_address(
+        mnemo, "", net
+    )
+    # Belt and braces: if these two did not match, the config save would refuse
+    # them and the operator would be left with a mnemonic for nothing.
+    from .helpers.tangochange import scan_key_matches
+
+    if not scan_key_matches(sp_address, scan_key):
+        logger.error("generated Tango change address and scan key disagree")
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail="Could not generate a payout address.",
+        )
+    return {
+        "sp_address": sp_address,
+        "scan_secret": scan_key,
+        "mnemonic": mnemo,
+        "network": net,
+    }
 
 
 # ── Scanning ──────────────────────────────────────────────────────────────────

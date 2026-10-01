@@ -150,6 +150,25 @@ def main() -> int:
         other, bytes.fromhex("d1" * 32), inputs, "a"
     )
 
+    # Whether a given scan key really belongs to a given address. Answered
+    # here rather than in the test process, where conftest stubs
+    # helpers/wallet.py and the real curve code cannot be imported.
+    scan_key_match = {
+        "right_pair": _tc.scan_key_matches(addr, INSTANCE_SCAN),
+        "other_wallets_scan": _tc.scan_key_matches(addr, "d1" * 32),
+        # The mistake most likely to be made at a config field with two hex
+        # boxes on it.
+        "the_spend_key_instead": _tc.scan_key_matches(addr, INSTANCE_SPEND),
+        "not_hex": _tc.scan_key_matches(addr, "zz" * 32),
+        "too_short": _tc.scan_key_matches(addr, "c1" * 31),
+        "too_long": _tc.scan_key_matches(addr, "c1" * 33),
+        "zero": _tc.scan_key_matches(addr, "00" * 32),
+        "empty": _tc.scan_key_matches(addr, ""),
+        "blank": _tc.scan_key_matches(addr, "   "),
+        "junk_address": _tc.scan_key_matches("sp1nonsense", INSTANCE_SCAN),
+        "empty_address": _tc.scan_key_matches("", INSTANCE_SCAN),
+    }
+
     json.dump(
         {
             "sp_address": addr,
@@ -164,6 +183,7 @@ def main() -> int:
                 "zero_tweak": "00" * 32,
                 "short_tweak": "ab" * 31,
             },
+            "scan_key_match": scan_key_match,
         },
         sys.stdout,
         indent=2,
