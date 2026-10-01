@@ -631,6 +631,13 @@ class TangoLnAddressData(BaseModel):
     address: str
 
 
+class TangoLnAddressEnabledData(BaseModel):
+    # Switching a saved address on or off without forgetting it. Separate from
+    # the PUT above because turning it off should not require resolving an
+    # address over the network, and because the address survives it.
+    enabled: bool
+
+
 class UpdateSpContactData(BaseModel):
     # Both optional: a rename sends only the label, and repointing a contact at
     # a recipient's new address sends only the value. No Field constraints —

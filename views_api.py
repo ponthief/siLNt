@@ -209,6 +209,7 @@ from .crud import (
     delete_sp_contact,
     get_tango_ln_address,
     set_tango_ln_address,
+    set_tango_ln_address_enabled,
     delete_tango_ln_address,
     create_tango_payout,
     get_tango_payout,
@@ -291,6 +292,7 @@ from .models import (
     CreateSpContactData,
     UpdateSpContactData,
     TangoLnAddressData,
+    TangoLnAddressEnabledData,
     BackgroundScanData,
     FcmTokenData,
     AdminDeleteAccountData,
@@ -4388,6 +4390,9 @@ async def api_tango_ln_address_get(
         "offered": offered,
         "ready": ready,
         "address": (saved or {}).get("address") or "",
+        # An address with the switch off: kept, not routing. The clients show
+        # it as off with a way back on, rather than an empty field.
+        "enabled": bool((saved or {}).get("enabled")),
         "min_sendable": (saved or {}).get("min_sendable"),
         "max_sendable": (saved or {}).get("max_sendable"),
         "fee_pct": cfg.tango_change_fee_pct,
@@ -4452,13 +4457,45 @@ async def api_tango_ln_address_set(
     return {"ok": True, **endpoint.dict()}
 
 
+@silnt_api_router.put("/api/v1/tango/ln-address/enabled")
+async def api_tango_ln_address_enabled(
+    data: TangoLnAddressEnabledData,
+    network: str = Query(...),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """Stop or resume routing, keeping the address.
+
+    NOT A DELETE, which is what this used to be. Switching the setting off
+    deleted the row, so the only way back on was to remember the address and
+    type it again — and an empty field does not say whether anything was ever
+    saved. Here the address outlives the decision and the switch is the thing
+    a round reads.
+
+    No resolution on the way back on: the address was proved payable when it
+    was saved, and re-proving it would make turning it on fail for a provider
+    that happens to be down right now. A payout that cannot be delivered is
+    the retry loop's problem, and it reports it.
+    """
+    if data.enabled:
+        _require_payout_network(network)
+    found = await set_tango_ln_address_enabled(
+        key_info.wallet.user, network, data.enabled
+    )
+    if not found:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail="No Lightning address is saved for this network.",
+        )
+    return {"ok": True, "enabled": bool(data.enabled)}
+
+
 @silnt_api_router.delete("/api/v1/tango/ln-address")
 async def api_tango_ln_address_delete(
     network: str = Query(...),
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
-    """Stop routing. The change goes back to landing in their own wallet,
-    which is the behaviour every round had before this existed."""
+    """Forget the address. Rounds stop routing, as with the switch, and this
+    server stops holding it — which is the separate half of the decision."""
     await delete_tango_ln_address(key_info.wallet.user, network)
     return {"ok": True}
 
@@ -4544,6 +4581,11 @@ async def enqueue_tango_payouts() -> int:
             if await get_tango_payout(rnd.txid, vout):
                 continue
             saved = await get_tango_ln_address(user_id, rnd.network)
+            # DELIBERATELY IGNORES `enabled`. By here the round has already
+            # routed: the change output paid this instance and the value is
+            # owed. Someone who turned the setting off afterwards is still
+            # owed it, and the address they saved is still where it goes.
+            # Reading the switch here would strand the money instead.
             address = (saved or {}).get("address") or ""
             if not address:
                 # They cleared the setting between the round and now. The
@@ -4859,6 +4901,8 @@ async def api_admin_tango_payout_retry(
         )
     # Re-read the address: the usual reason a payout is being retried is that
     # the user fixed it, and retrying the old one would fail the same way.
+    # `enabled` is not consulted — this is a debt from a round that already
+    # routed, and switching the setting off does not cancel it.
     saved = await get_tango_ln_address(row["user_id"], row["network"])
     address = (saved or {}).get("address") or row["ln_address"]
     await requeue_tango_payout(txid, vout, address)
@@ -5888,6 +5932,11 @@ async def _tango_routes_change(user_id: str, network: str) -> tuple[bool, str]:
         return False, ""
     saved = await get_tango_ln_address(user_id, network)
     if not saved or not (saved.get("address") or "").strip():
+        return False, ""
+    # THE SWITCH, not just the presence of an address. A user who turned the
+    # setting off keeps their address — that is what makes turning it back on
+    # possible — so "has an address" stopped meaning "wants this".
+    if not saved.get("enabled"):
         return False, ""
     # AND THE WALLET HAS TO BE ABLE TO PAY. Routing a change the payout wallet
     # cannot cover is taking somebody's coin on a promise — exactly the

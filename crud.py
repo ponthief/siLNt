@@ -3726,6 +3726,10 @@ async def get_tango_ln_address(user_id: str, network: str) -> Optional[dict]:
         "min_sendable": row["min_sendable"],
         "max_sendable": row["max_sendable"],
         "checked_at": row["checked_at"],
+        # Saved and switched off is a real state, and it is NOT the same as
+        # saved. A caller deciding whether to route has to read this; a caller
+        # asking where an already-routed change was meant to go must not.
+        "enabled": bool(row["enabled"]),
     }
 
 
@@ -3736,9 +3740,15 @@ async def set_tango_ln_address(
     min_sendable: Optional[int],
     max_sendable: Optional[int],
 ) -> None:
-    """Upsert. Written by hand rather than with ON CONFLICT so the statement
-    is the same on SQLite and Postgres, which is how the rest of this module
-    upserts."""
+    """Upsert, and switch it on.
+
+    SAVING AN ADDRESS ENABLES IT. Nobody types an address into this field to
+    leave it off, and the alternative — saving, then a second tap to enable —
+    is a state where the setting looks configured and routes nothing.
+
+    Written by hand rather than with ON CONFLICT so the statement is the same
+    on SQLite and Postgres, which is how the rest of this module upserts.
+    """
     enc = _pj_encrypt((address or "").strip())
     existing = await db.fetchone(
         "SELECT user_id FROM silnt.tango_ln_addresses "
@@ -3754,20 +3764,49 @@ async def set_tango_ln_address(
         await db.execute(
             f"UPDATE silnt.tango_ln_addresses "
             f"SET address = :addr, min_sendable = :lo, max_sendable = :hi, "
-            f"checked_at = {db.timestamp_now} "
+            f"enabled = true, checked_at = {db.timestamp_now} "
             f"WHERE user_id = :uid AND network = :net",
             values,
         )
     else:
         await db.execute(
             "INSERT INTO silnt.tango_ln_addresses "
-            "(user_id, network, address, min_sendable, max_sendable) "
-            "VALUES (:uid, :net, :addr, :lo, :hi)",
+            "(user_id, network, address, min_sendable, max_sendable, enabled) "
+            "VALUES (:uid, :net, :addr, :lo, :hi, true)",
             values,
         )
 
 
+async def set_tango_ln_address_enabled(
+    user_id: str, network: str, enabled: bool
+) -> bool:
+    """Switch an already-saved address on or off. False if there is none.
+
+    The address is left alone either way. Turning it off used to delete it,
+    which meant the only way back on was to remember what it had been.
+    """
+    existing = await db.fetchone(
+        "SELECT user_id FROM silnt.tango_ln_addresses "
+        "WHERE user_id = :uid AND network = :net",
+        {"uid": user_id, "net": network},
+    )
+    if not existing:
+        return False
+    await db.execute(
+        "UPDATE silnt.tango_ln_addresses SET enabled = :on "
+        "WHERE user_id = :uid AND network = :net",
+        {"uid": user_id, "net": network, "on": bool(enabled)},
+    )
+    return True
+
+
 async def delete_tango_ln_address(user_id: str, network: str) -> None:
+    """Forget the address itself — a separate decision from switching it off.
+
+    Kept, and still what account deletion calls, because turning the feature
+    off is not the same as withdrawing the address: one is about future
+    rounds, the other is about what this server holds.
+    """
     await db.execute(
         "DELETE FROM silnt.tango_ln_addresses "
         "WHERE user_id = :uid AND network = :net",

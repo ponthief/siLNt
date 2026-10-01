@@ -1321,3 +1321,24 @@ async def m041_tango_change_payouts(db):
         "CREATE INDEX idx_tango_payouts_user "
         "ON silnt.tango_change_payouts (user_id);"
     )
+
+
+async def m042_tango_ln_address_switch(db):
+    """Turning the change payout off without forgetting the address.
+
+    "Turn off" used to DELETE the row, which made it a one-way door: the only
+    way back on was to remember the address and type it again. Someone who
+    switched it off to think about it came back to an empty field and no way
+    to tell whether they had ever saved anything.
+
+    So the address outlives the decision. `enabled` is what a round consults;
+    the address is what the user typed, kept until they say to forget it —
+    which DELETE still does, and which account deletion still does.
+
+    DEFAULT TRUE, and every existing row is an address somebody saved while
+    this was the only state there was. They were all on.
+    """
+    await db.execute(
+        "ALTER TABLE silnt.tango_ln_addresses "
+        "ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT true"
+    )

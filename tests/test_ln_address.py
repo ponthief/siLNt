@@ -268,3 +268,113 @@ def test_the_table_is_keyed_per_user_per_network():
     assert "PRIMARY KEY (user_id, network)" in body
     # The provider's limits are stored from the moment it was verified.
     assert "min_sendable" in body and "max_sendable" in body
+
+
+# ── off, but remembered ─────────────────────────────────────────────────────
+#
+# "Turn off" used to DELETE the row. The address was the only record that the
+# setting had ever been configured, so switching it off left an empty field
+# and no way back on but remembering what had been typed. The switch and the
+# address are now separate, and the three states below are what the clients
+# read.
+
+
+def test_the_switch_is_its_own_endpoint():
+    """Not the DELETE, and not the PUT either: turning it back on must not
+    depend on the provider answering right now."""
+    body = _fn("views_api.py", "api_tango_ln_address_enabled")
+    assert "set_tango_ln_address_enabled(" in body
+    assert "resolve_ln_address" not in body, (
+        "turning it back on must not re-resolve: a provider that is down "
+        "today would make the switch itself fail"
+    )
+    assert "network: str = Query(...)" in body
+
+
+def test_turning_it_on_is_still_mainnet_only():
+    body = _fn("views_api.py", "api_tango_ln_address_enabled")
+    assert "_require_payout_network(network)" in body
+    # But turning it OFF is not: a network that stops being offered must not
+    # strand somebody with a setting they cannot switch off.
+    assert "if data.enabled:" in body
+
+
+def test_the_switch_needs_something_to_switch():
+    """Enabling with nothing saved would leave the setting looking on and
+    routing nothing."""
+    body = _fn("views_api.py", "api_tango_ln_address_enabled")
+    assert "HTTPStatus.NOT_FOUND" in body
+    crud = _fn("crud.py", "set_tango_ln_address_enabled")
+    assert "return False" in crud
+
+
+def test_switching_off_keeps_the_address():
+    """The point of the whole change. Off must not touch the address."""
+    crud = _fn("crud.py", "set_tango_ln_address_enabled")
+    assert "SET enabled = :on" in crud
+    # The table is called tango_ln_addresses, so look for the assignment.
+    assert "address =" not in crud, "the switch must not write the address"
+    assert "address," not in crud, "nor read it back out"
+    assert "DELETE" not in crud
+
+
+def test_saving_an_address_switches_it_on():
+    """Nobody types an address in to leave it off, and a saved-but-off state
+    reached by saving would look configured and route nothing."""
+    body = _fn("crud.py", "set_tango_ln_address")
+    assert "enabled = true" in body          # the update path
+    assert "enabled)" in body and ":hi, true)" in body   # the insert path
+
+
+def test_the_get_reports_the_switch():
+    body = _fn("views_api.py", "api_tango_ln_address_get")
+    assert '"enabled"' in body
+    assert '.get("enabled")' in body
+
+
+def test_a_round_reads_the_switch_not_just_the_address():
+    """Someone who turned it off keeps their address. "Has an address" stopped
+    meaning "wants this", and a round that ignored the switch would take a
+    change coin from somebody who opted out."""
+    body = _fn("views_api.py", "_tango_routes_change")
+    assert 'if not saved.get("enabled"):' in body
+    assert "return False" in body
+
+
+def _code_lines(body: str) -> list[str]:
+    """Only the lines that run. A comment saying `enabled` is the opposite of
+    a bug here, and two of them say exactly why."""
+    out = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        out.append(line.split("#", 1)[0])
+    return out
+
+
+def test_a_payout_already_owed_ignores_the_switch():
+    """THE OTHER DIRECTION, and it is the one that loses money if it is wrong.
+    By enqueue time the round has routed: the change output already paid this
+    instance and the value is owed. Reading the switch here would strand it.
+    Same for a retry of an owed payout."""
+    for name in ("enqueue_tango_payouts", "api_admin_tango_payout_retry"):
+        body = _fn("views_api.py", name)
+        assert "get_tango_ln_address(" in body, name
+        offenders = [ln for ln in _code_lines(body) if "enabled" in ln]
+        assert not offenders, (name, offenders)
+
+
+def test_the_switch_column_defaults_to_on():
+    """Every row that existed was an address somebody saved while this was the
+    only state there was. They were all on."""
+    src = (ROOT / "migrations.py").read_text()
+    body = src[src.index("async def m042_tango_ln_address_switch"):]
+    assert "ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT true" in body
+
+
+def test_forgetting_it_is_still_possible():
+    """Switching off is about future rounds; forgetting is about what this
+    server holds. Both have to exist."""
+    body = _fn("crud.py", "delete_tango_ln_address")
+    assert "DELETE FROM silnt.tango_ln_addresses" in body
