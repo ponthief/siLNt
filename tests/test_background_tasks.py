@@ -50,6 +50,10 @@ def test_the_loops_that_must_keep_running_still_start():
     for name, loop in {
         "ext_silnt_bgscan": "_background_scan_loop",   # finds received payments
         "ext_silnt_tango": "_tango_sweep_loop",        # frees coins a dead round holds
+        # Delivers routed Tango change. The money is already the instance's by
+        # the time this runs, so a loop that stops starting is users owed
+        # money and nothing trying to send it.
+        "ext_silnt_tango_payout": "_tango_payout_loop",
         "ext_silnt_tamper": "_tamper_sweep_loop",      # BitMail hijack detection
         "ext_silnt_health": "_health_monitor_loop",    # BlindBit/Fulcrum alerts
     }.items():

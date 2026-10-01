@@ -1256,3 +1256,68 @@ async def m040_tango_change_payout(db):
     await db.execute(
         "ALTER TABLE silnt.tango_rounds ADD COLUMN payout_sp_address TEXT"
     )
+
+
+async def m041_tango_change_payouts(db):
+    """One row per routed change output, from collection to delivery.
+
+    A side that gave a Lightning address has its round's change output pay the
+    INSTANCE. The value is then owed to that user and sent over Lightning
+    minus a fee. This is the ledger of that obligation.
+
+    KEYED BY (txid, vout), which is the output itself. A rescan, a restart, a
+    duplicate sweep or two loops running at once must not pay twice, and the
+    only identifier that is unique per obligation is the coin that created it.
+
+    `ln_address` IS STORED HERE, encrypted, rather than read from the user's
+    setting at dispute time. The setting is a live value they can change or
+    clear; this is where the money was actually sent, which is the question a
+    dispute asks. Keeping a copy is the difference between "we sent it" and
+    "we sent it THERE".
+
+    `attempts`, `last_error` and `next_attempt_at` make the retry visible
+    rather than implicit: an operator looking at a stuck payout should be able
+    to see how many times it has been tried and what the provider said.
+
+    Amounts are all three — gross, fee, net — because the fee is revenue that
+    has to be reportable without recomputing it from a percentage that may
+    have changed since.
+    """
+    await db.execute(
+        f"""
+        CREATE TABLE silnt.tango_change_payouts (
+            txid            TEXT NOT NULL,
+            vout            INTEGER NOT NULL,
+            round_id        TEXT NOT NULL,
+            user_id         TEXT NOT NULL,
+            network         TEXT NOT NULL,
+            role            TEXT NOT NULL,          -- 'a' | 'b'
+            -- encrypted, like a saved contact: it is a recipient identity
+            ln_address      TEXT NOT NULL,
+            gross_sats      {db.big_int} NOT NULL,
+            fee_sats        {db.big_int} NOT NULL,
+            net_sats        {db.big_int} NOT NULL,
+            -- pending | paid | failed | unpayable
+            status          TEXT NOT NULL DEFAULT 'pending',
+            attempts        INTEGER NOT NULL DEFAULT 0,
+            last_error      TEXT,
+            -- Unix seconds. Epoch rather than TIMESTAMP because it is
+            -- computed in Python; see tests/test_timestamp_columns.py.
+            next_attempt_at {db.big_int},
+            bolt11          TEXT,
+            payment_hash    TEXT,
+            notified        BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at      TIMESTAMP NOT NULL DEFAULT {db.timestamp_now},
+            paid_at         {db.big_int},
+            PRIMARY KEY (txid, vout)
+        );
+        """
+    )
+    await db.execute(
+        "CREATE INDEX idx_tango_payouts_status "
+        "ON silnt.tango_change_payouts (status, next_attempt_at);"
+    )
+    await db.execute(
+        "CREATE INDEX idx_tango_payouts_user "
+        "ON silnt.tango_change_payouts (user_id);"
+    )

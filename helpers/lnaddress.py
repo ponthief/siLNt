@@ -58,6 +58,17 @@ class LnAddressError(ValueError):
     typed it."""
 
 
+class LnAddressTemporaryError(LnAddressError):
+    """Worth retrying: a timeout, a 5xx, a provider having a moment.
+
+    Split from LnAddressError because the caller's decision differs
+    completely. A permanent failure — no such user, not a Lightning endpoint,
+    an amount the provider will not accept — should stop and tell the person,
+    and retrying it six times just delays the news. A temporary one should be
+    retried, and giving up on it would strand money over a blip.
+    """
+
+
 def split_address(address: str) -> tuple[str, str]:
     """('satoshi', 'coinos.io'), or raise with the reason."""
     text = (address or "").strip().lower()
@@ -164,11 +175,19 @@ async def resolve(address: str) -> PayEndpoint:
         ) as client:
             r = await client.get(url, headers={"Accept": "application/json"})
     except httpx.HTTPError:
-        raise LnAddressError(
+        # Retryable: a save says "try again shortly" to a person, and the
+        # payout executor must not give up on money over a blip.
+        raise LnAddressTemporaryError(
             "Could not reach that address's provider. Check the spelling, or "
             "try again shortly."
         )
+    if r.status_code >= 500:
+        raise LnAddressTemporaryError(
+            f"That address's provider answered {r.status_code}. Try again shortly."
+        )
     if r.status_code != 200:
+        # 404 and friends: no such user. Retrying this is just delaying the
+        # news.
         raise LnAddressError(
             f"That address's provider answered {r.status_code}. Check the spelling."
         )
@@ -179,3 +198,60 @@ async def resolve(address: str) -> PayEndpoint:
     except ValueError:
         raise LnAddressError("That address did not return a Lightning endpoint.")
     return parse_pay_response(doc)
+
+
+async def request_invoice(endpoint: PayEndpoint, sats: int) -> str:
+    """Ask the provider for a bolt11 for `sats`. Returns the payment request.
+
+    LUD-06: GET the callback with `amount` in MILLISATOSHIS. Getting that unit
+    wrong by a factor of a thousand would ask for a payout 1000x too small and
+    the provider would very likely accept it.
+    """
+    msat = int(sats) * 1000
+    if not endpoint.accepts_sats(sats):
+        raise LnAddressError(
+            f"That address accepts between {endpoint.min_sendable_msat // 1000} "
+            f"and {endpoint.max_sendable_msat // 1000} sats, and this payout "
+            f"is {int(sats)}."
+        )
+    sep = "&" if "?" in endpoint.callback else "?"
+    url = f"{endpoint.callback}{sep}amount={msat}"
+    if not url.lower().startswith("https://"):
+        raise LnAddressError("That address's provider gave an insecure callback.")
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=False) as client:
+            r = await client.get(url, headers={"Accept": "application/json"})
+    except httpx.HTTPError:
+        raise LnAddressTemporaryError(
+            "Could not reach that address's provider to get an invoice."
+        )
+    if r.status_code >= 500:
+        raise LnAddressTemporaryError(
+            f"That address's provider answered {r.status_code}."
+        )
+    if r.status_code != 200:
+        raise LnAddressError(
+            f"That address's provider refused to make an invoice "
+            f"({r.status_code})."
+        )
+    if len(r.content) > _MAX_BYTES:
+        raise LnAddressError("That address's provider returned something too large.")
+    try:
+        doc = r.json()
+    except ValueError:
+        raise LnAddressError("That address's provider did not return an invoice.")
+    if not isinstance(doc, dict):
+        raise LnAddressError("That address's provider did not return an invoice.")
+    if (doc.get("status") or "").upper() == "ERROR":
+        raise LnAddressError(
+            (doc.get("reason") or "").strip()[:200]
+            or "That address's provider refused the payment."
+        )
+    pr = (doc.get("pr") or doc.get("payment_request") or "").strip()
+    if not pr:
+        raise LnAddressError("That address's provider did not return an invoice.")
+    # Any network's bolt11: the amount is checked by the payer, not here —
+    # LNbits refuses to pay an invoice for a different amount than it expects.
+    if not re.match(r"^ln(bc|tbs?|bcrt)[0-9]", pr, re.IGNORECASE):
+        raise LnAddressError("That address's provider returned something that is not an invoice.")
+    return pr

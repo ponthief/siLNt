@@ -16,6 +16,7 @@ from .views_api import (
     run_send_confirmation_checks,
     run_tango_labelling,
     run_tango_sweep,
+    run_tango_payouts,
     BACKGROUND_SCAN_POLL_SECONDS,
     BACKGROUND_SCAN_INTERVAL_SECONDS,
 )
@@ -107,6 +108,24 @@ async def _background_scan_loop():
             logger.error(f"[silnt] background scan loop error: {exc_text(exc)}")
         await asyncio.sleep(BACKGROUND_SCAN_POLL_SECONDS)
 
+async def _tango_payout_loop():
+    # Delivering routed Tango change. The money is already the instance's by
+    # the time this runs — the round's change output paid our SP address — so
+    # every pass is work on an obligation already taken on, and a pass that
+    # does nothing is a user still waiting.
+    #
+    # Every two minutes: the backoff inside a payout decides when IT is next
+    # tried, so this only has to come round often enough not to add delay of
+    # its own.
+    while True:
+        try:
+            res = await run_tango_payouts()
+            if res and any(res.values()):
+                logger.info(f"[silnt] tango payouts: {res}")
+        except Exception as exc:
+            logger.error(f"[silnt] tango payout loop error: {exc_text(exc)}")
+        await asyncio.sleep(120)
+
 async def _tango_sweep_loop():
     # Closes rounds that ran out of time, which is what gives both sides' coins
     # back — a live round holds a claim on them, and the side who would close
@@ -160,6 +179,10 @@ def siLNt_start():
     scheduled_tasks.append(bgscan_task)
     tango_task = create_permanent_unique_task("ext_silnt_tango", _tango_sweep_loop)
     scheduled_tasks.append(tango_task)
+    payout_task = create_permanent_unique_task(
+        "ext_silnt_tango_payout", _tango_payout_loop
+    )
+    scheduled_tasks.append(payout_task)
 
 # in the ext stop hook:
 def siLNt_stop():

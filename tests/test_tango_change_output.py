@@ -381,3 +381,212 @@ def test_the_generated_pair_is_checked_before_it_is_handed_over():
     configuration the save will refuse."""
     body = _fn("views_api.py", "api_admin_tango_change_address")
     assert "scan_key_matches(sp_address, scan_key)" in body
+
+
+# ── delivering it ───────────────────────────────────────────────────────────
+#
+# The money is already the instance's by the time any of this runs: the
+# round's change output paid our SP address. Every rule here is about an
+# obligation already taken on, which is why none of it fails silently.
+
+
+def _payoutrun():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "silnt_payoutrun_for_tests", ROOT / "helpers" / "tangopayoutrun.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+PR = _payoutrun()
+
+
+@pytest.mark.parametrize(
+    "tip,block,want",
+    [
+        (900_000, 900_000, 1),      # in the tip block: one confirmation
+        (900_002, 900_000, 3),
+        (900_000, None, 0),         # not mined
+        (None, 900_000, 0),         # tip unknown
+        (None, None, 0),
+        (900_000, 900_005, 0),      # block ahead of the tip: mid-reorg, not negative
+    ],
+)
+def test_confirmations_counts_the_tip_block(tip, block, want):
+    assert PR.confirmations(tip, block) == want
+
+
+def test_a_payout_waits_for_the_configured_depth():
+    assert not PR.is_confirmed_enough(900_000, 900_000, 3)
+    assert not PR.is_confirmed_enough(900_001, 900_000, 3)
+    assert PR.is_confirmed_enough(900_002, 900_000, 3)
+
+
+def test_zero_confirmations_is_never_enough():
+    """A one-confirmation payout can be reversed by a reorg and a Lightning
+    payment cannot be clawed back, so a minimum of 0 is read as 1."""
+    assert not PR.is_confirmed_enough(900_000, None, 0)
+    assert PR.is_confirmed_enough(900_000, 900_000, 0)
+
+
+def test_the_backoff_grows_then_flattens():
+    seen = [PR.backoff_for(n) for n in range(8)]
+    assert seen == sorted(seen), seen
+    assert seen[-1] == seen[-2], "it should flatten rather than grow forever"
+    assert PR.backoff_for(-5) == PR.backoff_for(0)
+
+
+def test_a_permanent_failure_stops_immediately():
+    """"No such user at that domain" does not become true by asking again, and
+    five more attempts only delay telling somebody their address is wrong —
+    which is the one thing they can act on."""
+    assert PR.give_up(attempts=1, permanent=True)
+    assert PR.status_after(1, permanent=True) == "unpayable"
+
+
+def test_a_temporary_failure_is_retried_up_to_a_limit():
+    for n in range(1, PR.MAX_ATTEMPTS):
+        assert PR.status_after(n, permanent=False) == "pending", n
+    assert PR.status_after(PR.MAX_ATTEMPTS, permanent=False) == "failed"
+
+
+def test_unpayable_and_failed_mean_different_things():
+    """One is waiting on the user, the other on the operator, and an operator
+    reading the list has to be able to tell at a glance."""
+    assert PR.status_after(99, permanent=True) == "unpayable"
+    assert PR.status_after(99, permanent=False) == "failed"
+    assert PR.failure_body("unpayable") != PR.failure_body("failed")
+
+
+def test_the_failure_notification_never_mentions_an_amount():
+    """It goes through FCM, and therefore Google, in plaintext. CLAUDE.md is
+    explicit: push notifications must not mention amounts."""
+    import re
+    for text in (PR.PAYOUT_FAILED_TITLE, PR.failure_body("unpayable"),
+                 PR.failure_body("failed")):
+        assert not re.search(r"\d", text), text
+        assert "sat" not in text.lower(), text
+
+
+def test_the_failure_notification_says_what_to_do():
+    for status in ("unpayable", "failed"):
+        assert "Open WhiSPa" in PR.failure_body(status), status
+
+
+def test_the_fee_is_stored_not_recomputed_at_payment_time():
+    """Recomputing it when the payment goes out would price the same payout
+    differently if the operator changed the percentage in between, and the
+    figure in the ledger has to be the figure that was charged."""
+    body = _fn("views_api.py", "enqueue_tango_payouts")
+    assert "payout_plan(" in body
+    attempt = _fn("views_api.py", "_attempt_tango_payout")
+    assert "payout_plan" not in attempt
+    assert 'row["net_sats"]' in attempt
+
+
+def test_a_payout_is_created_once_per_output():
+    """Keyed by (txid, vout) so a rescan, a restart or two overlapping sweeps
+    cannot create a second obligation for one coin."""
+    body = _fn("views_api.py", "enqueue_tango_payouts")
+    assert "await get_tango_payout(rnd.txid, vout)" in body
+    crud = (ROOT / "crud.py").read_text()
+    assert "PRIMARY KEY (txid, vout)" in (ROOT / "migrations.py").read_text()
+    assert "async def create_tango_payout" in crud
+
+
+def test_a_cleared_address_still_records_the_debt():
+    """They changed the setting between the round and the payout. The money is
+    still owed, so the row exists and is visible as unpayable rather than
+    silently skipped forever."""
+    body = _fn("views_api.py", "enqueue_tango_payouts")
+    assert "has no Lightning address" in body
+    attempt = _fn("views_api.py", "_attempt_tango_payout")
+    assert "No Lightning address on record" in attempt
+
+
+def test_a_change_that_no_longer_clears_the_fee_is_paid_in_full():
+    """The round was planned under a different fee. The user is owed the whole
+    thing rather than nothing."""
+    body = _fn("views_api.py", "enqueue_tango_payouts")
+    assert "paying it in full" in body
+
+
+def test_the_address_sent_to_is_stored_on_the_payout():
+    """The setting is a live value they can change or clear. This is where the
+    money actually went, which is the question a dispute asks."""
+    mig = (ROOT / "migrations.py").read_text()
+    body = mig[mig.index("async def m041_tango_change_payouts"):]
+    assert "ln_address      TEXT NOT NULL" in body
+    assert "we sent it THERE" in body
+
+
+def test_the_payout_ledger_survives_account_deletion_without_the_identity():
+    """It is the instance's financial record as well as the user's data, and
+    the txid in it is public chain data either way."""
+    crud = (ROOT / "crud.py").read_text()
+    assert "async def redact_tango_payouts_for_user" in crud
+    body = _fn("crud.py", "redact_tango_payouts_for_user")
+    assert "ln_address = ''" in body and "user_id = 'deleted'" in body
+    assert "DELETE FROM silnt.tango_change_payouts" not in crud, (
+        "the amounts stay; only the identity goes"
+    )
+
+
+def test_fees_are_only_counted_on_payouts_that_went_out():
+    """A fee on a payout that never went out is not revenue — the instance is
+    holding the whole change, not earning part of it — and counting it would
+    overstate earnings by exactly what it failed to deliver."""
+    body = _fn("crud.py", "tango_payout_totals")
+    assert '"fees_earned_sats": int(paid.get("fee_sats", 0))' in body
+    assert "owed_sats" in body
+
+
+def test_the_admin_list_shows_what_a_dispute_needs():
+    body = _fn("views_api.py", "api_admin_tango_payouts")
+    assert "require_admin(key_info)" in body
+    assert "tango_payout_totals(" in body
+
+
+def test_a_stopped_payout_can_be_requeued_with_a_fresh_address():
+    """The usual reason one is retried is that the user just fixed it, and
+    retrying the old address would fail the same way."""
+    body = _fn("views_api.py", "api_admin_tango_payout_retry")
+    assert "get_tango_ln_address(" in body
+    assert "requeue_tango_payout(" in body
+    # A paid payout is not retryable, which would be a double payment.
+    assert "already been paid" in body
+
+
+def test_the_requeue_resets_the_backoff():
+    body = _fn("crud.py", "requeue_tango_payout")
+    assert "attempts = 0" in body
+    assert "notified = FALSE" in body
+
+
+def test_a_user_can_see_their_own_payouts():
+    """"Where is my change?" should have an answer in the app, not only in the
+    admin console."""
+    body = _fn("views_api.py", "api_my_tango_payouts")
+    assert "list_tango_payouts_for_user(" in body
+
+
+def test_one_stuck_payout_does_not_stop_the_others():
+    body = _fn("views_api.py", "run_tango_payouts")
+    assert "continue" in body
+
+
+def test_only_rounds_that_actually_routed_are_scanned():
+    """Every round ever broadcast would otherwise be read and depth-checked
+    over the network once a minute, and almost none of them route."""
+    body = _fn("crud.py", "list_broadcast_tango_rounds_with_payouts")
+    assert "a_payout = TRUE OR b_payout = TRUE" in body
+    assert "status = 'BROADCAST'" in body
+
+
+def test_a_depth_check_that_fails_delays_rather_than_pays():
+    """The safe direction when the alternative is paying out against a
+    transaction a reorg removes."""
+    body = _fn("views_api.py", "_tango_tx_depth")
+    assert body.count("return 0") >= 4

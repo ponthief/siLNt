@@ -210,6 +210,15 @@ from .crud import (
     get_tango_ln_address,
     set_tango_ln_address,
     delete_tango_ln_address,
+    create_tango_payout,
+    get_tango_payout,
+    update_tango_payout,
+    list_due_tango_payouts,
+    list_tango_payouts,
+    list_tango_payouts_for_user,
+    list_broadcast_tango_rounds_with_payouts,
+    requeue_tango_payout,
+    tango_payout_totals,
     touch_sp_contact,
     list_silnt_user_ids,
     get_ntfy_config,
@@ -4446,6 +4455,316 @@ async def api_tango_ln_address_delete(
     await delete_tango_ln_address(key_info.wallet.user, network)
     return {"ok": True}
 
+
+
+# ── Tango change payouts: collect, then deliver ─────────────────────────────
+
+
+async def _tango_tx_depth(network: str, txid: str) -> int:
+    """Confirmations for a broadcast round's transaction, 0 if not yet mined.
+
+    Two reads rather than one, because an explorer's tx status gives the block
+    it is in and not how deep that is. A failure anywhere returns 0, which
+    delays a payout rather than paying one early — the safe direction when the
+    alternative is paying out against a transaction a reorg removes.
+    """
+    from .helpers.tangopayoutrun import confirmations
+
+    cfg = await get_backend_config(network)
+    base = (cfg.mempool_url or "").rstrip("/")
+    if not base:
+        return 0
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            st = await c.get(f"{base}/api/tx/{txid}/status")
+            if st.status_code != 200:
+                return 0
+            block_height = (st.json() or {}).get("block_height")
+            if not block_height:
+                return 0
+            tip = await c.get(f"{base}/api/blocks/tip/height")
+            if tip.status_code != 200:
+                return 0
+            tip_height = int(tip.text.strip())
+    except (httpx.HTTPError, ValueError) as e:
+        logger.warning(f"tango payout: depth check for {txid}: {_exc_text(e)}")
+        return 0
+    return confirmations(tip_height, block_height)
+
+
+async def enqueue_tango_payouts() -> int:
+    """Turn confirmed routed change outputs into payout obligations.
+
+    Idempotent by the payouts table's primary key (txid, vout): a rescan, a
+    restart or two sweeps overlapping cannot create a second obligation for
+    one output.
+
+    The FEE IS COMPUTED HERE, once, and stored. Recomputing it at payment time
+    would price the same payout differently if the operator changed the
+    percentage in between, and the figure in the ledger has to be the figure
+    that was charged.
+    """
+    from .helpers.tangopayout import payout_plan
+
+    made = 0
+    rounds = await list_broadcast_tango_rounds_with_payouts()
+    for rnd in rounds:
+        cfg = await get_backend_config(rnd.network)
+        if not cfg.tango_payout_ready(rnd.network):
+            continue
+        values, vouts = _tango_outputs(rnd)
+        if not values:
+            continue
+        # _tango_tx_depth already returns a COUNT, so compare it directly
+        # rather than handing it to is_confirmed_enough, which takes two
+        # heights.
+        depth = await _tango_tx_depth(rnd.network, rnd.txid)
+        if depth < max(1, int(cfg.tango_change_min_confirmations or 1)):
+            continue
+        for role, routed, spk, change, user_id in (
+            ("a", rnd.a_payout, rnd.a_change_spk, rnd.a_change_sats, rnd.a_user_id),
+            ("b", rnd.b_payout, rnd.b_change_spk, rnd.b_change_sats, rnd.b_user_id),
+        ):
+            if not routed or not spk or not change or not user_id:
+                continue
+            vout = vouts.get(spk.lower())
+            if vout is None:
+                logger.warning(
+                    f"tango payout: {rnd.id} routed {role}'s change but that "
+                    f"script is not in the broadcast transaction"
+                )
+                continue
+            if await get_tango_payout(rnd.txid, vout):
+                continue
+            saved = await get_tango_ln_address(user_id, rnd.network)
+            address = (saved or {}).get("address") or ""
+            if not address:
+                # They cleared the setting between the round and now. The
+                # money is still owed, so the row is created anyway — with no
+                # address it is unpayable, which is visible in the console
+                # rather than silently skipped forever.
+                logger.warning(
+                    f"tango payout: {rnd.id}/{role} has no Lightning address"
+                )
+            plan = payout_plan(
+                int(change),
+                fee_pct=cfg.tango_change_fee_pct,
+                fee_floor_sats=cfg.tango_change_fee_floor_sats,
+            )
+            if not plan.routed:
+                # The change was routed by a round planned under a different
+                # fee, and under today's it would not be. The user is owed the
+                # whole thing rather than nothing.
+                logger.warning(
+                    f"tango payout: {rnd.id}/{role} change {change} does not "
+                    f"clear today's fee ({plan.reason}); paying it in full"
+                )
+                gross, fee, net = int(change), 0, int(change)
+            else:
+                gross, fee, net = plan.gross_sats, plan.fee_sats, plan.net_sats
+            if await create_tango_payout(
+                txid=rnd.txid, vout=vout, round_id=rnd.id, user_id=user_id,
+                network=rnd.network, role=role, ln_address=address,
+                gross_sats=gross, fee_sats=fee, net_sats=net,
+            ):
+                made += 1
+    return made
+
+
+async def _attempt_tango_payout(row: dict) -> str:
+    """One delivery attempt. Returns the new status.
+
+    Resolve, ask for an invoice, pay it. Each step can fail two ways and the
+    difference decides everything downstream — see tangopayoutrun.status_after.
+    """
+    from .helpers.lnaddress import (
+        LnAddressError,
+        LnAddressTemporaryError,
+        request_invoice,
+        resolve as resolve_ln_address_now,
+    )
+    from .helpers.tangopayoutrun import (
+        failure_body,
+        next_attempt_at,
+        status_after,
+        PAYOUT_FAILED_TITLE,
+    )
+
+    txid, vout = row["txid"], int(row["vout"])
+    attempts = int(row["attempts"] or 0) + 1
+    permanent = False
+    error = ""
+    bolt11 = ""
+
+    cfg = await get_backend_config(row["network"])
+    wallet_id = (cfg.tango_change_payout_wallet_id or "").strip()
+    address = (row.get("ln_address") or "").strip()
+
+    if not address:
+        permanent, error = True, "No Lightning address on record for this payout."
+    elif not wallet_id:
+        # Ours, and not retryable by waiting — but not the user's fault either,
+        # so it is not 'unpayable'. An operator has to fix it.
+        error = "No payout wallet is configured on this server."
+    else:
+        try:
+            endpoint = await resolve_ln_address_now(address)
+            bolt11 = await request_invoice(endpoint, int(row["net_sats"]))
+        except LnAddressTemporaryError as e:
+            error = str(e)
+        except LnAddressError as e:
+            permanent, error = True, str(e)
+        except Exception as e:
+            error = _exc_text(e)
+
+    if bolt11 and not error:
+        try:
+            from lnbits.core.services import pay_invoice
+
+            payment = await pay_invoice(
+                wallet_id=wallet_id,
+                payment_request=bolt11,
+                description=f"Tango change payout {txid[:12]}…:{vout}",
+                extra={"tag": "silnt_tango_change", "round": row["round_id"]},
+            )
+            await update_tango_payout(
+                txid, vout,
+                status="paid",
+                attempts=attempts,
+                bolt11=bolt11,
+                payment_hash=getattr(payment, "payment_hash", None)
+                or getattr(payment, "checking_id", None),
+                paid_at=int(time.time()),
+                last_error=None,
+            )
+            logger.info(
+                f"tango payout {txid}:{vout} paid {row['net_sats']} sats "
+                f"(fee {row['fee_sats']})"
+            )
+            return "paid"
+        except Exception as e:
+            # No route, no liquidity, an invoice that expired while we held it.
+            # Ours to fix, and worth retrying.
+            error = _exc_text(e)
+
+    status = status_after(attempts, permanent)
+    fields = {
+        "status": status,
+        "attempts": attempts,
+        "last_error": (error or "unknown")[:500],
+    }
+    if status == "pending":
+        fields["next_attempt_at"] = next_attempt_at(int(time.time()), attempts)
+    await update_tango_payout(txid, vout, **fields)
+    logger.warning(
+        f"tango payout {txid}:{vout} attempt {attempts} -> {status}: {error}"
+    )
+
+    # Tell them once, when it stops being retried. NO AMOUNT — this goes
+    # through Google in plaintext.
+    if status != "pending" and not row.get("notified"):
+        await _notify_tango(
+            row["user_id"], PAYOUT_FAILED_TITLE, failure_body(status)
+        )
+        await update_tango_payout(txid, vout, notified=True)
+    return status
+
+
+async def run_tango_payouts() -> dict:
+    """One pass: create what is due, then deliver what is owed."""
+    out = {"enqueued": 0, "paid": 0, "retrying": 0, "stopped": 0}
+    try:
+        out["enqueued"] = await enqueue_tango_payouts()
+    except Exception as e:
+        logger.error(f"[silnt] tango payout enqueue: {_exc_text(e)}")
+
+    try:
+        due = await list_due_tango_payouts()
+    except Exception as e:
+        logger.error(f"[silnt] tango payout queue: {_exc_text(e)}")
+        return out
+
+    for row in due:
+        try:
+            status = await _attempt_tango_payout(row)
+        except Exception as e:
+            # One stuck payout must not stop the others.
+            logger.error(
+                f"[silnt] tango payout {row.get('txid')}: {_exc_text(e)}"
+            )
+            continue
+        if status == "paid":
+            out["paid"] += 1
+        elif status == "pending":
+            out["retrying"] += 1
+        else:
+            out["stopped"] += 1
+    return out
+
+
+@silnt_api_router.get("/api/v1/admin/tango/payouts")
+async def api_admin_tango_payouts(
+    network: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """Every payout and where it got to, plus the totals.
+
+    Includes the Lightning address each one was sent to, which is the whole
+    reason it is stored: "I never received it" is answered by what the row
+    says, not by what the user's setting says today.
+    """
+    require_admin(key_info)
+    rows = await list_tango_payouts(
+        network=network, status=status, limit=limit, offset=offset
+    )
+    return {
+        "payouts": rows,
+        "totals": await tango_payout_totals(network),
+    }
+
+
+@silnt_api_router.post("/api/v1/admin/tango/payouts/{txid}/{vout}/retry")
+async def api_admin_tango_payout_retry(
+    txid: str,
+    vout: int,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """Put a stopped payout back in the queue.
+
+    The two ways one stops both have fixes an operator or a user can apply —
+    a corrected address, a rebalanced channel — and neither of them un-stops
+    the row on its own. Attempts reset, so the backoff starts over rather than
+    waiting an hour on the first try.
+    """
+    require_admin(key_info)
+    row = await get_tango_payout(txid, vout)
+    if not row:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="No such payout.")
+    if row["status"] == "paid":
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail="That payout has already been paid.",
+        )
+    # Re-read the address: the usual reason a payout is being retried is that
+    # the user fixed it, and retrying the old one would fail the same way.
+    saved = await get_tango_ln_address(row["user_id"], row["network"])
+    address = (saved or {}).get("address") or row["ln_address"]
+    await requeue_tango_payout(txid, vout, address)
+    return {"ok": True, "status": "pending"}
+
+
+@silnt_api_router.get("/api/v1/tango/payouts")
+async def api_my_tango_payouts(
+    network: str = Query(...),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """A user's own payouts, so "where is my change?" has an answer in the app
+    rather than only in the admin console."""
+    rows = await list_tango_payouts_for_user(key_info.wallet.user, network)
+    return {"payouts": rows}
 
 # ── Admin: delete a user account ──────────────────────────────────────────────
 async def _resolve_account(identifier: str):

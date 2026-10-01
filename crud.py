@@ -1817,6 +1817,11 @@ async def delete_all_silnt_data_for_user(user_id: str) -> dict:
     await db.execute(
         "DELETE FROM silnt.tango_ln_addresses WHERE user_id = :uid", {"uid": user_id}
     )
+    # Payout rows are the ONE exception to purging: they are the instance's
+    # own financial record as well as this user's data, and the txid in them is
+    # public chain data regardless. The identity goes, the amounts stay. See
+    # redact_tango_payouts_for_user.
+    await redact_tango_payouts_for_user(user_id)
     # Admin alerts reference the user only inside their meta JSON (no column), so
     # clean them via the meta-aware helper rather than a DELETE ... WHERE.
     await delete_admin_alerts_for_user(user_id)
@@ -3767,4 +3772,251 @@ async def delete_tango_ln_address(user_id: str, network: str) -> None:
         "DELETE FROM silnt.tango_ln_addresses "
         "WHERE user_id = :uid AND network = :net",
         {"uid": user_id, "net": network},
+    )
+
+
+# ── Tango change payouts ────────────────────────────────────────────────────
+#
+# The ledger of what the instance collected and owes. Keyed by the output that
+# created the obligation, so nothing pays twice.
+
+PAYOUT_LIVE = ("pending",)
+PAYOUT_TERMINAL = ("paid", "failed", "unpayable")
+
+
+def _payout_row(row) -> dict:
+    d = dict(row)
+    d["ln_address"] = _pj_decrypt(d.get("ln_address") or "") or ""
+    return d
+
+
+async def create_tango_payout(
+    *,
+    txid: str,
+    vout: int,
+    round_id: str,
+    user_id: str,
+    network: str,
+    role: str,
+    ln_address: str,
+    gross_sats: int,
+    fee_sats: int,
+    net_sats: int,
+) -> bool:
+    """Record an obligation. False when one already exists for this output.
+
+    The existence check and the insert are not atomic, so a unique PRIMARY KEY
+    on (txid, vout) is what actually prevents a double payout — this returns
+    False on the race rather than raising, because two sweeps overlapping is
+    ordinary and not an error.
+    """
+    existing = await db.fetchone(
+        "SELECT txid FROM silnt.tango_change_payouts "
+        "WHERE txid = :txid AND vout = :vout",
+        {"txid": txid, "vout": int(vout)},
+    )
+    if existing:
+        return False
+    try:
+        await db.execute(
+            "INSERT INTO silnt.tango_change_payouts "
+            "(txid, vout, round_id, user_id, network, role, ln_address, "
+            " gross_sats, fee_sats, net_sats, next_attempt_at) "
+            "VALUES (:txid, :vout, :rid, :uid, :net, :role, :addr, "
+            " :gross, :fee, :net_sats, :now)",
+            {
+                "txid": txid, "vout": int(vout), "rid": round_id,
+                "uid": user_id, "net": network, "role": role,
+                "addr": _pj_encrypt((ln_address or "").strip()),
+                "gross": int(gross_sats), "fee": int(fee_sats),
+                "net_sats": int(net_sats), "now": int(time.time()),
+            },
+        )
+    except Exception as e:
+        # Almost certainly the primary key, which is the race above losing.
+        logger.warning(f"tango payout for {txid}:{vout} not recorded: {e}")
+        return False
+    return True
+
+
+async def get_tango_payout(txid: str, vout: int) -> Optional[dict]:
+    row = await db.fetchone(
+        "SELECT * FROM silnt.tango_change_payouts "
+        "WHERE txid = :txid AND vout = :vout",
+        {"txid": txid, "vout": int(vout)},
+    )
+    return _payout_row(row) if row else None
+
+
+async def list_due_tango_payouts(now: Optional[int] = None, limit: int = 25) -> list:
+    """Pending payouts whose backoff has elapsed, oldest first."""
+    when = int(now if now is not None else time.time())
+    rows = await db.fetchall(
+        "SELECT * FROM silnt.tango_change_payouts "
+        "WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= :now) "
+        "ORDER BY created_at ASC LIMIT :lim",
+        {"now": when, "lim": int(limit)},
+    )
+    return [_payout_row(r) for r in rows]
+
+
+async def update_tango_payout(txid: str, vout: int, **fields) -> None:
+    if not fields:
+        return
+    sets = ", ".join(f"{k} = :{k}" for k in fields)
+    await db.execute(
+        f"UPDATE silnt.tango_change_payouts SET {sets} "
+        f"WHERE txid = :_txid AND vout = :_vout",
+        {**fields, "_txid": txid, "_vout": int(vout)},
+    )
+
+
+async def list_tango_payouts(
+    network: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list:
+    """For the admin console. Newest first — an operator looking at this is
+    almost always looking at what just happened or what is stuck."""
+    where = []
+    values: dict = {"lim": int(limit), "off": int(offset)}
+    if network:
+        where.append("network = :net")
+        values["net"] = network
+    if status:
+        where.append("status = :st")
+        values["st"] = status
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    rows = await db.fetchall(
+        f"SELECT * FROM silnt.tango_change_payouts{clause} "
+        f"ORDER BY created_at DESC LIMIT :lim OFFSET :off",
+        values,
+    )
+    return [_payout_row(r) for r in rows]
+
+
+async def tango_payout_totals(network: Optional[str] = None) -> dict:
+    """What was collected, what was delivered, and what is still owed.
+
+    Fees are summed over PAID rows only. A fee on a payout that never went out
+    is not revenue — the instance is holding the whole change, not earning
+    part of it — and counting it would overstate earnings by exactly the
+    amount it has failed to deliver.
+    """
+    clause, values = ("", {})
+    if network:
+        clause, values = (" WHERE network = :net", {"net": network})
+    rows = await db.fetchall(
+        f"SELECT status, COUNT(*) AS n, "
+        f"COALESCE(SUM(gross_sats), 0) AS gross, "
+        f"COALESCE(SUM(fee_sats), 0) AS fee, "
+        f"COALESCE(SUM(net_sats), 0) AS net "
+        f"FROM silnt.tango_change_payouts{clause} GROUP BY status",
+        values,
+    )
+    by_status = {
+        r["status"]: {
+            "count": int(r["n"]), "gross_sats": int(r["gross"]),
+            "fee_sats": int(r["fee"]), "net_sats": int(r["net"]),
+        }
+        for r in rows
+    }
+    paid = by_status.get("paid", {})
+    pending = by_status.get("pending", {})
+    failed = by_status.get("failed", {})
+    unpayable = by_status.get("unpayable", {})
+    return {
+        "by_status": by_status,
+        # The headline: fees actually earned, on money actually delivered.
+        "fees_earned_sats": int(paid.get("fee_sats", 0)),
+        "paid_count": int(paid.get("count", 0)),
+        "paid_net_sats": int(paid.get("net_sats", 0)),
+        "collected_sats": sum(int(v.get("gross_sats", 0)) for v in by_status.values()),
+        # Still ours and still owed: the solvency question.
+        "owed_sats": int(pending.get("net_sats", 0))
+        + int(failed.get("net_sats", 0))
+        + int(unpayable.get("net_sats", 0)),
+        "undelivered_count": int(pending.get("count", 0))
+        + int(failed.get("count", 0))
+        + int(unpayable.get("count", 0)),
+    }
+
+
+async def redact_tango_payouts_for_user(user_id: str) -> None:
+    """Account deleted: drop the identity, keep the money.
+
+    NOT a delete, and the exception is deliberate — every other table keyed by
+    user_id is purged outright. A payout row is two things at once:
+
+      * the instance's own financial record. What it collected, what it kept
+        as a fee and what it sent on is bookkeeping, and the txid in it is
+        public chain data either way. Deleting it would make the earnings
+        figure disagree with the chain and the fee revenue unauditable.
+      * the answer to "I never got my change". That is why the Lightning
+        address is stored at all.
+
+    Those pull opposite ways once someone asks to be forgotten, and holding
+    their Lightning address indefinitely afterwards is the part that is not
+    defensible — it is the one piece of off-chain identity in the row. So the
+    address and the user_id go and the amounts stay. A dispute from an account
+    that no longer exists loses its evidence, which is the cost of the person
+    having asked to be removed.
+    """
+    await db.execute(
+        "UPDATE silnt.tango_change_payouts "
+        "SET ln_address = '', user_id = 'deleted' WHERE user_id = :uid",
+        {"uid": user_id},
+    )
+
+
+async def list_broadcast_tango_rounds_with_payouts(limit: int = 200) -> list:
+    """Broadcast rounds where at least one side routed its change.
+
+    Narrowed in SQL rather than filtered in Python: every round ever
+    broadcast would otherwise be read and depth-checked over the network once
+    a minute, and almost none of them route.
+    """
+    rows = await db.fetchall(
+        "SELECT * FROM silnt.tango_rounds "
+        "WHERE status = 'BROADCAST' AND txid IS NOT NULL AND txid <> '' "
+        "  AND (a_payout = TRUE OR b_payout = TRUE) "
+        "ORDER BY updated_at DESC LIMIT :lim",
+        {"lim": int(limit)},
+    )
+    return [TangoRound(**r) for r in rows]
+
+
+async def list_tango_payouts_for_user(user_id: str, network: str) -> list:
+    rows = await db.fetchall(
+        "SELECT * FROM silnt.tango_change_payouts "
+        "WHERE user_id = :uid AND network = :net "
+        "ORDER BY created_at DESC LIMIT 50",
+        {"uid": user_id, "net": network},
+    )
+    return [_payout_row(r) for r in rows]
+
+
+async def requeue_tango_payout(txid: str, vout: int, ln_address: str) -> None:
+    """Put a stopped payout back in the queue, against a fresh address.
+
+    The address is re-encrypted here rather than by the caller: _pj_encrypt is
+    this module's, and a caller reaching for it would be the start of
+    plaintext finding its way into an UPDATE somewhere.
+
+    Attempts reset, so the backoff starts over — the usual reason a payout is
+    being retried is that somebody just fixed the thing that broke it, and
+    making them wait an hour for the first attempt would be absurd.
+    """
+    await db.execute(
+        "UPDATE silnt.tango_change_payouts "
+        "SET status = 'pending', attempts = 0, next_attempt_at = :now, "
+        "    last_error = NULL, notified = FALSE, ln_address = :addr "
+        "WHERE txid = :txid AND vout = :vout",
+        {
+            "now": int(time.time()),
+            "addr": _pj_encrypt((ln_address or "").strip()),
+            "txid": txid,
+            "vout": int(vout),
+        },
     )
