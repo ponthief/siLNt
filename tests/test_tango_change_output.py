@@ -25,6 +25,7 @@ the instance would lose is the ability to find its own coin.
 
 from __future__ import annotations
 
+import ast
 import json
 import pathlib
 import subprocess
@@ -708,3 +709,90 @@ def test_the_threshold_is_configurable_and_defaulted():
 def test_the_console_shows_the_balance_against_what_is_owed():
     body = _fn("views_api.py", "api_admin_tango_payouts")
     assert "tango_payout_liquidity(" in body
+
+
+# ── routing is PER SIDE ─────────────────────────────────────────────────────
+#
+# One party giving a Lightning address must have no bearing on the other. The
+# partner who gave none keeps their change on chain, in their own wallet,
+# exactly as every round did before this setting existed — and the setting is
+# described to users as optional, which is only true if that holds.
+#
+# The failure this guards against is the expensive direction: a round-wide
+# flag would route BOTH change outputs to the instance's SP address, taking a
+# coin from somebody who never offered it and owing them nothing over
+# Lightning, because no payout row is created for a side that did not route.
+
+
+def test_each_side_has_its_own_flag_and_its_own_tweak():
+    src = (ROOT / "models.py").read_text()
+    body = src[src.index("class TangoRound"):]
+    for field in ("a_payout", "b_payout", "a_payout_tweak", "b_payout_tweak"):
+        assert f"{field}:" in body, field
+    # One address, because it is the INSTANCE's and there is only one of those.
+    assert "payout_sp_address:" in body
+
+
+def test_each_sides_flag_is_read_from_that_sides_own_setting():
+    """A's at propose, B's at accept, each from its own user id."""
+    propose = _fn("views_api.py", "api_tango_propose")
+    assert "a_payout, payout_addr = await _tango_routes_change(uid, " in propose
+    assert "b_payout" not in propose, (
+        "propose must not decide anything about B: B has not joined yet, and "
+        "its setting is read when it does"
+    )
+    accept = _fn("views_api.py", "api_tango_accept")
+    assert "b_payout, b_payout_addr = await _tango_routes_change(uid, " in accept
+    # And accept must not touch A's, which a signature already depends on.
+    assert "a_payout=" not in accept
+
+
+def test_a_side_that_did_not_route_supplies_its_own_change_script():
+    """The whole of "optional". B without an address sends change_spk and it
+    is required; B with one is refused for sending it."""
+    accept = _fn("views_api.py", "api_tango_accept")
+    assert "elif amounts[\"b_change\"] and not data.change_spk:" in accept
+    assert "this needs a change script" in accept
+    # The routed branch is the one that refuses a client-supplied script.
+    assert "ROUTED_CHANGE_IS_OURS_TO_DERIVE" in accept
+
+    sign = _fn("views_api.py", "api_tango_sign")
+    assert "if rnd.a_payout:" in sign
+    # The else branch is A keeping its change: its own script, validated.
+    assert 'validate_spk(data.change_spk or "", "change_spk")' in sign
+
+
+def test_only_the_routing_side_gets_a_derived_script():
+    """Derivation is keyed by role, and the two roles get different outputs —
+    PAYOUT_K is 0 for a and 1 for b, so a round where both route does not pay
+    the same script twice."""
+    # Read from source: importing helpers.tangochange pulls in wallet.py,
+    # which imports lnbits — the host application, not a dependency.
+    src = (ROOT / "helpers" / "tangochange.py").read_text()
+    line = next(ln for ln in src.splitlines() if ln.startswith("PAYOUT_K"))
+    k = ast.literal_eval(line.split("=", 1)[1].strip())
+    assert k["a"] != k["b"], k
+    accept = _fn("views_api.py", "api_tango_accept")
+    assert 'if b_payout and amounts["b_change"]:' in accept
+    assert '_tango_payout_change_spk(rnd, "b", frozen)' in accept
+    sign = _fn("views_api.py", "api_tango_sign")
+    assert '_tango_payout_change_spk(rnd, "a", frozen)' in sign
+
+
+def test_a_payout_row_is_created_only_for_the_side_that_routed():
+    """Otherwise the instance would owe a Lightning payout to somebody whose
+    change went to their own wallet, or — worse — hold a coin it never routed
+    and create nothing."""
+    body = _fn("views_api.py", "enqueue_tango_payouts")
+    assert "(\"a\", rnd.a_payout, rnd.a_change_spk" in body
+    assert "(\"b\", rnd.b_payout, rnd.b_change_spk" in body
+    assert "if not routed or not spk or not change or not user_id:" in body
+    assert "continue" in body
+
+
+def test_labelling_skips_only_the_routed_sides_change():
+    """A routed change is not that side's coin, so there is nothing in their
+    wallet to label. The side that kept its change still gets labelled."""
+    body = _fn("views_api.py", "_tango_label_change")
+    assert "None if rnd.a_payout else rnd.a_change_spk" in body
+    assert "None if rnd.b_payout else rnd.b_change_spk" in body
