@@ -66,9 +66,9 @@
       <!-- /releases/latest/download/<name> resolves to the newest release that
            is NOT a prerelease. The CI builds are published as prereleases, so
            they are invisible here and only a signed, versioned release ever
-           reaches a user — see scripts/cut-release.sh in the thrilla repo.
+           reaches a user — see scripts/cut-release.sh in the whispa repo.
            These links therefore never need editing again. -->
-      <a class="btn btn-primary" href="https://github.com/ponthief/thrilla/releases/latest/download/whispa-mainnet.apk">Download APK <span class="arrow">↓</span></a>
+      <a class="btn btn-primary" href="https://github.com/ponthief/whispa/releases/latest/download/whispa-mainnet.apk">Download APK <span class="arrow">↓</span></a>
       <div class="dl-meta">Latest release · Android 6+ · ~36 MB</div>
       <div class="dl-meta"><a href="#verify">Verify this download →</a></div>
     </div>
@@ -76,7 +76,7 @@
       <div class="dl-net">Signet · test network</div>
       <h3>WhiSPa Wallet (Signet)</h3>
       <p>The same wallet on a test network. Coins are worthless — try everything here first.</p>
-      <a class="btn btn-ghost" href="https://github.com/ponthief/thrilla/releases/latest/download/whispa-signet.apk">Download APK <span class="arrow">↓</span></a>
+      <a class="btn btn-ghost" href="https://github.com/ponthief/whispa/releases/latest/download/whispa-signet.apk">Download APK <span class="arrow">↓</span></a>
       <div class="dl-meta">Android 6+ · ~36 MB</div>
       <div class="dl-meta"><a href="#verify">Verify this download →</a></div>
     </div>
@@ -115,7 +115,7 @@
 
   <div class="warnbox">
     <p><strong>Confirm this fingerprint somewhere other than this page</strong> — on
-      <a href="https://github.com/ponthief/thrilla" target="_blank" rel="noopener noreferrer">GitHub</a> or
+      <a href="https://github.com/ponthief/whispa" target="_blank" rel="noopener noreferrer">GitHub</a> or
       <a href="https://x.com/whispawallet" target="_blank" rel="noopener noreferrer">X</a>.
       Anyone who could serve you a fake APK from whispawallet.com could serve a fake key beside it, and the check would pass anyway.</p>
   </div>
@@ -126,9 +126,9 @@
        resolves both — so they always describe the file the buttons above just
        handed you. The signing key stays in the repository at a fixed path,
        because it outlives every release and rotating it is a separate event. -->
-  <div class="cmd">curl -LO https://github.com/ponthief/thrilla/raw/master/<span class="f">whispa-signing-key.asc</span>
-curl -LO https://github.com/ponthief/thrilla/releases/latest/download/<span class="f">SHA256SUMS</span>
-curl -LO https://github.com/ponthief/thrilla/releases/latest/download/<span class="f">SHA256SUMS.asc</span>
+  <div class="cmd">curl -LO https://github.com/ponthief/whispa/raw/master/<span class="f">whispa-signing-key.asc</span>
+curl -LO https://github.com/ponthief/whispa/releases/latest/download/<span class="f">SHA256SUMS</span>
+curl -LO https://github.com/ponthief/whispa/releases/latest/download/<span class="f">SHA256SUMS.asc</span>
 
 gpg --import whispa-signing-key.asc</div>
 
