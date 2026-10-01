@@ -590,3 +590,121 @@ def test_a_depth_check_that_fails_delays_rather_than_pays():
     transaction a reorg removes."""
     body = _fn("views_api.py", "_tango_tx_depth")
     assert body.count("return 0") >= 4
+
+
+# ── solvency: not offering what we cannot pay ───────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "balance,owed,want",
+    [
+        (100_000, 0, 100_000),
+        (100_000, 90_000, 10_000),
+        # THE CASE THE SUBTRACTION EXISTS FOR. A raw-balance check would wave
+        # a 20,000 payout through here; only 10,000 is actually free.
+        (100_000, 95_000, 5_000),
+        (100_000, 200_000, 0),      # overcommitted is nothing available
+        (0, 0, 0),
+        (None, None, 0),
+    ],
+)
+def test_available_is_the_balance_minus_what_is_already_owed(balance, owed, want):
+    assert PR.available_sats(balance, owed) == want
+
+
+def test_available_is_never_negative():
+    """An overcommitted wallet has nothing available, not a debt it can
+    spend."""
+    for owed in (0, 10, 10_000, 10**9):
+        assert PR.available_sats(1_000, owed) >= 0
+
+
+@pytest.mark.parametrize(
+    "available,threshold,want",
+    [
+        (10_000, 10_000, True),      # exactly on the floor is on it
+        (9_999, 10_000, False),
+        (0, 0, True),                # no floor set: anything goes
+        (0, 1, False),
+        (50_000, 10_000, True),
+    ],
+)
+def test_the_floor_decides_whether_a_round_may_route(available, threshold, want):
+    assert PR.can_route(available, threshold) is want
+
+
+def test_the_amount_is_deliberately_not_part_of_the_check():
+    """A better question that cannot be asked where it would have to be
+    answered: the only place the change is known is at accept, and by then the
+    client has already decided whether to send a change script of its own. A
+    server-side reversal there leaves a round with change and no script for
+    it, which fails at assembly."""
+    import inspect
+    assert "net_sats" not in inspect.signature(PR.can_route).parameters
+    src = (ROOT / "helpers" / "tangopayoutrun.py").read_text()
+    assert "fails at assembly" in src, (
+        "the reason the amount is not checked belongs next to the check"
+    )
+
+
+def test_the_reason_is_for_an_operator_not_a_user():
+    assert PR.liquidity_reason(5_000, 10_000) is not None
+    assert PR.liquidity_reason(50_000, 10_000) is None
+    src = (ROOT / "helpers" / "tangopayoutrun.py").read_text()
+    assert "invitation to work out how low" in src
+
+
+def test_a_round_does_not_route_when_the_wallet_cannot_pay():
+    body = _fn("views_api.py", "_tango_routes_change")
+    assert "tango_payout_liquidity(network)" in body
+    assert 'if not liq.get("ok")' in body
+
+
+def test_the_client_is_told_without_being_told_how_low():
+    """`ready` folds in liquidity so a depleted server stops offering the
+    setting; the reason is not returned, because "the service is low on
+    Lightning funds" is an invitation to work out how low."""
+    body = _fn("views_api.py", "api_tango_ln_address_get")
+    assert "tango_payout_liquidity(network)" in body
+    assert '"reason"' not in body
+
+
+def test_an_unreadable_balance_stops_the_feature_rather_than_risking_it():
+    """Not offering it for a few minutes costs a user a privacy improvement.
+    Offering it against an unknown balance costs them a coin."""
+    body = _fn("views_api.py", "tango_payout_liquidity")
+    assert '"ok": False' in body
+    assert "could not be read" in body
+    assert "No payout wallet is configured." in body
+
+
+def test_the_alert_fires_on_both_crossings():
+    """An operator who topped the wallet up should not have to guess whether
+    it took."""
+    body = _fn("views_api.py", "check_tango_payout_liquidity")
+    assert "notify_service_health_change(" in body
+    assert "LIQUIDITY_SERVICE" in body
+    src = (ROOT / "helpers" / "tangopayoutrun.py").read_text()
+    assert "fires on BOTH transitions" in src
+
+
+def test_the_liquidity_check_runs_before_anything_can_throw():
+    """It is the thing an operator needs to hear about, so it must not be
+    skipped by an enqueue that fails."""
+    body = _fn("views_api.py", "run_tango_payouts")
+    assert body.index("check_tango_payout_liquidity") < body.index(
+        "enqueue_tango_payouts"
+    )
+
+
+def test_the_threshold_is_configurable_and_defaulted():
+    src = (ROOT / "models.py").read_text()
+    assert "tango_change_min_wallet_balance_sats: int = 10_000" in src
+    # And the reason a raw balance is the wrong measure is written down.
+    at = src.index("tango_change_min_wallet_balance_sats")
+    assert "already owed" in src[max(0, at - 600):at]
+
+
+def test_the_console_shows_the_balance_against_what_is_owed():
+    body = _fn("views_api.py", "api_admin_tango_payouts")
+    assert "tango_payout_liquidity(" in body

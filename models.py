@@ -82,6 +82,12 @@ class BackendConfig(BaseModel):
     # A one-confirmation payout can be reversed by a reorg, and a Lightning
     # payment cannot be clawed back.
     tango_change_min_confirmations: int = 3
+    # Below this much SPENDABLE headroom — the payout wallet's balance minus
+    # what is already owed on undelivered payouts — the feature stops being
+    # offered and an ntfy fires. A raw balance is the wrong measure: a wallet
+    # holding 100,000 with 90,000 already owed can cover one more payout of
+    # 10,000 and not of 20,000.
+    tango_change_min_wallet_balance_sats: int = 10_000
 
     def tango_payout_ready(self, network: str) -> bool:
         """Is the change payout usable on this network right now?

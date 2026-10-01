@@ -4377,9 +4377,16 @@ async def api_tango_ln_address_get(
         if offered
         else None
     )
+    # `ready` folds in whether the payout wallet can currently cover a payout,
+    # so a depleted server stops offering the setting rather than accepting an
+    # address it cannot pay. The REASON is deliberately not returned: "the
+    # service is low on Lightning funds" is an invitation to work out how low.
+    ready = cfg.tango_payout_ready(network)
+    if ready:
+        ready = bool((await tango_payout_liquidity(network)).get("ok"))
     return {
         "offered": offered,
-        "ready": cfg.tango_payout_ready(network),
+        "ready": ready,
         "address": (saved or {}).get("address") or "",
         "min_sendable": (saved or {}).get("min_sendable"),
         "max_sendable": (saved or {}).get("max_sendable"),
@@ -4671,8 +4678,15 @@ async def _attempt_tango_payout(row: dict) -> str:
 
 
 async def run_tango_payouts() -> dict:
-    """One pass: create what is due, then deliver what is owed."""
+    """One pass: check we can pay, create what is due, deliver what is owed."""
     out = {"enqueued": 0, "paid": 0, "retrying": 0, "stopped": 0}
+    # First, because it is the thing an operator needs to hear about and it
+    # must not be skipped by an enqueue that throws. Fires an ntfy only on a
+    # crossing, in either direction.
+    try:
+        await check_tango_payout_liquidity()
+    except Exception as e:
+        logger.error(f"[silnt] tango payout liquidity check: {_exc_text(e)}")
     try:
         out["enqueued"] = await enqueue_tango_payouts()
     except Exception as e:
@@ -4702,6 +4716,95 @@ async def run_tango_payouts() -> dict:
     return out
 
 
+async def tango_payout_liquidity(network: str) -> dict:
+    """Can the payout wallet cover a new obligation, and by how much?
+
+    Read live rather than cached: a balance that was fine a minute ago is not
+    an answer to "may this round route", and the alternative is taking
+    somebody's change against a number that has since gone.
+
+    A balance this cannot read reports ok=False. The safe direction: not
+    offering the feature for a few minutes costs a user a privacy improvement,
+    and offering it against an unknown balance costs them a coin.
+    """
+    from .helpers.tangopayoutrun import (
+        available_sats,
+        can_route,
+        liquidity_reason,
+    )
+
+    cfg = await get_backend_config(network)
+    threshold = max(0, int(cfg.tango_change_min_wallet_balance_sats or 0))
+    wallet_id = (cfg.tango_change_payout_wallet_id or "").strip()
+    out = {
+        "wallet_id": wallet_id,
+        "threshold_sats": threshold,
+        "balance_sats": None,
+        "owed_sats": 0,
+        "available_sats": 0,
+        "ok": False,
+        "reason": None,
+    }
+    if not wallet_id:
+        out["reason"] = "No payout wallet is configured."
+        return out
+
+    try:
+        from lnbits.core.crud import get_wallet
+
+        wallet = await get_wallet(wallet_id)
+    except Exception as e:
+        logger.warning(f"tango payout liquidity: wallet lookup: {_exc_text(e)}")
+        wallet = None
+    if not wallet:
+        out["reason"] = "The configured payout wallet could not be read."
+        return out
+
+    msat = getattr(wallet, "balance_msat", None)
+    if msat is None:
+        msat = getattr(wallet, "balance", 0) or 0
+    balance = int(msat) // 1000
+
+    totals = await tango_payout_totals(network)
+    owed = int(totals.get("owed_sats") or 0)
+    available = available_sats(balance, owed)
+
+    out.update({
+        "balance_sats": balance,
+        "owed_sats": owed,
+        "available_sats": available,
+        "ok": can_route(available, threshold),
+        "reason": liquidity_reason(available, threshold),
+    })
+    return out
+
+
+async def check_tango_payout_liquidity() -> dict:
+    """Fire an ntfy when the payout wallet crosses the operator's floor.
+
+    notify_service_health_change dedups per service and fires on BOTH
+    transitions, so a top-up is announced too — otherwise an operator who
+    refilled the wallet would have to guess whether it took.
+    """
+    from .helpers.tangopayoutrun import LIQUIDITY_SERVICE
+
+    seen = {}
+    for network in ("mainnet",):
+        cfg = await get_backend_config(network)
+        if not cfg.tango_change_payout_enabled:
+            continue
+        state = await tango_payout_liquidity(network)
+        seen[network] = state
+        detail = state.get("reason") or (
+            f"{state.get('available_sats')} sats available against a "
+            f"{state.get('threshold_sats')} sat floor."
+        )
+        await notify_service_health_change(
+            LIQUIDITY_SERVICE, bool(state.get("ok")), detail
+        )
+    return seen
+
+
 @silnt_api_router.get("/api/v1/admin/tango/payouts")
 async def api_admin_tango_payouts(
     network: Optional[str] = Query(None),
@@ -4723,6 +4826,12 @@ async def api_admin_tango_payouts(
     return {
         "payouts": rows,
         "totals": await tango_payout_totals(network),
+        # The balance, what is already owed against it, and whether the floor
+        # is still clear. An operator looking at a stuck payout is usually
+        # looking at this.
+        "liquidity": await tango_payout_liquidity(
+            network or DEFAULT_CONFIG_NETWORK
+        ),
     }
 
 
@@ -5779,6 +5888,18 @@ async def _tango_routes_change(user_id: str, network: str) -> tuple[bool, str]:
         return False, ""
     saved = await get_tango_ln_address(user_id, network)
     if not saved or not (saved.get("address") or "").strip():
+        return False, ""
+    # AND THE WALLET HAS TO BE ABLE TO PAY. Routing a change the payout wallet
+    # cannot cover is taking somebody's coin on a promise — exactly the
+    # failure the threshold exists to prevent — so this is checked before the
+    # round routes, not after it has. The change amount is not known yet at
+    # propose, so the floor alone is what is checked here; see
+    # tangopayoutrun.can_route.
+    liq = await tango_payout_liquidity(network)
+    if not liq.get("ok"):
+        logger.warning(
+            f"tango payout not offered on {network}: {liq.get('reason')}"
+        )
         return False, ""
     return True, cfg.tango_change_sp_address.strip()
 

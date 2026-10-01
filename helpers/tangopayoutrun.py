@@ -119,3 +119,77 @@ PAYOUT_FAILED_BODY = (
 
 def failure_body(status: str) -> str:
     return PAYOUT_UNPAYABLE_BODY if status == "unpayable" else PAYOUT_FAILED_BODY
+
+
+# ── Solvency: can this server actually pay what it is about to take on? ─────
+#
+# A routed change output becomes the instance's the moment the round confirms,
+# and the net is then owed over Lightning. Offering that when the payout wallet
+# cannot cover it is taking people's coins on a promise, so the rules are here
+# and are checked before a round routes rather than after it has.
+
+# Below this much headroom the feature stops being offered. Configurable; the
+# default is a working buffer rather than a meaningful amount of money.
+DEFAULT_MIN_WALLET_BALANCE_SATS = 10_000
+
+
+def available_sats(balance_sats: int, owed_sats: int) -> int:
+    """What the payout wallet could actually spend on a NEW obligation.
+
+    THE SUBTRACTION IS THE POINT. A raw balance is not the answer: a wallet
+    holding 100,000 with 90,000 already owed on undelivered payouts can cover
+    one more payout of 10,000 and not of 20,000, and a check against the
+    balance alone would wave both through. What is owed is money with
+    somebody's name on it already.
+
+    Never negative — an overcommitted wallet has nothing available, not a
+    debt it can spend.
+    """
+    return max(0, int(balance_sats or 0) - int(owed_sats or 0))
+
+
+def can_route(
+    available: int,
+    threshold: int = DEFAULT_MIN_WALLET_BALANCE_SATS,
+) -> bool:
+    """May a new change output be routed?
+
+    THE AMOUNT IS NOT PART OF THIS, and that was a deliberate reversal. An
+    amount-aware version — "would this particular payout leave us above the
+    floor" — is a better question and cannot be asked where it would have to
+    be answered. The only place the change is known is at accept, and by then
+    the client has ALREADY decided whether to send a change script of its own,
+    on the strength of what the server said was available before it asked.
+    Flipping the decision server-side at that point leaves a round with change
+    and no script for it, which fails at assembly.
+
+    So the floor is checked without the amount, at propose and at accept
+    alike. That is what a buffer is for: a single payout dipping into it is
+    survivable, the obligation is recorded either way, and the retry plus the
+    ntfy handle the rest.
+    """
+    return int(available or 0) >= max(0, int(threshold or 0))
+
+
+def liquidity_reason(
+    available: int,
+    threshold: int = DEFAULT_MIN_WALLET_BALANCE_SATS,
+) -> Optional[str]:
+    """Why not, for an operator. None when it can route.
+
+    Deliberately not shown to users: what they get is the setting quietly not
+    being offered, because "the service is low on Lightning funds" is an
+    invitation to work out how low.
+    """
+    if can_route(available, threshold):
+        return None
+    return (
+        f"The payout wallet has {available} sats available against a "
+        f"{threshold} sat floor."
+    )
+
+
+# The ntfy service name. notify_service_health_change dedups per service and
+# fires on BOTH transitions, so recovery is announced too — an operator who
+# topped the wallet up should not have to guess whether it took.
+LIQUIDITY_SERVICE = "tango_payout_liquidity"
