@@ -867,14 +867,43 @@ async def api_get_chain_tip(network: Optional[str] = Query(None)):
 # ── Backend config ───────────────────────────────────────────────────────────
 
 
+# Said in two places — accept and A's sign — so it is one string. A routed
+# change pays the instance, and only the payee can derive a BIP-352 output, so
+# a client-supplied script would be one nobody checked. Refused rather than
+# ignored: ignoring it would let a client believe it had chosen.
+ROUTED_CHANGE_IS_OURS_TO_DERIVE = (
+    "This round routes your change, so the server derives that output. "
+    "Do not send a change script."
+)
+
+# Config fields no non-admin caller may read. By NAME rather than by a naming
+# convention, so adding a secret and not listing it fails review rather than
+# shipping quietly — the GET below hands this model to every authenticated
+# user, which was harmless while nothing in it was a secret.
+_REDACTED_CONFIG_FIELDS = ("tango_change_scan_secret",)
+
+
 @silnt_api_router.get("/api/v1/backend/config")
 async def api_get_backend_config(
     network: Optional[str] = Query(None),
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ) -> BackendConfig:
     """Any authenticated user can read the blindbit endpoint (needed to trigger scan).
-    Credentials (user/pass) are included so the scan proxy can use them server-side."""
-    return await get_backend_config(network or DEFAULT_CONFIG_NETWORK)
+    Credentials (user/pass) are included so the scan proxy can use them server-side.
+
+    EXCEPT THE SECRETS, and that exemption arrived with the first one.
+    tango_change_scan_secret is the instance's Silent Payments scan key: a view
+    key for the address Tango change is routed to. Returning it to every
+    authenticated caller would hand each of them the ability to identify every
+    coin the service has ever collected. Nothing else in this model is a
+    secret today, which is exactly why handing the whole thing out was fine
+    until now — so the redaction is by name, and a future secret that is not
+    listed here is a leak. See _REDACTED_CONFIG_FIELDS.
+    """
+    cfg = await get_backend_config(network or DEFAULT_CONFIG_NETWORK)
+    if is_lnbits_admin(key_info.wallet.user):
+        return cfg
+    return cfg.copy(update={f: "" for f in _REDACTED_CONFIG_FIELDS})
 
 
 @silnt_api_router.put("/api/v1/backend/config")
@@ -4995,13 +5024,18 @@ async def _tango_label_change(rnd) -> None:  # noqa: C901
 
     done = True
     for wallet_id, mix_spks, change_spk, other in (
-        (rnd.a_wallet_id, rnd.a_mix_spks or rnd.a_mix_spk, rnd.a_change_spk,
-         rnd.b_username),
-        (rnd.b_wallet_id, rnd.b_mix_spks or rnd.b_mix_spk, rnd.b_change_spk,
-         rnd.a_username),
+        (rnd.a_wallet_id, rnd.a_mix_spks or rnd.a_mix_spk,
+         None if rnd.a_payout else rnd.a_change_spk, rnd.b_username),
+        (rnd.b_wallet_id, rnd.b_mix_spks or rnd.b_mix_spk,
+         None if rnd.b_payout else rnd.b_change_spk, rnd.a_username),
     ):
         if not wallet_id:
             continue
+        # A ROUTED change is not this side's coin — it pays the instance — so
+        # it is not in their wallet to label and must not be counted as
+        # missing. Without the None, every routed round would log "a script
+        # this side derived is not in the transaction it signed" and retry
+        # forever, about an output that was never theirs.
         wanted = [*spk_list(mix_spks), *([change_spk] if change_spk else [])]
         share = rnd.denom_sats // max(1, rnd.pieces or 1)
         labels = coin_labels(values, share, wanted, other, day)
@@ -5295,6 +5329,10 @@ async def api_tango_propose(
     except ValueError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
 
+    # Does A want its change routed? Snapshotted now, at the moment the offer
+    # is made, so the output set cannot move under a signature later.
+    a_payout, payout_addr = await _tango_routes_change(uid, wallet.network)
+
     acct = await get_account(uid)
     rnd = await create_tango_round(
         network=wallet.network,
@@ -5308,11 +5346,69 @@ async def api_tango_propose(
         a_inputs=rows,
         pieces=data.pieces,
         expiry_seconds=TANGO_EXPIRY_SECONDS,
+        a_payout=a_payout,
+        payout_sp_address=payout_addr or None,
     )
     await _notify_tango(
         partner.id, "Tango offer", "Someone has sent you a Tango offer. Open WhiSPa to look."
     )
     return rnd.dict()
+
+
+# ── Tango change routed to the instance ─────────────────────────────────────
+
+
+async def _tango_routes_change(user_id: str, network: str) -> tuple[bool, str]:
+    """(routes, instance_sp_address) for one side, at the moment it joins.
+
+    SNAPSHOTTED BY THE CALLER, never re-read. A side's setting could change
+    between A signing and B signing, and the output set is what both
+    signatures commit to: re-reading it would leave the two holding valid
+    signatures for different transactions and the round unbroadcastable.
+
+    Needs the whole configuration present — address, scan key and a payout
+    wallet — because routing a change with any of them missing takes the coin
+    and has no way to send the value on. tango_payout_ready is that
+    conjunction, and it includes the mainnet-only rule.
+    """
+    cfg = await get_backend_config(network)
+    if not cfg.tango_payout_ready(network):
+        return False, ""
+    saved = await get_tango_ln_address(user_id, network)
+    if not saved or not (saved.get("address") or "").strip():
+        return False, ""
+    return True, cfg.tango_change_sp_address.strip()
+
+
+async def _tango_payout_change_spk(rnd, role: str, inputs: list) -> dict:
+    """{change_spk, tweak} for a routed side, derived here because only the
+    payee can — see helpers/tangochange.py.
+
+    The address comes off the ROUND, not the live config: an operator who
+    changes the configured address must not retroactively move the output of a
+    round already in flight, which both sides may already have checked.
+    """
+    from .helpers.tangochange import derive_payout_output
+
+    cfg = await get_backend_config(rnd.network)
+    address = (rnd.payout_sp_address or cfg.tango_change_sp_address or "").strip()
+    secret = (cfg.tango_change_scan_secret or "").strip()
+    if not address or not secret:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail="This server cannot route Tango change right now.",
+        )
+    try:
+        spk, tweak = derive_payout_output(
+            address, bytes.fromhex(secret), inputs, role
+        )
+    except Exception as e:
+        logger.error(f"tango payout derivation failed for {rnd.id}/{role}: {_exc_text(e)}")
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail="Could not work out where this round's change should go.",
+        )
+    return {"spk": spk.hex(), "tweak": tweak.hex()}
 
 
 @silnt_api_router.get("/api/v1/tango/rounds")
@@ -5450,12 +5546,38 @@ async def api_tango_accept(
     except ValueError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
 
-    if amounts["b_change"] and not data.change_spk:
+    # Does B want its change routed? Snapshotted here, as A's was at propose.
+    b_payout, b_payout_addr = await _tango_routes_change(uid, rnd.network)
+
+    # A routed change is derived HERE, not supplied: it pays the instance, and
+    # only the payee can derive a BIP-352 output. A client that sent one would
+    # be sending a script nobody checked, so the field is refused rather than
+    # ignored — ignoring it would let a client believe it had chosen.
+    if b_payout:
+        if data.change_spk:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail=ROUTED_CHANGE_IS_OURS_TO_DERIVE,
+            )
+    elif amounts["b_change"] and not data.change_spk:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
             detail=f"Your coins leave {amounts['b_change']} sats of change, so "
                    f"this needs a change script.",
         )
+
+    b_change_spk = data.change_spk.lower() if data.change_spk else None
+    b_payout_tweak = None
+    if b_payout and amounts["b_change"]:
+        # The whole frozen set: a BIP-352 output is derived from every input,
+        # both sides' included, which is what makes this derivable only now.
+        frozen = _pj_payjoin_inputs(a_rows) + _pj_payjoin_inputs(rows)
+        if b_payout_addr and not rnd.payout_sp_address:
+            # A did not route, so the round has no address on it yet.
+            await update_tango_round(rid, payout_sp_address=b_payout_addr)
+            rnd = await get_tango_round(rid)
+        derived = await _tango_payout_change_spk(rnd, "b", frozen)
+        b_change_spk, b_payout_tweak = derived["spk"], derived["tweak"]
 
     updated = await update_tango_round(
         rid,
@@ -5471,7 +5593,9 @@ async def api_tango_accept(
         vsize=amounts["vsize"],
         clean=amounts["clean"],
         b_mix_spks=b_mix_spks,
-        b_change_spk=data.change_spk.lower() if data.change_spk else None,
+        b_change_spk=b_change_spk,
+        b_payout=b_payout,
+        b_payout_tweak=b_payout_tweak,
     )
     await _notify_tango(
         rnd.a_user_id, "Tango matched",
@@ -5518,16 +5642,34 @@ async def api_tango_sign(
     await _refuse_spent_tango_inputs(rnd)
 
     if role == "a":
-        try:
+        # a_payout was snapshotted at propose. Read off the round rather than
+        # from A's setting, which may have changed since — the output set is
+        # what both signatures commit to.
+        a_change_spk = data.change_spk.lower() if data.change_spk else None
+        a_payout_tweak = None
+        if rnd.a_payout:
+            if data.change_spk:
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_REQUEST,
+                    detail=ROUTED_CHANGE_IS_OURS_TO_DERIVE,
+                )
             if rnd.a_change_sats:
-                validate_spk(data.change_spk or "", "change_spk")
-        except ValueError as e:
-            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+                frozen = _pj_payjoin_inputs(_pj_inputs(rnd.a_inputs)) + \
+                    _pj_payjoin_inputs(_pj_inputs(rnd.b_inputs))
+                derived = await _tango_payout_change_spk(rnd, "a", frozen)
+                a_change_spk, a_payout_tweak = derived["spk"], derived["tweak"]
+        else:
+            try:
+                if rnd.a_change_sats:
+                    validate_spk(data.change_spk or "", "change_spk")
+            except ValueError as e:
+                raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
         a_mix_spks = _tango_mix_spks(data.mix_spks, rnd.pieces or 1)
         rnd = await update_tango_round(
             rid,
             a_mix_spks=a_mix_spks,
-            a_change_spk=data.change_spk.lower() if data.change_spk else None,
+            a_change_spk=a_change_spk,
+            a_payout_tweak=a_payout_tweak,
         )
 
     try:

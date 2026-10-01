@@ -71,6 +71,12 @@ class BackendConfig(BaseModel):
     # does not let them take any. That is a different kind of secret from the
     # user spending keys CLAUDE.md says are never stored.
     tango_change_scan_secret: str = ""
+    # The LNbits wallet the payout is sent FROM. Stored as an id, not a key:
+    # the extension looks the wallet up server-side when it pays, so no
+    # spending key goes into this blob. It needs real outbound Lightning
+    # liquidity — an internal ledger entry was the old design, and paying
+    # somebody else's node is not.
+    tango_change_payout_wallet_id: str = ""
     tango_change_fee_pct: float = 0.005        # 0.5% of the change
     tango_change_fee_floor_sats: int = 100     # cost recovery; see tangopayout
     # A one-confirmation payout can be reversed by a reorg, and a Lightning
@@ -92,6 +98,9 @@ class BackendConfig(BaseModel):
             # Without the scan key the instance cannot derive the output it
             # would be paid at, so "configured" means both or neither.
             and (self.tango_change_scan_secret or "").strip()
+            # And somewhere to pay from. Routing a change with no payout
+            # wallet would take the coin and have no way to send the value on.
+            and (self.tango_change_payout_wallet_id or "").strip()
             and payout_offered(network)
         )
 
@@ -733,6 +742,22 @@ class TangoRound(BaseModel):
     a_change_spk: Optional[str] = None
     b_mix_spk: Optional[str] = None
     b_change_spk: Optional[str] = None
+
+    # Did this side route its change to the instance instead of keeping it?
+    # Snapshotted when the side joined the round, never read live: a flag that
+    # changed between A signing and B signing would leave the two holding
+    # valid signatures for different transactions.
+    a_payout: Optional[bool] = None
+    b_payout: Optional[bool] = None
+    # t_k for each routed change, which is how a client checks a script it
+    # cannot re-derive — helpers/tangochange.py explains why that is the only
+    # check available.
+    a_payout_tweak: Optional[str] = None
+    b_payout_tweak: Optional[str] = None
+    # The instance address as it was when this round was planned. The operator
+    # can change the configured one, and a round in flight has to stay
+    # checkable against the address its outputs came from.
+    payout_sp_address: Optional[str] = None
     a_witnesses: Optional[str] = None
     b_witnesses: Optional[str] = None
     unsigned_tx: Optional[str] = None

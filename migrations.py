@@ -1225,3 +1225,34 @@ async def m039_tango_ln_address(db):
         );
         """
     )
+
+
+async def m040_tango_change_payout(db):
+    """Which side routed its change, and the proof the clients check.
+
+    A side that gave a Lightning address has its change output pay the
+    INSTANCE's SP address rather than its own wallet. Three things have to live
+    on the round rather than be looked up when needed:
+
+    * `a_payout` / `b_payout` — SNAPSHOTTED when that side joined, not read
+      live from their setting. A flag re-read between A signing and B signing
+      could change the output set, and A's signature is over the outputs as
+      they were: both sides would hold valid signatures for different
+      transactions and the round would be unbroadcastable.
+    * `a_payout_tweak` / `b_payout_tweak` — t_k, which is how a client checks
+      a script it cannot re-derive. See helpers/tangochange.py.
+    * `payout_sp_address` — the instance address AS IT WAS when the round was
+      planned. The operator can change the configured one; a round in flight
+      must still be checkable against the address its outputs were actually
+      derived from.
+
+    Existing rounds routed nothing, and NULL reads as false everywhere, so
+    there is nothing to backfill.
+    """
+    await db.execute("ALTER TABLE silnt.tango_rounds ADD COLUMN a_payout BOOLEAN")
+    await db.execute("ALTER TABLE silnt.tango_rounds ADD COLUMN b_payout BOOLEAN")
+    await db.execute("ALTER TABLE silnt.tango_rounds ADD COLUMN a_payout_tweak TEXT")
+    await db.execute("ALTER TABLE silnt.tango_rounds ADD COLUMN b_payout_tweak TEXT")
+    await db.execute(
+        "ALTER TABLE silnt.tango_rounds ADD COLUMN payout_sp_address TEXT"
+    )

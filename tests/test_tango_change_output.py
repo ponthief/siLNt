@@ -177,3 +177,100 @@ def test_the_derivation_is_not_in_the_mirrored_module():
     payout = (ROOT / "helpers" / "tangopayout.py").read_text()
     for forbidden in ("point_add", "point_mul", "curve", "parse_sp_address"):
         assert forbidden not in payout, forbidden
+
+
+# ── wired into the round ────────────────────────────────────────────────────
+
+
+def _block(path: str, start: str, end: str) -> str:
+    src = (ROOT / path).read_text()
+    a = src.index(start)
+    return src[a:src.index(end, a)]
+
+
+def test_each_side_s_intent_is_snapshotted_when_it_joins():
+    """A flag re-read between A signing and B signing would change the output
+    set, and both signatures commit to it: the two would hold valid signatures
+    for different transactions and the round could not be broadcast."""
+    src = (ROOT / "views_api.py").read_text()
+    # A, at propose.
+    assert "a_payout, payout_addr = await _tango_routes_change(uid, wallet.network)" in src
+    assert "a_payout=a_payout," in src
+    # B, at accept.
+    assert "b_payout, b_payout_addr = await _tango_routes_change(uid, rnd.network)" in src
+    assert "b_payout=b_payout," in src
+    # And A's sign reads the ROUND, not A's current setting.
+    sign = _block("views_api.py", 'if role == "a":', "a_mix_spks = _tango_mix_spks")
+    assert "rnd.a_payout" in sign
+    assert "_tango_routes_change" not in sign, (
+        "A's sign must not re-read the setting; the round carries the decision"
+    )
+
+
+def test_a_client_cannot_supply_a_routed_change_script():
+    """It pays the instance, and only the payee can derive a BIP-352 output —
+    so a client-sent script would be one nobody checked. Refused rather than
+    ignored: ignoring it would let a client believe it had chosen."""
+    src = (ROOT / "views_api.py").read_text()
+    # One wording, used twice: the sentence lived in two places and had already
+    # drifted in how it wrapped, which is how two copies become two wordings.
+    assert "ROUTED_CHANGE_IS_OURS_TO_DERIVE = (" in src
+    assert src.count("detail=ROUTED_CHANGE_IS_OURS_TO_DERIVE,") == 2, (
+        "both accept and A's sign have to refuse a client-sent script"
+    )
+
+
+def test_the_address_comes_off_the_round_not_the_live_config():
+    """An operator who changes the configured address must not retroactively
+    move the output of a round already in flight, which both sides may have
+    checked already."""
+    body = _fn("views_api.py", "_tango_payout_change_spk")
+    assert "rnd.payout_sp_address or cfg.tango_change_sp_address" in body
+
+
+def test_routing_needs_the_whole_configuration():
+    """Address, scan key and a payout wallet. Routing with any of them missing
+    takes the coin and has no way to send the value on."""
+    body = _fn("views_api.py", "_tango_routes_change")
+    assert "cfg.tango_payout_ready(network)" in body
+    ready = (ROOT / "models.py").read_text()
+    ready = ready[ready.index("def tango_payout_ready"):]
+    ready = ready[: ready.index("\n    def ")]
+    for field in ("tango_change_sp_address", "tango_change_scan_secret",
+                  "tango_change_payout_wallet_id"):
+        assert field in ready, field
+
+
+def test_the_derivation_uses_the_whole_frozen_input_set():
+    """A BIP-352 output is derived from EVERY input, both sides' included,
+    which is why it cannot be derived before the set is frozen."""
+    src = (ROOT / "views_api.py").read_text()
+    assert "_pj_payjoin_inputs(a_rows) + _pj_payjoin_inputs(rows)" in src
+
+
+def test_a_routed_change_is_not_labelled_as_the_user_s_coin():
+    """It pays the instance, so it is not in their wallet to label — and
+    counting it as missing would have every routed round logging "a script
+    this side derived is not in the transaction it signed" forever."""
+    src = (ROOT / "views_api.py").read_text()
+    assert "None if rnd.a_payout else rnd.a_change_spk" in src
+    assert "None if rnd.b_payout else rnd.b_change_spk" in src
+
+
+def test_the_scan_key_is_not_handed_to_every_user():
+    """GET /backend/config returns this model to any authenticated caller,
+    which was harmless while nothing in it was a secret. The scan key is the
+    first, and it would identify every coin the service has collected."""
+    src = (ROOT / "views_api.py").read_text()
+    assert '_REDACTED_CONFIG_FIELDS = ("tango_change_scan_secret",)' in src
+    body = _fn("views_api.py", "api_get_backend_config")
+    assert "is_lnbits_admin(key_info.wallet.user)" in body
+    assert "_REDACTED_CONFIG_FIELDS" in body
+
+
+def test_the_payout_wallet_is_an_id_and_not_a_key():
+    """The extension looks the wallet up server-side when it pays, so no
+    spending key goes into a config blob."""
+    src = (ROOT / "models.py").read_text()
+    assert "tango_change_payout_wallet_id: str" in src
+    assert "tango_change_payout_adminkey" not in src

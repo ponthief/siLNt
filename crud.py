@@ -3337,6 +3337,8 @@ async def create_tango_round(
     a_inputs: list,
     pieces: int = 1,
     expiry_seconds: int = 86400,
+    a_payout: bool = False,
+    payout_sp_address: Optional[str] = None,
 ) -> TangoRound:
     rid = urlsafe_short_hash()
     await db.execute(
@@ -3344,12 +3346,13 @@ async def create_tango_round(
         INSERT INTO silnt.tango_rounds
             (id, status, network,
              a_user_id, a_username, a_wallet_id, b_user_id, b_username,
-             denom_sats, fee_rate, pieces, a_in_sats, a_inputs, expires_at)
+             denom_sats, fee_rate, pieces, a_in_sats, a_inputs, expires_at,
+             a_payout, payout_sp_address)
         VALUES
             (:id, 'PROPOSED', :network,
              :a_user_id, :a_username, :a_wallet_id, :b_user_id, :b_username,
              :denom_sats, :fee_rate, :pieces, :a_in_sats, :a_inputs,
-             :expires_at)
+             :expires_at, :a_payout, :payout_sp_address)
         """,
         {
             "id": rid,
@@ -3365,6 +3368,8 @@ async def create_tango_round(
             "a_in_sats": sum(int(i["amount"]) for i in a_inputs),
             "a_inputs": json.dumps(a_inputs),
             "expires_at": int(time.time()) + expiry_seconds,
+            "a_payout": bool(a_payout),
+            "payout_sp_address": payout_sp_address,
         },
     )
     return await get_tango_round(rid)
