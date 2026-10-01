@@ -1,0 +1,47 @@
+{
+  "sp_address": "sp1qqt60dftxw36m8dfydp63c3u04tv759g8t3u6mm9f755gxy00zajyxqhfpusglv708gnkgp9cyya0t8arp0lj4g0mjtxzcl6r820sxvw3yver4uud",
+  "scan_secret": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+  "inputs": [
+    {
+      "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+      "vout": 0,
+      "amount": 60000,
+      "pub_key": "ab5d2e79cfd621b1b027ffb24e2453ed7fb571ba9a841ff0e2473466cabd168d"
+    },
+    {
+      "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+      "vout": 3,
+      "amount": 40000,
+      "pub_key": "6b7eb04e07af07b5d82e463660f9e3e4eaf9c854e5aa47391d6daa8e9ac01a35"
+    },
+    {
+      "txid": "3333333333333333333333333333333333333333333333333333333333333333",
+      "vout": 1,
+      "amount": 55000,
+      "pub_key": "eef017846ec31a44edc6c7e8d26347f9914749ff5ca31eeb51841d501e74ed70"
+    }
+  ],
+  "cases": [
+    {
+      "role": "a",
+      "k": 0,
+      "spk": "512093432b7d1c07393fb766e44358ee8c0a10aaf653dce0cf21a290d75d8b82e7d9",
+      "tweak": "fee3c6cca7fd6c64f997df94a02c2acfb454031707283a6a5329cd2e26aaba90",
+      "verifies": true
+    },
+    {
+      "role": "b",
+      "k": 1,
+      "spk": "5120309c893539d225c511b33456d225d42fad4b6caaa7bb1c60f18c4b91ed63c283",
+      "tweak": "d7ba76f3edcb67f8f9d140278e31cc4d98e8cdd829ecc15f5e136bb3c605d086",
+      "verifies": true
+    }
+  ],
+  "negatives": {
+    "crossed_tweak": false,
+    "foreign_spk": "51207fa69296ceec2ae5f4dee193e861ea216769aa527c83bbf1c983f2e5942ebe90",
+    "foreign_tweak": "a7b8fb394cd2bd5988a1755bbe00d04a73953416138eba78f1eb3e962d6fb5b5",
+    "zero_tweak": "0000000000000000000000000000000000000000000000000000000000000000",
+    "short_tweak": "ababababababababababababababababababababababababababababababab"
+  }
+}

@@ -61,6 +61,16 @@ class BackendConfig(BaseModel):
     # the instant two of them pay it, and retroactively identifies the protocol
     # on every round this instance has ever coordinated.
     tango_change_sp_address: str = ""
+    # The SCAN key for that address — a VIEW key, not a spending key. It is
+    # needed to derive each round's change output (the instance is the payee,
+    # and only the payee can), and it is what lets the instance find those
+    # coins afterwards. Spending them needs the SPEND key, which belongs
+    # offline in whatever wallet holds the seed and must never be here.
+    #
+    # A leaked scan key tells an attacker which outputs are the service's; it
+    # does not let them take any. That is a different kind of secret from the
+    # user spending keys CLAUDE.md says are never stored.
+    tango_change_scan_secret: str = ""
     tango_change_fee_pct: float = 0.005        # 0.5% of the change
     tango_change_fee_floor_sats: int = 100     # cost recovery; see tangopayout
     # A one-confirmation payout can be reversed by a reorg, and a Lightning
@@ -79,6 +89,9 @@ class BackendConfig(BaseModel):
         return bool(
             self.tango_change_payout_enabled
             and (self.tango_change_sp_address or "").strip()
+            # Without the scan key the instance cannot derive the output it
+            # would be paid at, so "configured" means both or neither.
+            and (self.tango_change_scan_secret or "").strip()
             and payout_offered(network)
         )
 
