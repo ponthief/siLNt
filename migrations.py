@@ -1188,3 +1188,29 @@ async def m038_tango_pieces(db):
          WHERE b_mix_spk IS NOT NULL AND b_mix_spk <> ''
         """
     )
+
+
+async def m039_tango_cancel_note(db):
+    """A sentence from whoever stopped a Tango, for the other side to read.
+
+    SEPARATE FROM reject_reason, which is machine-readable: it holds "cancelled
+    by a", "expired" or "connection removed", and both helpers/tango.py and the
+    clients' tangoTurns.ts parse it to work out who ended a round and render
+    that as "You cancelled it" or "alice cancelled it". Free text in there would
+    break who_cancelled on both sides at once, and a person's own words are not
+    state anyway.
+
+    Optional, and nullable for every round that already exists — a round
+    cancelled before this column existed simply has nothing to say.
+
+    ⚠ MERGE NOTE. The claude/tango-change-to-lightning branch also adds an m039
+    (tango_ln_address) and goes on through m042. LNbits records the migration
+    NUMBER, so whichever m039 an instance runs first makes the other one
+    unreachable on that instance forever. Whoever merges the two must renumber
+    one side's migrations. Until then, api_tango_cancel writes the note in a
+    second statement and survives the column being absent — the cancellation
+    itself frees both sides' coins and must never fail for the sake of a note.
+    """
+    await db.execute(
+        "ALTER TABLE silnt.tango_rounds ADD COLUMN cancel_note TEXT"
+    )

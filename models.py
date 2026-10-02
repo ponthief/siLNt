@@ -682,10 +682,24 @@ class TangoRound(BaseModel):
     tx_hex: Optional[str] = None
     txid: Optional[str] = None
     change_labelled: Optional[bool] = False
+    # Why it ended, machine-readable: "cancelled by a", "expired",
+    # "connection removed". Parsed by helpers/tango.who_cancelled and by the
+    # clients' tangoTurns.ts, so it is state and never free text.
     reject_reason: Optional[str] = None
+    # And the words whoever cancelled chose to leave, if any. A person's
+    # sentence, shown only in the app — never put in a push, which passes
+    # through Google in plaintext.
+    cancel_note: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     expires_at: Optional[int] = None
+
+
+class CancelTangoData(BaseModel):
+    # Optional, and the only thing a cancel takes. No Field constraints — see
+    # the note at the top of this file about pydantic v1/v2 — so the length cap
+    # is applied in helpers/tango.py, which is where the cap is defined.
+    note: Optional[str] = None
 
 
 class ProposeTangoData(BaseModel):

@@ -33,6 +33,25 @@ SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 # at the standard m=0.
 BIP352_CHANGE_LABEL_INDEX = 0
 BIP352_LEGACY_CHANGE_LABEL_INDICES = [1]
+# Every label index that means "this coin is our own change coming back from a
+# send we made", current and legacy. Used to keep change out of the
+# payment-arrived count: a send that leaves change creates a new UTXO here, and
+# telling the sender "Payment received" about their own change is both wrong
+# and alarming — it reads as somebody having paid them.
+CHANGE_LABEL_INDICES = frozenset(
+    [BIP352_CHANGE_LABEL_INDEX, *BIP352_LEGACY_CHANGE_LABEL_INDICES]
+)
+
+
+def is_own_change(owned) -> bool:
+    """Is this detected output our own change, rather than a payment to us?
+
+    By the label it was found under. An unlabelled output is a payment to the
+    base address, and labels m>=2 are sub-addresses given out to be paid at —
+    both are somebody paying us. Only the change label is us paying ourselves.
+    """
+    label = getattr(owned, "label", None)
+    return label is not None and label.m in CHANGE_LABEL_INDICES
 # The labeled-address indices the receiver ALWAYS scans, whether or not a saved
 # wallet_addresses row exists for them. This is what makes deleting a labeled
 # address safe: its label stays in the scan set, so payments keep being detected
@@ -1450,6 +1469,11 @@ async def _scan_wallet(
     }
     total_found = 0
     total_found_amount = 0
+    # Of the new finds, the ones that are not this wallet's own change. This is
+    # what a "payment arrived" notification may be sent about; total_found is
+    # what the scan progress and the UI report, where change IS a find.
+    total_incoming = 0
+    total_incoming_amount = 0
     blocks_scanned = 0
     last_scanned_height = start
     total_blocks = end - start + 1
@@ -1636,9 +1660,22 @@ async def _scan_wallet(
                     # Count only genuinely NEW utxos — re-detecting an existing
                     # one on a rescan is an upsert, not a discovery, and must not
                     # inflate the "found" count the UI shows.
-                    new_count, new_amount = await insert_utxos_for_wallet(wallet_id, result)
+                    new_count, new_amount, new_keys = await insert_utxos_for_wallet(
+                        wallet_id, result
+                    )
                     total_found += new_count
                     total_found_amount += new_amount
+                    # Split the new ones. Change is still a find — it is a
+                    # spendable coin and the balance and the UI count it — but
+                    # it is not a payment anybody made to this wallet, and the
+                    # notification is about the latter.
+                    for owned in result:
+                        if (owned.txid.hex(), int(owned.vout)) not in new_keys:
+                            continue
+                        if is_own_change(owned):
+                            continue
+                        total_incoming += 1
+                        total_incoming_amount += int(owned.amount or 0)
                     logger.info(
                         f"Block {h}: {len(result)} detected, {new_count} new"
                     )
@@ -1750,6 +1787,10 @@ async def _scan_wallet(
     return {
         "utxos_found": total_found,
         "amount_found": total_found_amount,
+        # The same numbers with this wallet's own change taken out. Notify on
+        # these, never on utxos_found — see is_own_change.
+        "utxos_incoming": total_incoming,
+        "amount_incoming": total_incoming_amount,
         "blocks_scanned": blocks_scanned,
         "final_height": last_scanned_height,
         "balance": balance,

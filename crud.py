@@ -478,12 +478,24 @@ async def get_utxos_for_wallet(wallet_id: str) -> list[UTXORecord]:
 
 
 async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> tuple:
-    """Upsert the given UTXOs. Returns (count, amount_sats) of rows that were
-    NEWLY inserted — re-detecting a UTXO that already exists (e.g. on a rescan)
-    is an UPDATE, not a discovery, so it must not be counted as "found". The
-    amount is the summed value of just those new rows (used for notifications)."""
+    """Upsert the given UTXOs.
+
+    Returns (count, amount_sats, new_keys) for rows that were NEWLY inserted —
+    re-detecting a UTXO that already exists (e.g. on a rescan) is an UPDATE,
+    not a discovery, so it must not be counted as "found". The amount is the
+    summed value of just those new rows.
+
+    `new_keys` is the set of (txid, vout) that were new, so a caller holding
+    the scanned UTXOs can tell WHICH of them it had not seen before. The scan
+    needs that to separate a payment somebody sent from this wallet's own
+    change coming back: both are new rows here, and only one of them is news.
+    What counts as change is BIP-352's label m=0, which helpers/scan.py owns —
+    this module cannot import it (scan imports crud), so the decision is left
+    to the caller rather than duplicated.
+    """
     newly_inserted = 0
     newly_amount = 0
+    new_keys: set = set()
     for utxo in utxos:
         row = utxo.to_db_row(wallet_id)
         # Tolerate rows from a to_db_row() that predates the label_index column
@@ -515,11 +527,12 @@ async def insert_utxos_for_wallet(wallet_id: str, utxos: list) -> tuple:
         )
         if not already:
             newly_inserted += 1
+            new_keys.add((row["txid"], int(row["vout"])))
             try:
                 newly_amount += int(row.get("amount") or 0)
             except (TypeError, ValueError):
                 pass
-    return newly_inserted, newly_amount
+    return newly_inserted, newly_amount, new_keys
 
 
 async def update_unconfirmed_utxo(wallet_id: str, txid: str):
