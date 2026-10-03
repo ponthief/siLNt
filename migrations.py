@@ -1380,3 +1380,25 @@ async def m043_tango_ln_address_switch(db):
         "ALTER TABLE silnt.tango_ln_addresses "
         "ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT true"
     )
+
+
+async def m044_tango_cancel_note_backfill(db):
+    """Make sure cancel_note exists, whatever order this instance arrived in.
+
+    m039 adds it. But LNbits records the migration NUMBER, and the Tango
+    Lightning work once carried its own m039 — so an instance that ran THAT
+    one is already past 039 and will never run m039_tango_cancel_note. The
+    column is then missing for good on that instance, api_tango_cancel's
+    second statement fails every time, and a cancellation note is quietly
+    dropped: the person types a reason, the round cancels, and the other side
+    sees nothing. Reported 2026-10-03.
+
+    Numbered above the whole range so every instance reaches it, and IF NOT
+    EXISTS so the ones that already have the column pay nothing for it. This
+    is the repair for a hazard that has already happened; m039 stays where it
+    is because an instance that ran it must not run it again under a new
+    number.
+    """
+    await db.execute(
+        "ALTER TABLE silnt.tango_rounds ADD COLUMN IF NOT EXISTS cancel_note TEXT"
+    )

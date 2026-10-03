@@ -190,3 +190,35 @@ def test_the_migration_numbers_are_unique_and_in_order():
         f"{sorted(n for n in nums if nums.count(n) > 1)}"
     )
     assert nums == sorted(nums), "migrations are out of order in the file"
+
+
+def test_the_column_is_guaranteed_whatever_order_an_instance_arrived_in():
+    """The repair for a hazard that already happened.
+
+    m039 adds cancel_note, but an instance that ran the Lightning branch's own
+    m039 is already past 039 and never runs it. The column is then missing for
+    good there: the note write fails every time and the reason somebody typed
+    is dropped without a word. m044 adds it above the whole range, IF NOT
+    EXISTS, so every instance reaches it and the ones that already have it pay
+    nothing.
+    """
+    src = (ROOT / "migrations.py").read_text()
+    body = src[src.index("async def m044_tango_cancel_note_backfill"):]
+    assert "ADD COLUMN IF NOT EXISTS cancel_note TEXT" in body
+    # Above everything else, or an instance past that number skips it too.
+    import re
+    nums = [int(m) for m in re.findall(r"^async def m(\d+)_", src, re.M)]
+    assert max(nums) == 44, nums
+    # And m039 stays: an instance that ran it must not run it again.
+    assert "async def m039_tango_cancel_note" in src
+
+
+def test_a_note_that_could_not_be_stored_is_reported():
+    """Not only logged. Somebody who types a reason and is told the round was
+    cancelled has every reason to think the reason went with it."""
+    body = _fn("views_api.py", "api_tango_cancel")
+    assert "note_saved = True" in body
+    assert "note_saved = False" in body
+    assert '"note_saved": note_saved' in body
+    # The cancellation itself still succeeds — it is what frees the coins.
+    assert "raise" not in body.split("note_saved = False")[1]

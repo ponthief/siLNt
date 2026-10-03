@@ -6394,6 +6394,11 @@ async def api_tango_cancel(
         rid, status="CANCELLED", reject_reason=cancelled_by(role)
     )
     note = clean_cancel_note(data.note if data else None)
+    # Whether the note actually landed, SAID TO THE CALLER and not only to the
+    # log. Somebody who types a reason and is told the round was cancelled has
+    # every reason to believe the reason went with it; when the column is
+    # missing (see m044) it did not, and nothing on either phone could say so.
+    note_saved = True
     if note:
         try:
             updated = await update_tango_round(rid, cancel_note=note)
@@ -6401,6 +6406,7 @@ async def api_tango_cancel(
             # Said out loud rather than swallowed: this repo has a documented
             # case of a best-effort write failing silently on Postgres for
             # weeks (sp_contacts.last_used_at). The cancellation stands.
+            note_saved = False
             logger.warning(f"tango {rid}: could not store the cancel note: {e}")
     other = rnd.b_user_id if role == "a" else rnd.a_user_id
     if other:
@@ -6409,7 +6415,7 @@ async def api_tango_cancel(
         # goes in one — and somebody else's sentence about a mix is no more
         # ours to send that way than an amount is. It is read in the app.
         await _notify_tango(other, "Tango cancelled", "The other side cancelled a Tango.")
-    return updated.dict()
+    return {**updated.dict(), "note_saved": note_saved}
 
 
 # ── the Tango sweeper ────────────────────────────────────────────────────────
