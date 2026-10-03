@@ -23,7 +23,7 @@ from .helpers.scan import (
     BIP352_LABELED_ADDRESS_INDICES,
 )
 from .helpers.address_resolver import bip353_resolve
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, Cookie
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, Cookie
 from lnbits.core.models import WalletTypeInfo
 from lnbits.decorators import require_admin_key, require_invoice_key
 from lnbits.helpers import urlsafe_short_hash
@@ -282,6 +282,7 @@ from .models import (
     InviteRequest,
     ImportDescriptorData,
     CreateInvoiceData,
+    CancelTangoData,
     ProposeTangoData,
     AcceptTangoData,
     SignTangoData,
@@ -1119,9 +1120,16 @@ async def api_scan_wallet(
             # usually beats the 30-min sweep — so without this, an app-open find
             # would never notify. The client shows it as an in-app banner (app in
             # foreground) via the FCM onMessage handler.
-            new_found = (result or {}).get("utxos_found", 0) if isinstance(result, dict) else 0
+            #
+            # utxos_incoming, NOT utxos_found: a send that leaves change creates
+            # a new UTXO in this wallet, and this used to announce it as
+            # "Payment received". Sending money and being told you received some
+            # is worse than saying nothing — it reads as a payment from
+            # somebody else, and there is no way to tell from the banner that it
+            # is your own change. See helpers/scan.is_own_change.
+            new_found = (result or {}).get("utxos_incoming", 0) if isinstance(result, dict) else 0
             if new_found > 0:
-                await _notify_payment_found(wallet, new_found, (result or {}).get("amount_found"))
+                await _notify_payment_found(wallet, new_found, (result or {}).get("amount_incoming"))
             # Name any Tango coins this scan just turned up, while it is still
             # the moment they appeared. The send guard reads labels, so an
             # unlabelled share is one the guard cannot refuse — see
@@ -1548,10 +1556,12 @@ async def run_background_scans() -> None:
                 from_height=resume,
                 to_height=tip,
             )
-            new_found = (result or {}).get("utxos_found", 0)
+            # utxos_incoming, not utxos_found — this wallet's own change is a
+            # find and not a payment to it. See the interactive scan above.
+            new_found = (result or {}).get("utxos_incoming", 0)
             if new_found > 0:
                 await _notify_payment_found(
-                    wallet, new_found, (result or {}).get("amount_found")
+                    wallet, new_found, (result or {}).get("amount_incoming")
                 )
         except Exception as e:
             logger.warning(f"Background scan failed for {wid}: {e}")
@@ -6325,10 +6335,23 @@ async def api_tango_sign(
 @silnt_api_router.post("/api/v1/tango/rounds/{rid}/cancel")
 async def api_tango_cancel(
     rid: str,
+    data: Optional[CancelTangoData] = Body(None),
     key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
 ):
-    """Either side, until it is broadcast."""
-    from .helpers.tango import can_cancel, cancelled_by
+    """Either side, until it is broadcast, with an optional line to say why.
+
+    THE NOTE IS NEVER WORTH FAILING THE CANCELLATION FOR. Cancelling is what
+    gives both sides' coins back — get_reserved_tango_outpoints holds them
+    against a live round, so a round nobody closes keeps them out of the next
+    Tango. So the status goes in on its own and the note follows in a second
+    statement: a note too long for the column, or an instance whose m039 is the
+    other branch's (see migrations.py), loses the sentence and still frees the
+    coins.
+
+    The body is optional so a client that predates it, and one whose user left
+    the field empty, both POST nothing at all.
+    """
+    from .helpers.tango import can_cancel, cancelled_by, clean_cancel_note
 
     uid = key_info.wallet.user
     rnd = await get_tango_round(rid)
@@ -6343,8 +6366,21 @@ async def api_tango_cancel(
     updated = await update_tango_round(
         rid, status="CANCELLED", reject_reason=cancelled_by(role)
     )
+    note = clean_cancel_note(data.note if data else None)
+    if note:
+        try:
+            updated = await update_tango_round(rid, cancel_note=note)
+        except Exception as e:
+            # Said out loud rather than swallowed: this repo has a documented
+            # case of a best-effort write failing silently on Postgres for
+            # weeks (sp_contacts.last_used_at). The cancellation stands.
+            logger.warning(f"tango {rid}: could not store the cancel note: {e}")
     other = rnd.b_user_id if role == "a" else rnd.a_user_id
     if other:
+        # GENERIC, and the note is deliberately NOT in it. A push passes its
+        # title and body through Google in plaintext — which is why no amount
+        # goes in one — and somebody else's sentence about a mix is no more
+        # ours to send that way than an amount is. It is read in the app.
         await _notify_tango(other, "Tango cancelled", "The other side cancelled a Tango.")
     return updated.dict()
 

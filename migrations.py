@@ -1190,8 +1190,46 @@ async def m038_tango_pieces(db):
     )
 
 
-async def m039_tango_ln_address(db):
+async def m039_tango_cancel_note(db):
+    """A sentence from whoever stopped a Tango, for the other side to read.
+
+    SEPARATE FROM reject_reason, which is machine-readable: it holds "cancelled
+    by a", "expired" or "connection removed", and both helpers/tango.py and the
+    clients' tangoTurns.ts parse it to work out who ended a round and render
+    that as "You cancelled it" or "alice cancelled it". Free text in there would
+    break who_cancelled on both sides at once, and a person's own words are not
+    state anyway.
+
+    Optional, and nullable for every round that already exists — a round
+    cancelled before this column existed simply has nothing to say.
+
+    MERGE NOTE, now resolved. The Tango-over-Lightning work also added an
+    m039 (tango_ln_address) through m042. LNbits records the migration NUMBER,
+    so two m039s would mean whichever an instance ran first made the other
+    unreachable forever. This one kept 039 because it is what the live
+    instance had already run; the Lightning ones moved to m040–m043.
+
+    An instance that ran the OLD numbering is still possible, and would skip
+    this migration: db_version would already be past 39. api_tango_cancel
+    writes the note in a second statement and survives the column being
+    absent, so the worst case is cancellations without notes — the
+    cancellation itself frees both sides' coins and must never fail for the
+    sake of a sentence. Every migration here is idempotent for the same
+    reason: any ordering has to be survivable.
+    """
+    await db.execute(
+        "ALTER TABLE silnt.tango_rounds ADD COLUMN IF NOT EXISTS cancel_note TEXT"
+    )
+
+
+async def m040_tango_ln_address(db):
     """Where a user wants their Tango change sent, over Lightning.
+
+    RENUMBERED from m039 when this branch met master's m039_tango_cancel_note.
+    LNbits records the migration NUMBER, so an instance that ran the old
+    numbering is already past 039 and will not run that one; everything from
+    here is written IF NOT EXISTS so whichever order an instance arrives in,
+    re-running costs nothing instead of failing the whole migration step.
 
     A round's change output is the strongest remaining linkability problem in
     Tango: its value is fixed by the round's arithmetic, so spending it later
@@ -1213,7 +1251,7 @@ async def m039_tango_ln_address(db):
     """
     await db.execute(
         f"""
-        CREATE TABLE silnt.tango_ln_addresses (
+        CREATE TABLE IF NOT EXISTS silnt.tango_ln_addresses (
             user_id      TEXT NOT NULL,
             network      TEXT NOT NULL,
             address      TEXT NOT NULL,
@@ -1227,7 +1265,7 @@ async def m039_tango_ln_address(db):
     )
 
 
-async def m040_tango_change_payout(db):
+async def m041_tango_change_payout(db):
     """Which side routed its change, and the proof the clients check.
 
     A side that gave a Lightning address has its change output pay the
@@ -1249,16 +1287,16 @@ async def m040_tango_change_payout(db):
     Existing rounds routed nothing, and NULL reads as false everywhere, so
     there is nothing to backfill.
     """
-    await db.execute("ALTER TABLE silnt.tango_rounds ADD COLUMN a_payout BOOLEAN")
-    await db.execute("ALTER TABLE silnt.tango_rounds ADD COLUMN b_payout BOOLEAN")
-    await db.execute("ALTER TABLE silnt.tango_rounds ADD COLUMN a_payout_tweak TEXT")
-    await db.execute("ALTER TABLE silnt.tango_rounds ADD COLUMN b_payout_tweak TEXT")
+    await db.execute("ALTER TABLE silnt.tango_rounds ADD COLUMN IF NOT EXISTS a_payout BOOLEAN")
+    await db.execute("ALTER TABLE silnt.tango_rounds ADD COLUMN IF NOT EXISTS b_payout BOOLEAN")
+    await db.execute("ALTER TABLE silnt.tango_rounds ADD COLUMN IF NOT EXISTS a_payout_tweak TEXT")
+    await db.execute("ALTER TABLE silnt.tango_rounds ADD COLUMN IF NOT EXISTS b_payout_tweak TEXT")
     await db.execute(
-        "ALTER TABLE silnt.tango_rounds ADD COLUMN payout_sp_address TEXT"
+        "ALTER TABLE silnt.tango_rounds ADD COLUMN IF NOT EXISTS payout_sp_address TEXT"
     )
 
 
-async def m041_tango_change_payouts(db):
+async def m042_tango_change_payouts(db):
     """One row per routed change output, from collection to delivery.
 
     A side that gave a Lightning address has its round's change output pay the
@@ -1285,7 +1323,7 @@ async def m041_tango_change_payouts(db):
     """
     await db.execute(
         f"""
-        CREATE TABLE silnt.tango_change_payouts (
+        CREATE TABLE IF NOT EXISTS silnt.tango_change_payouts (
             txid            TEXT NOT NULL,
             vout            INTEGER NOT NULL,
             round_id        TEXT NOT NULL,
@@ -1314,16 +1352,16 @@ async def m041_tango_change_payouts(db):
         """
     )
     await db.execute(
-        "CREATE INDEX idx_tango_payouts_status "
+        "CREATE INDEX IF NOT EXISTS idx_tango_payouts_status "
         "ON silnt.tango_change_payouts (status, next_attempt_at);"
     )
     await db.execute(
-        "CREATE INDEX idx_tango_payouts_user "
+        "CREATE INDEX IF NOT EXISTS idx_tango_payouts_user "
         "ON silnt.tango_change_payouts (user_id);"
     )
 
 
-async def m042_tango_ln_address_switch(db):
+async def m043_tango_ln_address_switch(db):
     """Turning the change payout off without forgetting the address.
 
     "Turn off" used to DELETE the row, which made it a one-way door: the only
@@ -1340,5 +1378,5 @@ async def m042_tango_ln_address_switch(db):
     """
     await db.execute(
         "ALTER TABLE silnt.tango_ln_addresses "
-        "ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT true"
+        "ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT true"
     )

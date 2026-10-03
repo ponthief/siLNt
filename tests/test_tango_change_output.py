@@ -518,7 +518,7 @@ def test_the_address_sent_to_is_stored_on_the_payout():
     """The setting is a live value they can change or clear. This is where the
     money actually went, which is the question a dispute asks."""
     mig = (ROOT / "migrations.py").read_text()
-    body = mig[mig.index("async def m041_tango_change_payouts"):]
+    body = mig[mig.index("async def m042_tango_change_payouts"):]
     assert "ln_address      TEXT NOT NULL" in body
     assert "we sent it THERE" in body
 

@@ -97,7 +97,13 @@ def _install_package_stubs(db: FakeDB) -> None:
         return []
 
     async def insert_utxos_for_wallet(_wallet_id, utxos):
-        return len(utxos), sum(u.amount for u in utxos)
+        # Three values, like the real one: the third says WHICH were new, which
+        # is how the scan tells a payment from this wallet's own change.
+        return (
+            len(utxos),
+            sum(u.amount for u in utxos),
+            {(u.txid.hex(), int(u.vout)) for u in utxos},
+        )
 
     async def update_balance(_wallet_id, _balance):
         return None

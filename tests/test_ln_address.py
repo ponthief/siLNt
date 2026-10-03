@@ -264,7 +264,7 @@ def test_deleting_the_account_takes_it_with_it():
 
 def test_the_table_is_keyed_per_user_per_network():
     src = (ROOT / "migrations.py").read_text()
-    body = src[src.index("async def m039_tango_ln_address"):]
+    body = src[src.index("async def m040_tango_ln_address"):]
     assert "PRIMARY KEY (user_id, network)" in body
     # The provider's limits are stored from the moment it was verified.
     assert "min_sendable" in body and "max_sendable" in body
@@ -369,8 +369,10 @@ def test_the_switch_column_defaults_to_on():
     """Every row that existed was an address somebody saved while this was the
     only state there was. They were all on."""
     src = (ROOT / "migrations.py").read_text()
-    body = src[src.index("async def m042_tango_ln_address_switch"):]
-    assert "ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT true" in body
+    body = src[src.index("async def m043_tango_ln_address_switch"):]
+    assert "ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT true" in body
+    # IF NOT EXISTS because the renumbering means an instance can arrive
+    # at these migrations having already run some of them.
 
 
 def test_forgetting_it_is_still_possible():

@@ -33,6 +33,25 @@ SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 # at the standard m=0.
 BIP352_CHANGE_LABEL_INDEX = 0
 BIP352_LEGACY_CHANGE_LABEL_INDICES = [1]
+# Every label index that means "this coin is our own change coming back from a
+# send we made", current and legacy. Used to keep change out of the
+# payment-arrived count: a send that leaves change creates a new UTXO here, and
+# telling the sender "Payment received" about their own change is both wrong
+# and alarming — it reads as somebody having paid them.
+CHANGE_LABEL_INDICES = frozenset(
+    [BIP352_CHANGE_LABEL_INDEX, *BIP352_LEGACY_CHANGE_LABEL_INDICES]
+)
+
+
+def is_own_change(owned) -> bool:
+    """Is this detected output our own change, rather than a payment to us?
+
+    By the label it was found under. An unlabelled output is a payment to the
+    base address, and labels m>=2 are sub-addresses given out to be paid at —
+    both are somebody paying us. Only the change label is us paying ourselves.
+    """
+    label = getattr(owned, "label", None)
+    return label is not None and label.m in CHANGE_LABEL_INDICES
 # The labeled-address indices the receiver ALWAYS scans, whether or not a saved
 # wallet_addresses row exists for them. This is what makes deleting a labeled
 # address safe: its label stays in the scan set, so payments keep being detected
@@ -1323,25 +1342,64 @@ async def mark_spent_utxos_batch(
 
 
 async def set_last_scan_height(wallet_id: str, height: int) -> None:
+    """Move the resume point forward. NEVER BACKWARDS.
+
+    The resume point is "every block up to here has been looked at". Scanning
+    an EARLIER range does not make that less true, so a rescan of blocks the
+    wallet has already passed must not rewind it — the next scan would
+    otherwise start from there and redo everything above, which on mainnet is
+    hours of work for nothing.
+
+    It also makes a deliberate rescan safe to offer at all. Without this, any
+    "scan these older blocks again" control is a trap: it finds the payment
+    the user was looking for and silently throws away months of scanning.
+
+    A GUARDED UPDATE rather than a read-then-write, so two scans finishing at
+    once cannot have the slower one's older value land last. The WHERE does
+    the comparison in the database, in one statement, and says the same thing
+    on SQLite and Postgres without a dialect test.
+    """
     await db.execute(
-        "UPDATE silnt.wallets SET last_scan_height = :height WHERE id = :id",
-        {"height": height, "id": wallet_id},
+        "UPDATE silnt.wallets SET last_scan_height = :height "
+        "WHERE id = :id "
+        "AND (last_scan_height IS NULL OR last_scan_height < :height)",
+        {"height": int(height), "id": wallet_id},
     )
 
 
 def get_scan_progress(wallet_id: str) -> dict:
     return _scan_progress.get(
-        wallet_id, {"active": False, "current": 0, "total": 0, "found": 0, "amount": 0}
+        wallet_id,
+        {"active": False, "current": 0, "total": 0, "found": 0, "amount": 0,
+         "gap": None},
     )
 
 
-def set_scan_progress(wallet_id, current, total, found, active=True, amount=0):
+def set_scan_progress(
+    wallet_id, current, total, found, active=True, amount=0, gap=None
+):
+    """Where a scan has got to, for the app to poll.
+
+    `gap` IS THE ONE THAT CHANGES WHAT A USER SHOULD BELIEVE. The counters
+    reach their total whether or not every block could be read: a block the
+    oracle has not indexed is skipped, the blocks above it are still scanned,
+    and the progress bar still fills. Without this the app reported a complete
+    scan and "scanned to the latest block" for a wallet with a hole in it, and
+    a payment inside that hole simply never appeared — which is how a mainnet
+    change output went missing on 2026-10-03.
+
+    The resume point is held BELOW the gap so the block is looked at again, so
+    the wallet is genuinely not scanned to where the counters say it is. The
+    two have to be reported together or they contradict each other.
+    """
     _scan_progress[wallet_id] = {
         "active": active,
         "current": current,
         "total": total,
         "found": found,
         "amount": amount,
+        # The first block this scan could not read, or None.
+        "gap": gap,
     }
 
 
@@ -1450,8 +1508,23 @@ async def _scan_wallet(
     }
     total_found = 0
     total_found_amount = 0
+    # Of the new finds, the ones that are not this wallet's own change. This is
+    # what a "payment arrived" notification may be sent about; total_found is
+    # what the scan progress and the UI report, where change IS a find.
+    total_incoming = 0
+    total_incoming_amount = 0
     blocks_scanned = 0
-    last_scanned_height = start
+    # NOTHING HAS BEEN SCANNED YET, so the resume point is where the previous
+    # scan left it: one below the first block of this range.
+    #
+    # This was `start`, which claimed the first block had been looked at before
+    # anything had looked at it. A scan that read nothing — the first block
+    # unindexed, or a stop before the first batch — then wrote `start` as the
+    # resume point and the next scan began at start+1. The block was skipped
+    # for good, and a payment in it stayed invisible with the wallet reporting
+    # itself fully scanned. That is what a mainnet wallet hit on 2026-10-03;
+    # the balance only came back by editing last_scan_height in the database.
+    last_scanned_height = start - 1
     total_blocks = end - start + 1
     stopped = False
     # Height of the first block this scan could not read. Once set, the resume
@@ -1522,7 +1595,7 @@ async def _scan_wallet(
             await set_last_scan_height(wallet_id, last_scanned_height)
             set_scan_progress(
                 wallet_id, blocks_scanned, total_blocks, total_found,
-                active=False, amount=total_found_amount,
+                active=False, amount=total_found_amount, gap=scan_gap_height,
             )
             clear_scan_stop(wallet_id)
             break
@@ -1636,9 +1709,22 @@ async def _scan_wallet(
                     # Count only genuinely NEW utxos — re-detecting an existing
                     # one on a rescan is an upsert, not a discovery, and must not
                     # inflate the "found" count the UI shows.
-                    new_count, new_amount = await insert_utxos_for_wallet(wallet_id, result)
+                    new_count, new_amount, new_keys = await insert_utxos_for_wallet(
+                        wallet_id, result
+                    )
                     total_found += new_count
                     total_found_amount += new_amount
+                    # Split the new ones. Change is still a find — it is a
+                    # spendable coin and the balance and the UI count it — but
+                    # it is not a payment anybody made to this wallet, and the
+                    # notification is about the latter.
+                    for owned in result:
+                        if (owned.txid.hex(), int(owned.vout)) not in new_keys:
+                            continue
+                        if is_own_change(owned):
+                            continue
+                        total_incoming += 1
+                        total_incoming_amount += int(owned.amount or 0)
                     logger.info(
                         f"Block {h}: {len(result)} detected, {new_count} new"
                     )
@@ -1687,7 +1773,7 @@ async def _scan_wallet(
         # promise that they will not be looked at again.
         set_scan_progress(
             wallet_id, blocks_scanned, total_blocks, total_found,
-            amount=total_found_amount,
+            amount=total_found_amount, gap=scan_gap_height,
         )
         await set_last_scan_height(wallet_id, last_scanned_height)
 
@@ -1702,7 +1788,7 @@ async def _scan_wallet(
     await set_last_scan_height(wallet_id, last_scanned_height)
     set_scan_progress(
         wallet_id, blocks_scanned, total_blocks, total_found,
-        active=False, amount=total_found_amount,
+        active=False, amount=total_found_amount, gap=scan_gap_height,
     )
 
     try:
@@ -1732,11 +1818,27 @@ async def _scan_wallet(
         f"Scan done: {blocks_scanned} blocks, {total_found} UTXOs, balance={balance}"
     )
     if scan_gap_height is not None:
+        # Two different problems wear the same message, and they need
+        # different things from whoever reads it. A block the oracle has not
+        # reached yet clears on its own. A block BELOW where the oracle began
+        # indexing never will, and no amount of rescanning helps: the operator
+        # has to re-index it, or raise min_scan_height above it and accept
+        # that anything paid into this wallet before then is unfindable.
+        behind_tip = scan_gap_height >= last_scanned_height
         logger.warning(
             f"Wallet {wallet_id}: block {scan_gap_height} could not be read, so the "
             f"resume point was held at {last_scanned_height}. The next scan will "
             f"cover it again; the blocks above it were scanned but are not "
-            f"recorded as such."
+            f"recorded as such. "
+            + (
+                "If the oracle has simply not indexed that far yet, this "
+                "clears itself."
+                if behind_tip
+                else "This block is below the resume point, which means the "
+                "oracle has never indexed it — rescanning will not help, and "
+                "any payment in it stays invisible until the oracle is "
+                "re-indexed over that range."
+            )
         )
     # The number that decides what, if anything, to optimise next. If waiting on
     # the oracle dominates, faster matching — in any language — changes nothing.
@@ -1745,11 +1847,15 @@ async def _scan_wallet(
     logger.info(f"Scan phases: {oracle.stats.phases()}")
     set_scan_progress(
         wallet_id, blocks_scanned, total_blocks, total_found,
-        active=False, amount=total_found_amount,
+        active=False, amount=total_found_amount, gap=scan_gap_height,
     )
     return {
         "utxos_found": total_found,
         "amount_found": total_found_amount,
+        # The same numbers with this wallet's own change taken out. Notify on
+        # these, never on utxos_found — see is_own_change.
+        "utxos_incoming": total_incoming,
+        "amount_incoming": total_incoming_amount,
         "blocks_scanned": blocks_scanned,
         "final_height": last_scanned_height,
         "balance": balance,

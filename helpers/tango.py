@@ -225,6 +225,28 @@ def cancelled_by(role: str) -> str:
     return f"{_CANCELLED_BY}{role}"
 
 
+# How long a cancellation note may be. Short on purpose: it is one line under
+# "alice cancelled it", read by somebody who wants to know whether to offer
+# again — not a message thread. The cap is enforced here rather than on the
+# model because models.py cannot carry Field constraints (pydantic v1/v2).
+CANCEL_NOTE_MAX = 200
+
+
+def clean_cancel_note(note: Optional[str]) -> Optional[str]:
+    """The note as it will be stored, or None when there is nothing to store.
+
+    Whitespace is collapsed before the cap so a note padded with newlines
+    cannot push its own words past it, and so a note cannot lay out lines of
+    its own in somebody else's round list. Both clients render it as text, so
+    there is no markup to escape; what is left is making sure it stays one
+    short line.
+    """
+    text = " ".join((note or "").split())
+    if not text:
+        return None
+    return text[:CANCEL_NOTE_MAX]
+
+
 def who_cancelled(reason: Optional[str]) -> Optional[str]:
     """'a', 'b', or None when this reason is not a cancellation by a person.
 
