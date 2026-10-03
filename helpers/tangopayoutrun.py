@@ -121,6 +121,191 @@ def failure_body(status: str) -> str:
     return PAYOUT_UNPAYABLE_BODY if status == "unpayable" else PAYOUT_FAILED_BODY
 
 
+# ── Deferral: not every failure is worth an attempt ─────────────────────────
+#
+# MAX_ATTEMPTS and the backoff above are sized for a Lightning failure: a
+# provider restart, a route that is not there this minute. Six tries over two
+# hours is the right shape for that, and the wrong shape for an empty payout
+# wallet, which clears when a human notices and tops it up. Spending the whole
+# retry budget on a balance that cannot cover the payment means the row reaches
+# 'failed' — and the user is pushed "could not be sent" — over a problem that
+# was never theirs and that nobody was asked to fix any faster by trying again.
+#
+# So a payout the wallet demonstrably cannot fund is deferred instead: pushed
+# out without consuming an attempt, leaving the full budget for real Lightning
+# failures once there is money to attempt with.
+
+# How long to wait before looking again. The liquidity check runs on the same
+# two-minute pass, so this only has to be long enough not to re-read the wallet
+# for every row on every pass.
+DEFER_SECONDS = 300
+
+# …but not forever. A payout nobody can fund is still a payout somebody is
+# waiting on, and silence stops being kind at about a day. Past this the row
+# goes through the ordinary attempt path so it can reach 'failed' and say so.
+DEFER_MAX_SECONDS = 86_400
+
+DEFER_REASON = (
+    "Waiting on the payout wallet: its balance does not cover this payout."
+)
+
+
+def owed_age_seconds(created_at, now: int) -> int:
+    """How long a payout has been owed, from whatever `created_at` came back as.
+
+    The column is a TIMESTAMP rather than epoch seconds — it is defaulted by
+    the database, not computed in Python — so it arrives as a datetime on one
+    backend, a string on another, and a number if it was ever written by hand.
+
+    AN UNREADABLE VALUE RETURNS THE CAP, not zero. The age is only ever used to
+    stop deferring, so a value nothing can parse falls back to the behaviour
+    there was before deferral existed: attempt, fail, and tell the user. The
+    alternative — treating unknown as brand new — defers forever on a column
+    that cannot be read, which is the one outcome nobody is told about.
+    """
+    import datetime as _dt
+
+    if created_at is None:
+        return DEFER_MAX_SECONDS
+    stamp = None
+    if isinstance(created_at, (int, float)):
+        stamp = float(created_at)
+    elif isinstance(created_at, _dt.datetime):
+        at = created_at
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=_dt.timezone.utc)
+        stamp = at.timestamp()
+    elif isinstance(created_at, str):
+        try:
+            at = _dt.datetime.fromisoformat(created_at.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return DEFER_MAX_SECONDS
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=_dt.timezone.utc)
+        stamp = at.timestamp()
+    if stamp is None:
+        return DEFER_MAX_SECONDS
+    # Never negative: a clock that disagrees with the database is not a payout
+    # owed from the future.
+    return max(0, int(now) - int(stamp))
+
+
+def should_defer(
+    balance_sats: Optional[int],
+    net_sats: int,
+    owed_for_seconds: int = 0,
+) -> bool:
+    """Hold this payout back instead of attempting it?
+
+    ONLY WHEN WE KNOW. An unreadable balance is None and does NOT defer: a
+    wallet lookup that is broken while payments work would otherwise stall
+    every payout indefinitely, and the attempt it skips is the thing that would
+    have delivered the money. Failing open costs an attempt; failing closed
+    costs the delivery.
+
+    THERE IS NO FEE RESERVE IN THIS. A balance below the amount cannot pay,
+    full stop. A balance above the amount but short of the routing fee is a
+    genuine Lightning failure — one the backoff and the attempt count are for —
+    and guessing a reserve here would defer payouts that would have gone
+    through.
+    """
+    if balance_sats is None:
+        return False
+    if int(owed_for_seconds or 0) >= DEFER_MAX_SECONDS:
+        return False
+    return int(balance_sats) < int(net_sats or 0)
+
+
+def next_deferral_at(now: int) -> int:
+    return int(now) + DEFER_SECONDS
+
+
+# ── Recovery: putting stopped payouts back in the queue ─────────────────────
+
+
+def requeue_on_recovery(was_ok: Optional[bool], now_ok: bool) -> bool:
+    """Did the payout wallet just come back up?
+
+    A genuine down→up only. `was_ok is None` means no state was ever recorded —
+    a first run, or a fresh database — and that is not a recovery: treating it
+    as one would requeue every stopped payout on the first pass after a
+    restart, including the ones that stopped for reasons a top-up does not fix.
+    """
+    return was_ok is False and bool(now_ok)
+
+
+# Which stopped payouts a top-up should revive. 'failed' only: 'unpayable' is
+# about the destination — an address that does not resolve, a provider refusing
+# the amount — and no amount of money in the payout wallet makes it payable.
+# Requeueing those would burn six more attempts and push the user a second
+# "could not be sent" for a thing they already have to fix themselves.
+REQUEUE_STATUS = "failed"
+
+
+# ── Telling the operator a payout stopped ──────────────────────────────────
+#
+# Distinct from LIQUIDITY_SERVICE below, and deliberately NOT routed through
+# notify_service_health_change: that dedups on a service's up/down state, so an
+# operator who has already been told the wallet is low hears nothing more when
+# the payouts underneath it start stopping. These are rare by construction —
+# a payout reaches a stop once — so there is nothing to dedup against.
+
+PAYOUT_STOPPED_TITLE = "Tango payout stopped"
+
+
+# ── …and what the USER is told about the same row ──────────────────────────
+#
+# `last_error` is written for an operator: a raw provider exception, or
+# DEFER_REASON, which says the payout wallet is short. The user's own payout
+# list used to hand that straight back, which is the same mistake
+# liquidity_reason exists to avoid — "the service is low on Lightning funds" is
+# an invitation to work out how low, and a user who knows their own payout
+# amount already has a lower bound. So the user endpoint shows this instead:
+# the status, in a sentence, and never the operator's reason.
+
+_USER_STATUS_TEXT = {
+    "pending": "Waiting to be sent.",
+    "paid": "Sent.",
+    # True since a top-up requeues these automatically; before that it was a
+    # promise only an operator pressing a button could keep.
+    "failed": "Could not be sent yet. It will be retried.",
+    "unpayable": (
+        "Could not be sent to your Lightning address. Check that it is right."
+    ),
+}
+
+
+def user_facing_error(status: str) -> Optional[str]:
+    """What a user sees in place of `last_error`. None when nothing is wrong."""
+    if status == "paid" or status == "pending":
+        return None
+    return _USER_STATUS_TEXT.get(status, _USER_STATUS_TEXT["failed"])
+
+
+def operator_alert(
+    status: str, txid: str, vout: int, attempts: int, net_sats: int, error: str
+) -> str:
+    """What an operator needs: which payout, how much, and whose move it is.
+
+    The amount is in it. This goes to the operator's own ntfy topic, not
+    through FCM — and the figure is already public, since it is the value of
+    `txid:vout` on chain. The Lightning address is NOT in it: that is the
+    user's, it is stored encrypted, and an operator who needs it has the admin
+    console.
+    """
+    who = (
+        "The destination refused it — the user has to correct their Lightning "
+        "address."
+        if status == "unpayable"
+        else "Check the payout wallet, then retry it from the admin console."
+    )
+    tail = f" Last error: {error.strip()}" if (error or "").strip() else ""
+    return (
+        f"{txid[:12]}…:{vout} — {int(net_sats)} sats not sent after "
+        f"{int(attempts)} attempts ({status}). {who}{tail}"
+    )
+
+
 # ── Solvency: can this server actually pay what it is about to take on? ─────
 #
 # A routed change output becomes the instance's the moment the round confirms,

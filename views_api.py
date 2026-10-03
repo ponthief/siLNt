@@ -225,6 +225,7 @@ from .crud import (
     tango_routing_counts,
     list_broadcast_tango_rounds_with_payouts,
     requeue_tango_payout,
+    requeue_failed_tango_payouts,
     tango_payout_totals,
     touch_sp_contact,
     list_silnt_user_ids,
@@ -232,6 +233,7 @@ from .crud import (
     update_ntfy_config,
     send_ntfy_notification,
     notify_service_health_change,
+    service_health_state,
     create_admin_alert,
     list_admin_alerts,
     count_open_admin_alerts,
@@ -4697,11 +4699,18 @@ async def enqueue_tango_payouts() -> int:
     return made
 
 
-async def _attempt_tango_payout(row: dict) -> str:
-    """One delivery attempt. Returns the new status.
+async def _attempt_tango_payout(
+    row: dict, balance_sats: Optional[int] = None
+) -> str:
+    """One delivery attempt. Returns the new status, or 'deferred'.
 
     Resolve, ask for an invoice, pay it. Each step can fail two ways and the
     difference decides everything downstream — see tangopayoutrun.status_after.
+
+    `balance_sats` is the payout wallet's balance as read once at the top of
+    the pass, not per row: see tangopayoutrun.should_defer for why a payout the
+    wallet cannot cover is held back rather than attempted, and why an unknown
+    balance attempts anyway.
     """
     from .helpers.lnaddress import (
         LnAddressError,
@@ -4712,8 +4721,14 @@ async def _attempt_tango_payout(row: dict) -> str:
     from .helpers.tangopayoutrun import (
         failure_body,
         next_attempt_at,
+        next_deferral_at,
+        operator_alert,
+        owed_age_seconds,
+        should_defer,
         status_after,
+        DEFER_REASON,
         PAYOUT_FAILED_TITLE,
+        PAYOUT_STOPPED_TITLE,
     )
 
     txid, vout = row["txid"], int(row["vout"])
@@ -4725,6 +4740,30 @@ async def _attempt_tango_payout(row: dict) -> str:
     cfg = await get_backend_config(row["network"])
     wallet_id = (cfg.tango_change_payout_wallet_id or "").strip()
     address = (row.get("ln_address") or "").strip()
+
+    # Before anything is spent. A wallet that cannot cover this payout is not a
+    # Lightning failure and must not eat one of the six attempts — the user
+    # would be told "could not be sent" over an operator's empty wallet. Note
+    # `attempts` is NOT written here, and the age cap inside should_defer is
+    # what stops a payout being deferred in silence forever.
+    # `address` first: a payout with nowhere to go is unpayable whatever the
+    # wallet holds, and deferring it would delay by up to a day the one message
+    # the user can act on.
+    if address and should_defer(
+        balance_sats,
+        int(row.get("net_sats") or 0),
+        owed_for_seconds=owed_age_seconds(row.get("created_at"), int(time.time())),
+    ):
+        await update_tango_payout(
+            txid, vout,
+            next_attempt_at=next_deferral_at(int(time.time())),
+            last_error=DEFER_REASON,
+        )
+        logger.warning(
+            f"tango payout {txid}:{vout} deferred: payout wallet holds "
+            f"{balance_sats} sats against {row.get('net_sats')} owed here"
+        )
+        return "deferred"
 
     if not address:
         permanent, error = True, "No Lightning address on record for this payout."
@@ -4789,6 +4828,20 @@ async def _attempt_tango_payout(row: dict) -> str:
     # Tell them once, when it stops being retried. NO AMOUNT — this goes
     # through Google in plaintext.
     if status != "pending" and not row.get("notified"):
+        # The operator first: theirs is the actionable half, and until this
+        # existed a payout stopping produced nothing but a log line. It is a
+        # plain ntfy rather than notify_service_health_change on purpose —
+        # that dedups on a service's up/down state, so an operator already
+        # told the wallet was low would hear nothing about the payouts
+        # stopping underneath it.
+        await send_ntfy_notification(
+            PAYOUT_STOPPED_TITLE,
+            operator_alert(
+                status, txid, vout, attempts, int(row.get("net_sats") or 0), error
+            ),
+            tags=["money_with_wings", "warning"],
+            priority="high" if status == "failed" else "default",
+        )
         await _notify_tango(
             row["user_id"], PAYOUT_FAILED_TITLE, failure_body(status)
         )
@@ -4798,14 +4851,21 @@ async def _attempt_tango_payout(row: dict) -> str:
 
 async def run_tango_payouts() -> dict:
     """One pass: check we can pay, create what is due, deliver what is owed."""
-    out = {"enqueued": 0, "paid": 0, "retrying": 0, "stopped": 0}
+    out = {"enqueued": 0, "paid": 0, "retrying": 0, "stopped": 0, "deferred": 0}
     # First, because it is the thing an operator needs to hear about and it
     # must not be skipped by an enqueue that throws. Fires an ntfy only on a
-    # crossing, in either direction.
+    # crossing, in either direction, and revives stopped payouts on the way up.
+    #
+    # It also hands back the balance it read, which is what the deferral below
+    # runs on — one wallet read per pass rather than one per payout.
+    liq = {}
     try:
-        await check_tango_payout_liquidity()
+        liq = await check_tango_payout_liquidity() or {}
     except Exception as e:
         logger.error(f"[silnt] tango payout liquidity check: {_exc_text(e)}")
+    balances = {
+        net: state.get("balance_sats") for net, state in liq.items()
+    }
     try:
         out["enqueued"] = await enqueue_tango_payouts()
     except Exception as e:
@@ -4818,8 +4878,10 @@ async def run_tango_payouts() -> dict:
         return out
 
     for row in due:
+        network = row.get("network")
+        balance = balances.get(network)
         try:
-            status = await _attempt_tango_payout(row)
+            status = await _attempt_tango_payout(row, balance_sats=balance)
         except Exception as e:
             # One stuck payout must not stop the others.
             logger.error(
@@ -4828,8 +4890,18 @@ async def run_tango_payouts() -> dict:
             continue
         if status == "paid":
             out["paid"] += 1
+            # Spend it from the figure the rest of this pass is judged
+            # against. The balance was read once, and five payouts of 1,000
+            # against a wallet holding 2,000 would otherwise all look fundable
+            # and three of them would burn an attempt finding out.
+            if balance is not None:
+                balances[network] = max(
+                    0, balance - int(row.get("net_sats") or 0)
+                )
         elif status == "pending":
             out["retrying"] += 1
+        elif status == "deferred":
+            out["deferred"] += 1
         else:
             out["stopped"] += 1
     return out
@@ -4899,15 +4971,31 @@ async def tango_payout_liquidity(network: str) -> dict:
 
 
 async def check_tango_payout_liquidity() -> dict:
-    """Fire an ntfy when the payout wallet crosses the operator's floor.
+    """Fire an ntfy when the payout wallet crosses the operator's floor, and
+    revive stopped payouts when it crosses back up.
 
     notify_service_health_change dedups per service and fires on BOTH
     transitions, so a top-up is announced too — otherwise an operator who
     refilled the wallet would have to guess whether it took.
+
+    THE RECOVERY DOES WORK, not just a notification. A payout that stopped
+    because the wallet was empty stays 'failed' forever otherwise: the due
+    queue selects 'pending' only, so topping the wallet up moved nothing until
+    somebody pressed retry on each row by hand. The state has to be read BEFORE
+    notify_service_health_change writes it, which is the whole reason
+    service_health_state exists.
     """
-    from .helpers.tangopayoutrun import LIQUIDITY_SERVICE
+    from .helpers.tangopayoutrun import (
+        requeue_on_recovery,
+        LIQUIDITY_SERVICE,
+        REQUEUE_STATUS,
+    )
 
     seen = {}
+    # One network today, and LIQUIDITY_SERVICE is a single state row rather
+    # than one per network — a second entry here would need the service name
+    # to carry the network, or the second iteration would read the state the
+    # first just wrote.
     for network in ("mainnet",):
         cfg = await get_backend_config(network)
         if not cfg.tango_change_payout_enabled:
@@ -4918,8 +5006,28 @@ async def check_tango_payout_liquidity() -> dict:
             f"{state.get('available_sats')} sats available against a "
             f"{state.get('threshold_sats')} sat floor."
         )
+        was_ok = await service_health_state(LIQUIDITY_SERVICE)
         await notify_service_health_change(
             LIQUIDITY_SERVICE, bool(state.get("ok")), detail
+        )
+        if not requeue_on_recovery(was_ok, bool(state.get("ok"))):
+            continue
+        try:
+            revived = await requeue_failed_tango_payouts(network)
+        except Exception as e:
+            logger.error(f"[silnt] tango payout requeue: {_exc_text(e)}")
+            continue
+        if not revived:
+            continue
+        logger.info(
+            f"[silnt] tango payouts: payout wallet recovered, requeued "
+            f"{revived} {REQUEUE_STATUS} payout(s) on {network}"
+        )
+        await send_ntfy_notification(
+            "Tango payouts requeued",
+            f"The payout wallet is back above its floor. {revived} stopped "
+            f"payout(s) on {network} are being retried.",
+            tags=["money_with_wings"],
         )
     return seen
 
@@ -5105,8 +5213,19 @@ async def api_my_tango_payouts(
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ):
     """A user's own payouts, so "where is my change?" has an answer in the app
-    rather than only in the admin console."""
+    rather than only in the admin console.
+
+    `last_error` is replaced rather than passed through. It is written for an
+    operator — a raw provider exception, or the deferral reason, which says the
+    payout wallet is short — and a user who knows their own payout amount and
+    is told the wallet cannot cover it has a lower bound on the instance's
+    balance. See tangopayoutrun.user_facing_error for what they get instead.
+    """
+    from .helpers.tangopayoutrun import user_facing_error
+
     rows = await list_tango_payouts_for_user(key_info.wallet.user, network)
+    for row in rows:
+        row["last_error"] = user_facing_error(row.get("status") or "")
     return {"payouts": rows}
 
 # ── Admin: delete a user account ──────────────────────────────────────────────

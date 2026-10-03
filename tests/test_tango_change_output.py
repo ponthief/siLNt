@@ -698,6 +698,312 @@ def test_the_liquidity_check_runs_before_anything_can_throw():
     )
 
 
+def _code(body: str) -> str:
+    """`_fn` source with its docstring removed.
+
+    For assertions that a name does NOT appear: several of these rules are
+    explained in the docstring in the very words the assertion looks for, so a
+    match there would pass a test about what the code does on the strength of
+    what the comment says."""
+    parts = body.split('"""')
+    return parts[0] + "".join(parts[2:]) if len(parts) >= 3 else body
+
+
+# ── a wallet that cannot pay is not a Lightning failure ─────────────────────
+#
+# MAX_ATTEMPTS and the backoff are sized for a provider restart or a route
+# that is not there this minute. Spending all six on an empty payout wallet
+# pushes the user "could not be sent" over a problem that was never theirs.
+
+
+@pytest.mark.parametrize(
+    "balance,net,want",
+    [
+        (0, 691, True),              # empty wallet, money owed
+        (690, 691, True),            # one sat short is still short
+        (691, 691, False),           # exactly covers it: attempt
+        (100_000, 691, False),
+        (None, 691, False),          # unknown balance: see the test below
+        (0, 0, False),               # nothing owed, nothing to defer
+    ],
+)
+def test_a_payout_is_deferred_only_when_the_wallet_cannot_cover_it(
+    balance, net, want
+):
+    assert PR.should_defer(balance, net) is want
+
+
+def test_an_unreadable_balance_attempts_rather_than_stalling():
+    """The opposite direction from the routing check, and deliberately so.
+    Refusing to ROUTE on an unknown balance costs a user a privacy
+    improvement; refusing to ATTEMPT on one stalls money already owed, for as
+    long as the wallet lookup stays broken — and the attempt it skips is the
+    thing that would have delivered it."""
+    assert PR.should_defer(None, 10**9) is False
+    src = (ROOT / "helpers" / "tangopayoutrun.py").read_text()
+    assert "Failing open costs an attempt" in src
+
+
+def test_there_is_no_fee_reserve_in_the_deferral():
+    """A balance above the amount but short of the routing fee is a genuine
+    Lightning failure — what the backoff and the attempt count are for.
+    Guessing a reserve here would defer payouts that would have gone through."""
+    assert PR.should_defer(1_000, 1_000) is False
+    src = (ROOT / "helpers" / "tangopayoutrun.py").read_text()
+    assert "THERE IS NO FEE RESERVE IN THIS" in src
+
+
+def test_a_deferred_payout_is_not_deferred_forever():
+    """Deferring is kinder than a false "could not be sent", but only for so
+    long: past the cap the row goes through the ordinary path so it can reach
+    'failed' and tell somebody."""
+    assert PR.should_defer(0, 691, owed_for_seconds=0) is True
+    assert PR.should_defer(0, 691, owed_for_seconds=PR.DEFER_MAX_SECONDS) is False
+    assert PR.DEFER_MAX_SECONDS <= 7 * 86_400, "a week of silence is not a cap"
+
+
+@pytest.mark.parametrize(
+    "created,now,want",
+    [
+        (1_000, 1_600, 600),                       # epoch seconds
+        ("2026-10-03T00:00:00", 0, None),          # parsed, value checked below
+        (None, 123, "cap"),                        # never written
+        ("not a timestamp", 123, "cap"),           # unparseable
+    ],
+)
+def test_the_age_of_a_debt_is_read_from_whatever_the_column_returns(
+    created, now, want
+):
+    got = PR.owed_age_seconds(created, now)
+    if want == "cap":
+        assert got == PR.DEFER_MAX_SECONDS
+    elif want is not None:
+        assert got == want
+    else:
+        assert got >= 0
+
+
+def test_an_unreadable_timestamp_fails_towards_telling_somebody():
+    """Treating unknown as brand new would defer forever on a column nothing
+    can read, which is the one outcome nobody is told about."""
+    assert PR.owed_age_seconds(object(), 0) == PR.DEFER_MAX_SECONDS
+    assert PR.should_defer(0, 691, PR.owed_age_seconds(None, 0)) is False
+
+
+def test_a_naive_timestamp_is_read_as_utc_not_local():
+    import datetime as dt
+    at = dt.datetime(2026, 10, 3, 12, 0, 0)
+    aware = at.replace(tzinfo=dt.timezone.utc)
+    now = int(aware.timestamp()) + 60
+    assert PR.owed_age_seconds(at, now) == 60
+    assert PR.owed_age_seconds(aware, now) == 60
+
+
+def test_a_clock_disagreement_is_not_a_debt_from_the_future():
+    assert PR.owed_age_seconds(10_000, 9_000) == 0
+
+
+def test_the_deferral_does_not_spend_an_attempt():
+    """The whole point. It returns before anything increments `attempts`, and
+    writes only the schedule and the reason."""
+    body = _fn("views_api.py", "_attempt_tango_payout")
+    head, _, tail = body.partition('return "deferred"')
+    assert tail, "the defer path should return its own status"
+    assert "should_defer(" in head
+    assert "attempts=attempts" not in head, (
+        "a deferral that writes the attempt count has spent one"
+    )
+    # …and it happens before any of the delivery machinery runs.
+    assert body.index("should_defer(") < body.index("resolve_ln_address_now(")
+
+
+def test_a_payout_with_nowhere_to_go_is_not_deferred_behind_an_empty_wallet():
+    """It is unpayable whatever the wallet holds, and deferring it would delay
+    by up to a day the one message the user can act on."""
+    body = _fn("views_api.py", "_attempt_tango_payout")
+    assert "if address and should_defer(" in body
+
+
+def test_a_deferral_says_why_in_the_row():
+    """A payout sitting still with an empty `last_error` is indistinguishable
+    from one nobody has looked at."""
+    body = _fn("views_api.py", "_attempt_tango_payout")
+    assert "last_error=DEFER_REASON" in body
+    assert "payout wallet" in PR.DEFER_REASON
+
+
+def test_the_balance_is_read_once_per_pass_not_once_per_payout():
+    body = _fn("views_api.py", "run_tango_payouts")
+    assert "balances" in body
+    assert "balance_sats=balance" in body
+    assert "await tango_payout_liquidity(" not in _code(body), (
+        "the balance comes from the liquidity check that already ran"
+    )
+
+
+def test_what_is_paid_comes_off_the_balance_the_rest_of_the_pass_is_judged_by():
+    """Five payouts of 1,000 against a wallet holding 2,000 would otherwise all
+    look fundable, and three of them would burn an attempt finding out."""
+    body = _fn("views_api.py", "run_tango_payouts")
+    assert "balances[network] = max(" in body
+
+
+# ── a top-up puts stopped payouts back in the queue ─────────────────────────
+
+
+@pytest.mark.parametrize(
+    "was,now,want",
+    [
+        (False, True, True),        # the recovery
+        (True, True, False),        # still fine: nothing stopped
+        (False, False, False),      # still down
+        (True, False, False),       # just went down
+        (None, True, False),        # first ever reading is not a recovery
+        (None, False, False),
+    ],
+)
+def test_only_a_real_recovery_requeues(was, now, want):
+    assert PR.requeue_on_recovery(was, now) is want
+
+
+def test_a_first_reading_does_not_revive_everything_that_ever_stopped():
+    """A fresh database or a restarted instance would otherwise requeue every
+    stopped payout on its first pass, including the ones a top-up does not
+    fix."""
+    assert PR.requeue_on_recovery(None, True) is False
+    src = (ROOT / "helpers" / "tangopayoutrun.py").read_text()
+    assert "no state was ever recorded" in src
+
+
+def test_a_top_up_revives_failed_but_never_unpayable():
+    """Money in the payout wallet does not make a bad address good. Requeueing
+    those would burn six more attempts and push the user a second "could not be
+    sent" for a thing they have to fix themselves."""
+    assert PR.REQUEUE_STATUS == "failed"
+    body = _fn("crud.py", "requeue_failed_tango_payouts")
+    assert "status = 'failed'" in body
+    assert "unpayable" not in _code(body), (
+        "unpayable must not appear in the query, only in the reasoning"
+    )
+
+
+def test_the_bulk_requeue_resets_the_backoff_but_not_the_address():
+    """A top-up says nothing about the address. Re-reading it here would
+    quietly redirect a payout on an unrelated trigger — unlike the manual
+    retry, where a corrected address is the usual reason somebody pressed it."""
+    body = _code(_fn("crud.py", "requeue_failed_tango_payouts"))
+    assert "attempts = 0" in body
+    assert "ln_address" not in body
+    assert "notified" not in body, (
+        "they have already been told once; a second identical push is noise"
+    )
+
+
+def test_the_recovery_reads_the_state_before_the_write_lands():
+    """notify_service_health_change overwrites it, so a caller that wants to DO
+    something on a recovery has to read first. That is why
+    service_health_state exists."""
+    body = _fn("views_api.py", "check_tango_payout_liquidity")
+    assert body.index("service_health_state(") < body.index(
+        "notify_service_health_change("
+    )
+    assert "requeue_failed_tango_payouts(" in body
+
+
+def test_a_requeue_that_throws_does_not_lose_the_notification():
+    body = _fn("views_api.py", "check_tango_payout_liquidity")
+    head, _, tail = body.partition("requeue_failed_tango_payouts(")
+    assert "notify_service_health_change(" in head
+    assert "except Exception" in tail
+
+
+def test_the_stored_health_state_is_read_without_raising():
+    body = _fn("crud.py", "service_health_state")
+    assert body.count("except Exception") >= 2
+    assert "return None" in body
+
+
+# ── telling the operator a payout stopped ──────────────────────────────────
+
+
+def test_a_stopped_payout_reaches_the_operator_not_just_the_log():
+    """Until this existed, a payout stopping produced a log line, a push to the
+    user, and nothing an operator would ever see."""
+    body = _fn("views_api.py", "_attempt_tango_payout")
+    assert "send_ntfy_notification(" in body
+    assert "PAYOUT_STOPPED_TITLE" in body
+
+
+def test_the_operator_alert_is_not_routed_through_the_health_dedup():
+    """That dedups on a service's up/down state, so an operator already told
+    the wallet was low would hear nothing about the payouts stopping
+    underneath it."""
+    body = _fn("views_api.py", "_attempt_tango_payout")
+    assert "notify_service_health_change(" not in body
+    src = (ROOT / "helpers" / "tangopayoutrun.py").read_text()
+    assert "nothing to dedup against" in src
+
+
+def test_the_operator_alert_names_the_payout_and_whose_move_it_is():
+    failed = PR.operator_alert("failed", "d43981a5bb7c" + "0" * 52, 1, 6, 591, "no route")
+    unpayable = PR.operator_alert("unpayable", "a" * 64, 0, 1, 591, "no such user")
+    for text in (failed, unpayable):
+        assert "591" in text
+    assert "admin console" in failed
+    assert "Lightning address" in unpayable
+    assert failed != unpayable
+
+
+def test_the_operator_alert_does_not_carry_the_users_address():
+    """It is the user's, it is stored encrypted, and an operator who needs it
+    has the admin console."""
+    import inspect
+    params = inspect.signature(PR.operator_alert).parameters
+    assert "ln_address" not in params and "address" not in params
+
+
+def test_a_user_is_never_handed_the_operators_reason():
+    """`last_error` carries a raw provider exception, or the deferral reason,
+    which says the payout wallet is short — and a user who knows their own
+    payout amount then has a lower bound on the instance's balance. The same
+    mistake liquidity_reason exists to avoid."""
+    body = _fn("views_api.py", "api_my_tango_payouts")
+    assert 'row["last_error"] = user_facing_error(' in body
+    for status in ("pending", "paid", "failed", "unpayable"):
+        text = PR.user_facing_error(status) or ""
+        assert "wallet" not in text.lower(), status
+        assert "balance" not in text.lower(), status
+
+
+def test_nothing_is_wrong_until_something_is():
+    assert PR.user_facing_error("pending") is None
+    assert PR.user_facing_error("paid") is None
+    assert PR.user_facing_error("failed")
+    assert PR.user_facing_error("unpayable")
+    # An unknown status is a problem, not a silence.
+    assert PR.user_facing_error("something-new")
+
+
+def test_the_retry_promise_to_the_user_is_now_true():
+    """It says a failed payout will be retried. Before the top-up requeue that
+    was a promise only an operator pressing a button could keep."""
+    assert "retried" in PR.user_facing_error("failed")
+    body = _fn("views_api.py", "check_tango_payout_liquidity")
+    assert "requeue_failed_tango_payouts(" in body
+
+
+def test_the_operator_is_told_once_per_payout_like_the_user_is():
+    """Both sit behind the same `notified` flag, so neither repeats on every
+    pass of a queue that is not moving."""
+    body = _fn("views_api.py", "_attempt_tango_payout")
+    guard = 'if status != "pending" and not row.get("notified"):'
+    assert guard in body
+    after = body.partition(guard)[2]
+    assert "send_ntfy_notification(" in after
+    assert "_notify_tango(" in after
+    assert "notified=True" in after
+
+
 def test_the_threshold_is_configurable_and_defaulted():
     src = (ROOT / "models.py").read_text()
     assert "tango_change_min_wallet_balance_sats: int = 10_000" in src

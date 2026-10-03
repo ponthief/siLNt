@@ -760,6 +760,32 @@ async def send_ntfy_notification(
 HEALTH_STATE_ID = "service_health_state"
 
 
+async def service_health_state(service: str) -> Optional[bool]:
+    """The last up/down state recorded for `service`, or None if never seen.
+
+    Exists so a caller can tell a recovery (down→up) from a first sighting:
+    notify_service_health_change swallows that distinction on purpose — it only
+    has to decide whether to send — and a caller that wants to DO something on
+    a recovery needs to read the state before the write lands. Best-effort,
+    like everything else here; an unreadable state is None, which no caller
+    treats as a transition.
+    """
+    try:
+        row = await db.fetchone(
+            "SELECT json_data FROM silnt.backend_config WHERE id = :id",
+            {"id": f"{HEALTH_STATE_ID}:{service}"},
+        )
+    except Exception:
+        return None
+    if not row:
+        return None
+    try:
+        up = json.loads(row["json_data"]).get("up")
+    except Exception:
+        return None
+    return None if up is None else bool(up)
+
+
 async def notify_service_health_change(service: str, is_up: bool, detail: str = "") -> None:
     """
     Fire an ntfy notification ONLY when a service's up/down state changes
@@ -4110,3 +4136,47 @@ async def requeue_tango_payout(txid: str, vout: int, ln_address: str) -> None:
             "vout": int(vout),
         },
     )
+
+
+async def requeue_failed_tango_payouts(network: str) -> int:
+    """Put every 'failed' payout on `network` back in the queue. Returns how
+    many moved.
+
+    Called when the payout wallet crosses back above its floor. Three things
+    this deliberately does NOT do:
+
+      * It does not touch 'unpayable'. Those stopped because of the
+        destination, and money in the payout wallet does not make a bad
+        address good — see tangopayoutrun.REQUEUE_STATUS.
+      * It does not rewrite `ln_address`. The manual retry re-reads the user's
+        current address because the usual reason a HUMAN retries is that the
+        address was just fixed; a top-up says nothing about the address, and
+        re-reading it here would quietly redirect a payout on an unrelated
+        trigger.
+      * It does not reset `notified`. The user has already been told once that
+        this payout stopped. If the retry works they will see it land; if it
+        stops again, a second identical push hours later is noise.
+
+    `attempts` and the backoff do reset: there is money now, so the first
+    attempt should not wait an hour on a clock set by the old failures.
+    """
+    # Counted before the UPDATE rather than from a rowcount, which this
+    # database layer does not report consistently across SQLite and Postgres.
+    # Not atomic with it, which is fine: the number is for a log line and an
+    # ntfy, and the UPDATE is what actually moves the money along.
+    row = await db.fetchone(
+        "SELECT COUNT(*) AS n FROM silnt.tango_change_payouts "
+        "WHERE network = :net AND status = 'failed'",
+        {"net": network},
+    )
+    n = int(row["n"]) if row else 0
+    if not n:
+        return 0
+    await db.execute(
+        "UPDATE silnt.tango_change_payouts "
+        "SET status = 'pending', attempts = 0, next_attempt_at = :now, "
+        "    last_error = NULL "
+        "WHERE network = :net AND status = 'failed'",
+        {"now": int(time.time()), "net": network},
+    )
+    return n
