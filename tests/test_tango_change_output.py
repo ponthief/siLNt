@@ -772,11 +772,15 @@ def test_only_the_routing_side_gets_a_derived_script():
     line = next(ln for ln in src.splitlines() if ln.startswith("PAYOUT_K"))
     k = ast.literal_eval(line.split("=", 1)[1].strip())
     assert k["a"] != k["b"], k
+    # BOTH are derived at accept, which is where the input set freezes.
     accept = _fn("views_api.py", "api_tango_accept")
     assert 'if b_payout and amounts["b_change"]:' in accept
     assert '_tango_payout_change_spk(rnd, "b", frozen)' in accept
+    assert 'if rnd.a_payout and amounts["a_change"]:' in accept
+    assert '_tango_payout_change_spk(rnd, "a", frozen)' in accept
+    # And NOT at sign. See test_a_routed_output_exists_before_its_owner_signs.
     sign = _fn("views_api.py", "api_tango_sign")
-    assert '_tango_payout_change_spk(rnd, "a", frozen)' in sign
+    assert "_tango_payout_change_spk(" not in sign
 
 
 def test_a_payout_row_is_created_only_for_the_side_that_routed():
@@ -796,3 +800,41 @@ def test_labelling_skips_only_the_routed_sides_change():
     body = _fn("views_api.py", "_tango_label_change")
     assert "None if rnd.a_payout else rnd.a_change_spk" in body
     assert "None if rnd.b_payout else rnd.b_change_spk" in body
+
+
+def test_a_routed_output_exists_before_its_owner_signs():
+    """A COULD NOT APPROVE ITS OWN ROUND, and would never have been able to.
+
+    A's routed change was derived inside A's own /sign call. A fetches the
+    round, verifies it and assembles the transaction BEFORE signing, so at
+    that moment a_payout_tweak was still null: the client saw an unrouted
+    round, compared it against its own record saying it had asked to route,
+    and refused with "This Tango keeps your change in your wallet, but you
+    asked for it to be sent over Lightning." Pressing Approve again said the
+    same thing, because nothing could change it until A signed — which it
+    could not do. A 691 sat change with both sides routing, 2026-10-03.
+
+    Everything the derivation needs exists at accept: the input set freezes
+    when B accepts, and a_payout was snapshotted at propose. So both outputs
+    are on the round from ACCEPTED, which is what each side reads to verify.
+    """
+    accept = _fn("views_api.py", "api_tango_accept")
+    # Written by the same update that sets ACCEPTED, so a client that fetches
+    # the round at any point after it can see both.
+    assert "a_change_spk=a_change_spk" in accept
+    assert "a_payout_tweak=a_payout_tweak" in accept
+    assert "b_payout_tweak=b_payout_tweak" in accept
+    # From the frozen set, which is both sides' inputs.
+    assert "frozen = _pj_payjoin_inputs(a_rows) + _pj_payjoin_inputs(rows)" in accept
+
+
+def test_signing_keeps_the_output_it_was_verified_against():
+    """A's signature is computed over the outputs as A read them. Re-deriving
+    at sign could replace one — a changed instance address, a different tweak
+    — under a signature already made over the old one."""
+    sign = _fn("views_api.py", "api_tango_sign")
+    assert "a_change_spk = rnd.a_change_spk" in sign
+    assert "a_payout_tweak = rnd.a_payout_tweak" in sign
+    # The refusal of a client-supplied script stays: a routed output is the
+    # instance's to derive, and only it can.
+    assert "ROUTED_CHANGE_IS_OURS_TO_DERIVE" in sign

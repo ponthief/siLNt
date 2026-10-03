@@ -6151,20 +6151,45 @@ async def api_tango_accept(
 
     b_change_spk = data.change_spk.lower() if data.change_spk else None
     b_payout_tweak = None
-    if b_payout and amounts["b_change"]:
-        # The whole frozen set: a BIP-352 output is derived from every input,
-        # both sides' included, which is what makes this derivable only now.
-        frozen = _pj_payjoin_inputs(a_rows) + _pj_payjoin_inputs(rows)
+    # The whole frozen set: a BIP-352 output is derived from every input, both
+    # sides' included, which is what makes either side's derivable only now.
+    frozen = _pj_payjoin_inputs(a_rows) + _pj_payjoin_inputs(rows)
+    if (b_payout and amounts["b_change"]) or (rnd.a_payout and amounts["a_change"]):
         if b_payout_addr and not rnd.payout_sp_address:
             # A did not route, so the round has no address on it yet.
             await update_tango_round(rid, payout_sp_address=b_payout_addr)
             rnd = await get_tango_round(rid)
+    if b_payout and amounts["b_change"]:
         derived = await _tango_payout_change_spk(rnd, "b", frozen)
         b_change_spk, b_payout_tweak = derived["spk"], derived["tweak"]
+
+    # AND A'S, HERE, NOT WHEN A SIGNS.
+    #
+    # A's output was derived inside A's own /sign call, which is too late for
+    # the only party that has to check it. A fetches the round, verifies, and
+    # assembles the transaction BEFORE it signs: at that moment a_payout_tweak
+    # was still null, so the client saw an unrouted round, read it against its
+    # own record saying it had asked to route, and refused — "This Tango keeps
+    # your change in your wallet, but you asked for it to be sent over
+    # Lightning." Every press said the same thing, because nothing could change
+    # it until A signed, which it could not do. Reported 2026-10-03 on a 691
+    # sat change with both sides routing.
+    #
+    # Everything the derivation needs exists here. The input set is frozen the
+    # moment B accepts — it is the same `frozen` B's own output comes from —
+    # and a_payout was snapshotted at propose. So both sides' outputs are on
+    # the round from ACCEPTED onwards, which is what A reads to verify.
+    a_change_spk = rnd.a_change_spk
+    a_payout_tweak = rnd.a_payout_tweak
+    if rnd.a_payout and amounts["a_change"]:
+        derived = await _tango_payout_change_spk(rnd, "a", frozen)
+        a_change_spk, a_payout_tweak = derived["spk"], derived["tweak"]
 
     updated = await update_tango_round(
         rid,
         status="ACCEPTED",
+        a_change_spk=a_change_spk,
+        a_payout_tweak=a_payout_tweak,
         b_wallet_id=data.wallet_id,
         b_inputs=json.dumps(rows),
         b_in_sats=amounts["b_in"],
@@ -6236,11 +6261,13 @@ async def api_tango_sign(
                     status_code=HTTPStatus.BAD_REQUEST,
                     detail=ROUTED_CHANGE_IS_OURS_TO_DERIVE,
                 )
-            if rnd.a_change_sats:
-                frozen = _pj_payjoin_inputs(_pj_inputs(rnd.a_inputs)) + \
-                    _pj_payjoin_inputs(_pj_inputs(rnd.b_inputs))
-                derived = await _tango_payout_change_spk(rnd, "a", frozen)
-                a_change_spk, a_payout_tweak = derived["spk"], derived["tweak"]
+            # KEPT, not re-derived. /accept wrote both of these the moment the
+            # input set froze, and they are what A has already verified and
+            # assembled against. Deriving again here would at best reproduce
+            # them and at worst — a changed instance address, a different
+            # tweak — replace an output A's signature was computed over.
+            a_change_spk = rnd.a_change_spk
+            a_payout_tweak = rnd.a_payout_tweak
         else:
             try:
                 if rnd.a_change_sats:
