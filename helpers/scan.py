@@ -1350,17 +1350,37 @@ async def set_last_scan_height(wallet_id: str, height: int) -> None:
 
 def get_scan_progress(wallet_id: str) -> dict:
     return _scan_progress.get(
-        wallet_id, {"active": False, "current": 0, "total": 0, "found": 0, "amount": 0}
+        wallet_id,
+        {"active": False, "current": 0, "total": 0, "found": 0, "amount": 0,
+         "gap": None},
     )
 
 
-def set_scan_progress(wallet_id, current, total, found, active=True, amount=0):
+def set_scan_progress(
+    wallet_id, current, total, found, active=True, amount=0, gap=None
+):
+    """Where a scan has got to, for the app to poll.
+
+    `gap` IS THE ONE THAT CHANGES WHAT A USER SHOULD BELIEVE. The counters
+    reach their total whether or not every block could be read: a block the
+    oracle has not indexed is skipped, the blocks above it are still scanned,
+    and the progress bar still fills. Without this the app reported a complete
+    scan and "scanned to the latest block" for a wallet with a hole in it, and
+    a payment inside that hole simply never appeared — which is how a mainnet
+    change output went missing on 2026-10-03.
+
+    The resume point is held BELOW the gap so the block is looked at again, so
+    the wallet is genuinely not scanned to where the counters say it is. The
+    two have to be reported together or they contradict each other.
+    """
     _scan_progress[wallet_id] = {
         "active": active,
         "current": current,
         "total": total,
         "found": found,
         "amount": amount,
+        # The first block this scan could not read, or None.
+        "gap": gap,
     }
 
 
@@ -1546,7 +1566,7 @@ async def _scan_wallet(
             await set_last_scan_height(wallet_id, last_scanned_height)
             set_scan_progress(
                 wallet_id, blocks_scanned, total_blocks, total_found,
-                active=False, amount=total_found_amount,
+                active=False, amount=total_found_amount, gap=scan_gap_height,
             )
             clear_scan_stop(wallet_id)
             break
@@ -1724,7 +1744,7 @@ async def _scan_wallet(
         # promise that they will not be looked at again.
         set_scan_progress(
             wallet_id, blocks_scanned, total_blocks, total_found,
-            amount=total_found_amount,
+            amount=total_found_amount, gap=scan_gap_height,
         )
         await set_last_scan_height(wallet_id, last_scanned_height)
 
@@ -1739,7 +1759,7 @@ async def _scan_wallet(
     await set_last_scan_height(wallet_id, last_scanned_height)
     set_scan_progress(
         wallet_id, blocks_scanned, total_blocks, total_found,
-        active=False, amount=total_found_amount,
+        active=False, amount=total_found_amount, gap=scan_gap_height,
     )
 
     try:
@@ -1769,11 +1789,27 @@ async def _scan_wallet(
         f"Scan done: {blocks_scanned} blocks, {total_found} UTXOs, balance={balance}"
     )
     if scan_gap_height is not None:
+        # Two different problems wear the same message, and they need
+        # different things from whoever reads it. A block the oracle has not
+        # reached yet clears on its own. A block BELOW where the oracle began
+        # indexing never will, and no amount of rescanning helps: the operator
+        # has to re-index it, or raise min_scan_height above it and accept
+        # that anything paid into this wallet before then is unfindable.
+        behind_tip = scan_gap_height >= last_scanned_height
         logger.warning(
             f"Wallet {wallet_id}: block {scan_gap_height} could not be read, so the "
             f"resume point was held at {last_scanned_height}. The next scan will "
             f"cover it again; the blocks above it were scanned but are not "
-            f"recorded as such."
+            f"recorded as such. "
+            + (
+                "If the oracle has simply not indexed that far yet, this "
+                "clears itself."
+                if behind_tip
+                else "This block is below the resume point, which means the "
+                "oracle has never indexed it — rescanning will not help, and "
+                "any payment in it stays invisible until the oracle is "
+                "re-indexed over that range."
+            )
         )
     # The number that decides what, if anything, to optimise next. If waiting on
     # the oracle dominates, faster matching — in any language — changes nothing.
@@ -1782,7 +1818,7 @@ async def _scan_wallet(
     logger.info(f"Scan phases: {oracle.stats.phases()}")
     set_scan_progress(
         wallet_id, blocks_scanned, total_blocks, total_found,
-        active=False, amount=total_found_amount,
+        active=False, amount=total_found_amount, gap=scan_gap_height,
     )
     return {
         "utxos_found": total_found,
