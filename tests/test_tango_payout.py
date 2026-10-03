@@ -346,3 +346,99 @@ def test_the_admin_ledger_carries_it():
     assert '"routing": await tango_routing_status(' in body
     # Beside the liquidity it already had, not instead of it.
     assert '"liquidity"' in body
+
+
+# ── the instance's change address, pinned outside the database ──────────────
+#
+# tango_change_sp_address is plain JSON in silnt.backend_config. Anyone who
+# can WRITE that row redirects every future routed change to themselves, and
+# nothing downstream notices: the clients verify the output against
+# payout_sp_address taken from the same round, so the tweak check passes
+# perfectly against the attacker's address. A client has no independent idea
+# what this instance's address ought to be.
+#
+# Encryption is the wrong tool — the threat is substitution, not reading, and
+# the key is wherever the application can reach it. A second copy in the
+# process environment is somewhere a database write cannot reach.
+
+
+def _pin():
+    import ast as _ast
+    import pathlib as _pl
+    src = (_pl.Path(__file__).resolve().parent.parent
+           / "helpers" / "tangopayout.py").read_text()
+    tree = _ast.parse(src)
+    body = [
+        n for n in tree.body
+        if (isinstance(n, _ast.FunctionDef) and n.name == "payout_address_pin")
+        or (isinstance(n, _ast.Assign) and any(
+            getattr(t, "id", "") == "PAYOUT_ADDRESS_PIN_ENV" for t in n.targets))
+    ]
+    assert len(body) == 2, [type(n).__name__ for n in body]
+    ns = {"Optional": object}
+    exec(_ast.unparse(_ast.Module(body=body, type_ignores=[])), ns)
+    return ns["payout_address_pin"]
+
+
+def test_nothing_pinned_is_not_a_failure():
+    """An instance that has never set it keeps working exactly as before.
+    Failing closed on a value nobody configured turns a security improvement
+    into an outage."""
+    state, reason = _pin()("sp1qqwhatever", "")
+    assert state == "unpinned"
+    assert "SILNT_TANGO_CHANGE_SP_ADDRESS" in reason
+
+
+def test_agreement_passes_quietly():
+    state, reason = _pin()("sp1qqwhatever", "sp1qqwhatever")
+    assert state == "ok"
+    assert reason is None
+
+
+def test_a_substituted_address_is_caught():
+    state, reason = _pin()("sp1qqATTACKER", "sp1qqreal")
+    assert state == "mismatch"
+    assert "does not match" in reason
+
+
+def test_case_and_space_are_not_an_attack():
+    """A bech32m address is canonically lower case, and an operator pasting
+    one with different case has made a typo. Comparing raw would turn that
+    into a silent outage."""
+    state, _ = _pin()("  SP1QQReal  ", "sp1qqreal")
+    assert state == "ok"
+
+
+def test_a_mismatch_refuses_to_route_and_says_so():
+    """Refusing leaves the change in its owner's wallet, which is what every
+    round did before this feature. Taking the coin against an address nothing
+    vouches for is the only outcome worse than not routing."""
+    body = _fn_src("views_api.py", "_tango_routes_change")
+    assert 'pin["state"] == "mismatch"' in body
+    assert "return False" in body
+    assert "TANGO_ADDRESS_PIN_SERVICE" in body
+    # And recovery is announced, so an operator who fixed a stale variable is
+    # told it took.
+    assert 'pin["state"] == "ok"' in body
+
+
+def test_saving_a_contradicting_address_is_refused():
+    """Not the defence — an attacker writing the row never comes through here
+    — but an operator who forgets the environment would otherwise save a
+    configuration that silently stops routing."""
+    body = _fn_src("views_api.py", "api_update_backend_config")
+    assert "payout_address_pin(" in body
+    assert "HTTPStatus.BAD_REQUEST" in body
+    assert "Change the environment first" in body
+
+
+def test_changing_the_address_is_announced():
+    """The one setting on that page that moves other people's money."""
+    body = _fn_src("views_api.py", "api_update_backend_config")
+    assert "was = " in body and "tango_change_sp_address" in body
+    assert "send_ntfy_notification" in body
+    assert "if addr != was:" in body
+    # Read BEFORE the write, or there is nothing to compare against.
+    assert body.index("was = ((await get_backend_config") < body.index(
+        "saved = await update_backend_config"
+    )

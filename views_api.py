@@ -47,7 +47,12 @@ from .helpers.lnaddress import (
     LnAddressError,
     resolve as resolve_ln_address,
 )
-from .helpers.tangopayout import min_change_to_route, payout_offered, payout_plan
+from .helpers.tangopayout import (
+    TANGO_ADDRESS_PIN_SERVICE,
+    min_change_to_route,
+    payout_offered,
+    payout_plan,
+)
 from .helpers.scan_rate_limiter import (
     check_scan_allowed,
     clear_wallet_limits,
@@ -964,7 +969,68 @@ async def api_update_backend_config(
                 f"a mainnet endpoint, and these coins are not worth real sats."
             ),
         )
-    return await update_backend_config(data, network or DEFAULT_CONFIG_NETWORK)
+    net = network or DEFAULT_CONFIG_NETWORK
+
+    # REFUSED AT THE DOOR as well as at routing time. The route-time check is
+    # the defence — an attacker writing the row directly never comes through
+    # here — but an operator who changes the address and forgets the
+    # environment would otherwise save a configuration that silently stops
+    # routing, and find out from users rather than from this reply.
+    if addr:
+        from .helpers.appenv import silnt_env
+        from .helpers.tangopayout import (
+            PAYOUT_ADDRESS_PIN_ENV,
+            payout_address_pin,
+        )
+
+        state, reason = payout_address_pin(
+            addr, silnt_env(PAYOUT_ADDRESS_PIN_ENV)
+        )
+        if state == "mismatch":
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail=(
+                    f"This address does not match {PAYOUT_ADDRESS_PIN_ENV} in "
+                    f"the server's environment. Change the environment first "
+                    f"and restart, then save this — that order is what makes "
+                    f"the pin worth having."
+                ),
+            )
+
+    # WHAT IT WAS BEFORE, read while it still is. A change to the address
+    # where routed change is paid is the one setting on this page that moves
+    # other people's money, so it is announced rather than merely stored.
+    was = ""
+    try:
+        was = ((await get_backend_config(net)).tango_change_sp_address or "").strip()
+    except Exception as e:
+        logger.warning(f"could not read the previous change address: {e}")
+
+    saved = await update_backend_config(data, net)
+
+    if addr != was:
+        # Not a health transition, so not notify_service_health_change: this
+        # is one event and every one of them matters.
+        from .crud import send_ntfy_notification
+
+        try:
+            await send_ntfy_notification(
+                title="Tango change address changed",
+                message=(
+                    f"The address routed Tango change is paid to on {net} was "
+                    f"changed"
+                    + (f" from {was}" if was else " (none was set)")
+                    + (f" to {addr}." if addr else " to nothing.")
+                    + " If this was not you, routed change is being paid"
+                    " somewhere else."
+                ),
+                tags=["rotating_light"],
+                priority="high",
+            )
+        except Exception as e:
+            logger.warning(f"could not announce the change address: {e}")
+
+    return saved
 
 
 @silnt_api_router.post("/api/v1/admin/tango/change-address")
@@ -4858,6 +4924,24 @@ async def check_tango_payout_liquidity() -> dict:
     return seen
 
 
+async def tango_address_pin(network: str) -> dict:
+    """Is the stored change address the one pinned in the environment?
+
+    Read here rather than in the policy helper so the comparison itself stays
+    pure and testable without an environment; see
+    helpers/tangopayout.payout_address_pin for what the three states mean and
+    why an unset pin is not a failure.
+    """
+    from .helpers.appenv import silnt_env
+    from .helpers.tangopayout import PAYOUT_ADDRESS_PIN_ENV, payout_address_pin
+
+    cfg = await get_backend_config(network)
+    state, reason = payout_address_pin(
+        cfg.tango_change_sp_address or "", silnt_env(PAYOUT_ADDRESS_PIN_ENV)
+    )
+    return {"state": state, "reason": reason, "env": PAYOUT_ADDRESS_PIN_ENV}
+
+
 async def tango_routing_status(network: str) -> dict:
     """Why rounds are or are not routing their change right now.
 
@@ -4881,6 +4965,7 @@ async def tango_routing_status(network: str) -> dict:
 
     cfg = await get_backend_config(network)
     liq = await tango_payout_liquidity(network)
+    pin = await tango_address_pin(network)
     gates = [
         {
             "name": "network",
@@ -4914,6 +4999,14 @@ async def tango_routing_status(network: str) -> dict:
             "detail": "somewhere to pay the value on from",
         },
         {
+            # NOT a configuration question: this one asks whether the stored
+            # configuration is still the one the operator put there.
+            "name": "address_pin",
+            "ok": pin["state"] != "mismatch",
+            "detail": pin["reason"] or "the stored address matches the "
+                                       "environment it is pinned to",
+        },
+        {
             "name": "liquidity",
             "ok": bool(liq.get("ok")),
             "detail": liq.get("reason")
@@ -4925,6 +5018,9 @@ async def tango_routing_status(network: str) -> dict:
     return {
         "offering": all(g["ok"] for g in gates),
         "gates": gates,
+        # Said separately from the gates, because "not pinned" does not stop
+        # anything — it only means nothing is checking.
+        "address_pin": pin,
         # What actually happened, which is the half a configuration check
         # cannot answer: a correctly configured instance whose users have not
         # saved a Lightning address routes nothing, for ever, with every gate
@@ -6024,6 +6120,30 @@ async def _tango_routes_change(user_id: str, network: str) -> tuple[bool, str]:
     cfg = await get_backend_config(network)
     if not cfg.tango_payout_ready(network):
         return False, ""
+    # THE STORED ADDRESS HAS TO BE THE PINNED ONE.
+    #
+    # tango_change_sp_address is plain JSON in silnt.backend_config, so anyone
+    # who can write that row redirects every future routed change to
+    # themselves — and the clients cannot tell, because they verify the output
+    # against the address the same round handed them. Pinning it in the
+    # environment puts one copy somewhere a database write cannot reach.
+    #
+    # Refusing leaves the change in its owner's wallet, which is what every
+    # round did before this feature existed. Taking the coin against an
+    # address nothing vouches for is the only outcome worse than not routing.
+    pin = await tango_address_pin(network)
+    if pin["state"] == "mismatch":
+        logger.error(
+            f"tango payout REFUSED on {network}: {pin['reason']}"
+        )
+        await notify_service_health_change(
+            TANGO_ADDRESS_PIN_SERVICE, False, pin["reason"] or ""
+        )
+        return False, ""
+    if pin["state"] == "ok":
+        # Dedup'd, and it fires on recovery too, so an operator who fixed a
+        # stale environment variable is told it took.
+        await notify_service_health_change(TANGO_ADDRESS_PIN_SERVICE, True, "")
     saved = await get_tango_ln_address(user_id, network)
     if not saved or not (saved.get("address") or "").strip():
         return False, ""

@@ -228,3 +228,63 @@ def min_change_to_route(
         else:
             lo = mid
     return hi
+
+
+# ── pinning the instance's change address outside the database ──────────────
+#
+# WHAT THIS DEFENDS AGAINST. A round's routed change pays the address in
+# `tango_change_sp_address`, which lives as plain JSON in silnt.backend_config.
+# Anyone who can WRITE that row redirects every future routed change to
+# themselves, and nothing downstream notices: the clients verify the output
+# against `payout_sp_address` taken from the same round, so the tweak check
+# passes perfectly against the attacker's address. A client has no independent
+# idea what this instance's address ought to be.
+#
+# Encryption does not help. The threat is substitution, not reading, and the
+# key is wherever the application can reach it.
+#
+# So the address is also kept somewhere a database write cannot reach: the
+# process environment. A mismatch stops routing — the coins stay in their
+# owners' wallets, which is the state every round had before this feature.
+#
+# UNSET IS NOT A MISMATCH. An instance that has never set it keeps working
+# exactly as before, because failing closed on a value nobody has configured
+# would turn a security improvement into an outage. The admin page says the pin
+# is not set, which is the honest version of "no protection here".
+PAYOUT_ADDRESS_PIN_ENV = "SILNT_TANGO_CHANGE_SP_ADDRESS"
+
+# The ntfy service name for the pin. notify_service_health_change dedups per
+# service and fires on BOTH transitions, so a mismatch is reported once rather
+# than on every round, and an operator who fixed a stale environment variable
+# is told it took.
+TANGO_ADDRESS_PIN_SERVICE = "tango_change_address_pin"
+
+
+def payout_address_pin(configured: str, pinned: str) -> tuple[str, Optional[str]]:
+    """Compare the stored change address with the pinned one.
+
+    Returns (state, reason) where state is:
+
+      'unpinned'  nothing is pinned, so nothing is checked
+      'ok'        the database agrees with the environment
+      'mismatch'  they differ — the database may have been written to
+
+    Case-folded and stripped, because a bech32m address is canonically lower
+    case and an operator pasting one with different case has made a typo, not
+    an attack. Comparing raw would turn that into a silent outage.
+    """
+    want = (pinned or "").strip().lower()
+    have = (configured or "").strip().lower()
+    if not want:
+        return "unpinned", (
+            f"{PAYOUT_ADDRESS_PIN_ENV} is not set, so a write to the backend "
+            f"config could change where routed change is paid"
+        )
+    if want == have:
+        return "ok", None
+    return "mismatch", (
+        f"the configured change address does not match "
+        f"{PAYOUT_ADDRESS_PIN_ENV}. Routing is refused until they agree: "
+        f"either the environment is stale, or the stored configuration was "
+        f"changed by something other than the admin page"
+    )
