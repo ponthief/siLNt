@@ -1342,9 +1342,28 @@ async def mark_spent_utxos_batch(
 
 
 async def set_last_scan_height(wallet_id: str, height: int) -> None:
+    """Move the resume point forward. NEVER BACKWARDS.
+
+    The resume point is "every block up to here has been looked at". Scanning
+    an EARLIER range does not make that less true, so a rescan of blocks the
+    wallet has already passed must not rewind it — the next scan would
+    otherwise start from there and redo everything above, which on mainnet is
+    hours of work for nothing.
+
+    It also makes a deliberate rescan safe to offer at all. Without this, any
+    "scan these older blocks again" control is a trap: it finds the payment
+    the user was looking for and silently throws away months of scanning.
+
+    A GUARDED UPDATE rather than a read-then-write, so two scans finishing at
+    once cannot have the slower one's older value land last. The WHERE does
+    the comparison in the database, in one statement, and says the same thing
+    on SQLite and Postgres without a dialect test.
+    """
     await db.execute(
-        "UPDATE silnt.wallets SET last_scan_height = :height WHERE id = :id",
-        {"height": height, "id": wallet_id},
+        "UPDATE silnt.wallets SET last_scan_height = :height "
+        "WHERE id = :id "
+        "AND (last_scan_height IS NULL OR last_scan_height < :height)",
+        {"height": int(height), "id": wallet_id},
     )
 
 
@@ -1495,7 +1514,17 @@ async def _scan_wallet(
     total_incoming = 0
     total_incoming_amount = 0
     blocks_scanned = 0
-    last_scanned_height = start
+    # NOTHING HAS BEEN SCANNED YET, so the resume point is where the previous
+    # scan left it: one below the first block of this range.
+    #
+    # This was `start`, which claimed the first block had been looked at before
+    # anything had looked at it. A scan that read nothing — the first block
+    # unindexed, or a stop before the first batch — then wrote `start` as the
+    # resume point and the next scan began at start+1. The block was skipped
+    # for good, and a payment in it stayed invisible with the wallet reporting
+    # itself fully scanned. That is what a mainnet wallet hit on 2026-10-03;
+    # the balance only came back by editing last_scan_height in the database.
+    last_scanned_height = start - 1
     total_blocks = end - start + 1
     stopped = False
     # Height of the first block this scan could not read. Once set, the resume
