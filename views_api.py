@@ -217,6 +217,7 @@ from .crud import (
     list_due_tango_payouts,
     list_tango_payouts,
     list_tango_payouts_for_user,
+    tango_routing_counts,
     list_broadcast_tango_rounds_with_payouts,
     requeue_tango_payout,
     tango_payout_totals,
@@ -4857,6 +4858,84 @@ async def check_tango_payout_liquidity() -> dict:
     return seen
 
 
+async def tango_routing_status(network: str) -> dict:
+    """Why rounds are or are not routing their change right now.
+
+    AN EMPTY PAYOUT LEDGER HAS FIVE CAUSES and the admin page showed none of
+    them. Routing is deliberately silent to users — a setting that is not
+    offered, rather than an error telling them how low the Lightning balance
+    is — so when nothing happens there is nothing anywhere that says which of
+    these it was:
+
+      * the network cannot route at all (signet change is worthless)
+      * the instance is not configured (address, scan key, payout wallet)
+      * the payout wallet cannot cover a new obligation
+      * rounds routed but the transaction is not deep enough yet
+      * rounds were broadcast and NONE of them routed
+
+    Each one needs a different thing done about it, and working that out meant
+    reading five tables. This answers it in one place.
+    """
+    from .helpers.tangopayout import payout_offered
+    from .helpers.tangopayoutrun import DEFAULT_MIN_CONFIRMATIONS
+
+    cfg = await get_backend_config(network)
+    liq = await tango_payout_liquidity(network)
+    gates = [
+        {
+            "name": "network",
+            "ok": payout_offered(network),
+            "detail": f"{network} change can be paid out"
+            if payout_offered(network)
+            else f"{network} change is never routed — a Lightning address is a "
+                 f"mainnet endpoint, and {network} coins are not worth real sats",
+        },
+        {
+            "name": "enabled",
+            "ok": bool(cfg.tango_change_payout_enabled),
+            "detail": "the setting is switched on for this instance"
+            if cfg.tango_change_payout_enabled
+            else "turned off in the backend configuration",
+        },
+        {
+            "name": "sp_address",
+            "ok": bool((cfg.tango_change_sp_address or "").strip()),
+            "detail": "the change output has somewhere to pay",
+        },
+        {
+            "name": "scan_key",
+            "ok": bool((cfg.tango_change_scan_secret or "").strip()),
+            "detail": "without it the instance cannot derive the output it is "
+                      "paid at, so configured means both or neither",
+        },
+        {
+            "name": "payout_wallet",
+            "ok": bool((cfg.tango_change_payout_wallet_id or "").strip()),
+            "detail": "somewhere to pay the value on from",
+        },
+        {
+            "name": "liquidity",
+            "ok": bool(liq.get("ok")),
+            "detail": liq.get("reason")
+            or f"{liq.get('available_sats')} sats available against a "
+               f"{liq.get('threshold_sats')} sat floor",
+        },
+    ]
+    counts = await tango_routing_counts(network)
+    return {
+        "offering": all(g["ok"] for g in gates),
+        "gates": gates,
+        # What actually happened, which is the half a configuration check
+        # cannot answer: a correctly configured instance whose users have not
+        # saved a Lightning address routes nothing, for ever, with every gate
+        # green.
+        "min_confirmations": max(
+            1, int(cfg.tango_change_min_confirmations or DEFAULT_MIN_CONFIRMATIONS)
+        ),
+        **counts,
+    }
+
+
 @silnt_api_router.get("/api/v1/admin/tango/payouts")
 async def api_admin_tango_payouts(
     network: Optional[str] = Query(None),
@@ -4878,6 +4957,11 @@ async def api_admin_tango_payouts(
     return {
         "payouts": rows,
         "totals": await tango_payout_totals(network),
+        # Why the list is the length it is. An empty one is the common case to
+        # explain, and it has five causes that need five different things.
+        "routing": await tango_routing_status(
+            network or DEFAULT_CONFIG_NETWORK
+        ),
         # The balance, what is already owed against it, and whether the floor
         # is still clear. An operator looking at a stuck payout is usually
         # looking at this.

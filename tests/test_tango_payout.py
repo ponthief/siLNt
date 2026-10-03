@@ -287,3 +287,62 @@ def test_the_feature_is_off_by_default():
     # A one-confirmation payout can be reversed by a reorg and a Lightning
     # payment cannot be clawed back.
     assert "tango_change_min_confirmations: int = 3" in src
+
+
+# ── why an empty payout ledger is empty ─────────────────────────────────────
+#
+# Five causes, and routing is silent to users by design — a setting that is
+# not offered rather than an error telling them how low the Lightning balance
+# is. So when nothing happens there was nothing anywhere saying which of them
+# it was, and working it out meant reading five tables by hand. That happened
+# on 2026-10-03.
+
+
+def _fn_src(path: str, name: str) -> str:
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parent.parent / path).read_text()
+    at = src.index(f"def {name}(")
+    nxt = src.find("\nasync def ", at + 10)
+    other = src.find("\ndef ", at + 10)
+    dec = src.find("\n@silnt_api_router", at + 10)
+    ends = [i for i in (nxt, other, dec) if i != -1]
+    return src[at:min(ends)] if ends else src[at:]
+
+
+def test_every_gate_a_round_passes_to_route_is_reported():
+    """The same conjunction _tango_routes_change applies, named one by one.
+    A verdict with no reason sends an operator back to reading tables."""
+    body = _fn_src("views_api.py", "tango_routing_status")
+    for gate in ('"network"', '"enabled"', '"sp_address"', '"scan_key"',
+                 '"payout_wallet"', '"liquidity"'):
+        assert gate in body, gate
+    # The verdict is the conjunction, not a separate opinion that could drift.
+    assert 'all(g["ok"] for g in gates)' in body
+
+
+def test_it_also_says_what_the_rounds_actually_did():
+    """A configuration check cannot answer this half: every gate green and no
+    user with a saved address routes nothing, for ever, and looks identical to
+    a broken payout wallet."""
+    body = _fn_src("views_api.py", "tango_routing_status")
+    assert "tango_routing_counts(network)" in body
+    counts = _fn_src("crud.py", "tango_routing_counts")
+    assert "broadcast_rounds" in counts
+    # The denominator that keeps the number honest: a round whose change was
+    # all below the dust limit could never have routed.
+    assert "rounds_with_change" in counts
+    assert "routed_sides" in counts
+
+
+def test_the_confirmation_wait_is_named():
+    """'Routed but not yet enqueued' is the one cause that needs nothing done
+    about it, and it is indistinguishable from the others without the depth."""
+    body = _fn_src("views_api.py", "tango_routing_status")
+    assert '"min_confirmations"' in body
+
+
+def test_the_admin_ledger_carries_it():
+    body = _fn_src("views_api.py", "api_admin_tango_payouts")
+    assert '"routing": await tango_routing_status(' in body
+    # Beside the liquidity it already had, not instead of it.
+    assert '"liquidity"' in body

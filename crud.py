@@ -4039,6 +4039,44 @@ async def list_broadcast_tango_rounds_with_payouts(limit: int = 200) -> list:
     return [TangoRound(**r) for r in rows]
 
 
+async def tango_routing_counts(network: str) -> dict:
+    """Recent broadcast rounds, and how many of them routed anything.
+
+    THE HALF A CONFIGURATION CHECK CANNOT ANSWER. An instance with every gate
+    green routes nothing for ever if no user has saved a Lightning address, or
+    if every round's change fell below the floor — and from the admin page
+    that looks exactly like a broken payout wallet.
+
+    `with_change` is the useful denominator: a round where neither side had
+    change above the dust limit could never have routed, so counting it as a
+    missed payout would be wrong.
+    """
+    rows = await db.fetchall(
+        "SELECT a_payout, b_payout, a_change_sats, b_change_sats "
+        "FROM silnt.tango_rounds "
+        "WHERE network = :net AND status = 'BROADCAST' "
+        "  AND txid IS NOT NULL AND txid <> '' "
+        "ORDER BY updated_at DESC LIMIT 50",
+        {"net": network},
+    )
+    broadcast = len(rows)
+    with_change = 0
+    routed_sides = 0
+    for r in rows:
+        a_ch, b_ch = int(r["a_change_sats"] or 0), int(r["b_change_sats"] or 0)
+        if a_ch or b_ch:
+            with_change += 1
+        if r["a_payout"] and a_ch:
+            routed_sides += 1
+        if r["b_payout"] and b_ch:
+            routed_sides += 1
+    return {
+        "broadcast_rounds": broadcast,
+        "rounds_with_change": with_change,
+        "routed_sides": routed_sides,
+    }
+
+
 async def list_tango_payouts_for_user(user_id: str, network: str) -> list:
     rows = await db.fetchall(
         "SELECT * FROM silnt.tango_change_payouts "
