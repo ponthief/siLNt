@@ -1273,6 +1273,15 @@ async def clear_utxo_freeze_manual(txid: str, vout: int) -> None:
     User-initiated unfreeze. Clears the frozen flag regardless of who set it, and
     records freeze_reason = 'manual_unfrozen' so the dust evaluator knows this was
     a deliberate user override and must NOT auto-re-freeze it.
+
+    There was a SECOND def of this name further down the file, writing
+    freeze_reason = NULL instead, and Python kept the later one. So every
+    unfreeze erased the override marker, and the next scan's dust eval saw a
+    below-threshold UTXO with a NULL reason and auto-froze it again. Reported
+    as "updating the app re-freezes my unfrozen coins" (2026-10-04) — the
+    update was incidental; the re-freeze came from the catch-up scan that
+    follows it. test_dust_unfreeze_sticks.py pins both the marker and the
+    single definition.
     """
     await db.execute(
         """UPDATE silnt.utxos
@@ -1294,15 +1303,6 @@ async def clear_utxo_freeze_auto(txid: str, vout: int) -> None:
         {"txid": txid, "vout": vout},
     )
 
-
-async def clear_utxo_freeze_manual(txid: str, vout: int) -> None:
-    """User-initiated unfreeze — clears regardless of who set it."""
-    await db.execute(
-        """UPDATE silnt.utxos
-           SET frozen = FALSE, freeze_reason = NULL
-           WHERE txid = :txid AND vout = :vout""",
-        {"txid": txid, "vout": vout},
-    )
 
 async def normalize_unfrozen_override(txid: str, vout: int) -> None:
     """Once a UTXO is no longer dust, drop a lingering 'manual_unfrozen' marker."""
