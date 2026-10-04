@@ -6836,3 +6836,106 @@ async def run_tango_labelling() -> int:
         except Exception as e:
             logger.warning(f"tango labelling: could not label {rnd.id}: {e}")
     return labelled
+
+
+# ── The API, described from the API ────────────────────────────────────────
+
+
+def _route_dependency_names(route) -> list:
+    """Every dependency name attached to a route, outermost first.
+
+    Two places to look and both matter: `dependencies=[Depends(...)]` on the
+    decorator, and `Depends(...)` as a parameter default in the signature.
+    This extension uses both — often on the same endpoint, where the decorator
+    guards and the parameter also wants the resulting key_info — so reading
+    one would under-report who is allowed to call what.
+    """
+    import inspect
+
+    names = []
+
+    def _name(dep):
+        fn = getattr(dep, "dependency", None) or dep
+        return getattr(fn, "__name__", None)
+
+    for dep in getattr(route, "dependencies", None) or []:
+        n = _name(dep)
+        if n:
+            names.append(n)
+    endpoint = getattr(route, "endpoint", None)
+    if endpoint is not None:
+        try:
+            sig = inspect.signature(endpoint)
+        except (TypeError, ValueError):
+            sig = None
+        for param in (sig.parameters.values() if sig else []):
+            default = param.default
+            if default is inspect.Parameter.empty:
+                continue
+            if getattr(default, "dependency", None) is None:
+                continue
+            n = _name(default)
+            if n:
+                names.append(n)
+    return names
+
+
+def _api_doc_rows() -> list:
+    """One dict per (route, method) off the live router.
+
+    Per METHOD, not per route: a path registered for both GET and DELETE is
+    two different things to whoever is reading, and collapsing them would hide
+    one of the two behind the other's docstring.
+
+    HEAD and OPTIONS are left out — FastAPI adds them and nobody is looking
+    them up.
+    """
+    from .helpers.apidocs import auth_badges, summarise
+
+    rows = []
+    deps_cache: dict = {}
+    for route in getattr(silnt_api_router, "routes", []) or []:
+        path = getattr(route, "path", "") or ""
+        if not path:
+            continue
+        endpoint = getattr(route, "endpoint", None)
+        key = id(route)
+        if key not in deps_cache:
+            deps_cache[key] = _route_dependency_names(route)
+        summary, detail = summarise(getattr(endpoint, "__doc__", "") or "")
+        for method in sorted(getattr(route, "methods", None) or []):
+            if method in ("HEAD", "OPTIONS"):
+                continue
+            rows.append({
+                "method": method,
+                "path": path,
+                "name": getattr(endpoint, "__name__", "") or "",
+                "summary": summary,
+                "detail": detail,
+                "auth": auth_badges(deps_cache[key]),
+            })
+    return rows
+
+
+@silnt_api_router.get("/api/v1/admin/api-docs")
+async def api_admin_api_docs(
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """Every endpoint this server serves, grouped, with what each one is for.
+
+    Read off the router that is answering this request, so the only way for it
+    to be out of date is for the server to be. See helpers/apidocs.py for why
+    it is generated rather than written, and for what it deliberately leaves
+    to FastAPI's own OpenAPI schema.
+
+    Admin-only. Not because any of it is secret — the paths are discoverable
+    by anyone with the app — but because the summaries are internal reasoning
+    written for whoever maintains this, and a reference is a map of where to
+    push.
+    """
+    require_admin(key_info)
+    from .helpers.apidocs import build
+
+    out = build(_api_doc_rows())
+    out["generated_at"] = int(time.time())
+    return out
