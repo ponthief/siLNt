@@ -226,6 +226,7 @@ from .crud import (
     list_broadcast_tango_rounds_with_payouts,
     requeue_tango_payout,
     requeue_failed_tango_payouts,
+    tango_txids_seen_by_user,
     tango_payout_totals,
     touch_sp_contact,
     list_silnt_user_ids,
@@ -6341,10 +6342,19 @@ async def api_tango_list(
             {w.network for w in await get_silnt_wallets(uid) if w.network}
         ):
             rounds.extend(await list_tango_rounds_for_user(uid, net))
+    # DID MY ROUND FINISH — asked of this user's own wallets, not of the
+    # labeller. `change_labelled` only goes true once every coin on BOTH sides
+    # has been named, so it waits on the partner opening their app; a round
+    # that confirmed hours ago reads as in-flight until they do. One query for
+    # the whole list rather than one per round.
+    seen = await tango_txids_seen_by_user(
+        uid, [r.txid for r in rounds if r.txid]
+    )
     out = []
     for r in rounds:
         row = r.dict()
         row["role"] = _tango_role(r, uid)
+        row["settled"] = bool(r.txid and r.txid in seen)
         out.append(row)
     return {"rounds": out}
 

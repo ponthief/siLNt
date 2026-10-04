@@ -906,6 +906,40 @@ async def get_utxos_by_txid(txid: str) -> list:
     )
     return [UTXORecord(**dict(r)) for r in rows]
 
+async def tango_txids_seen_by_user(user_id: str, txids: list) -> set:
+    """Which of these round transactions this user's OWN wallets can see.
+
+    WHY NOT `change_labelled`. That flag is the labeller's, and the labeller
+    only sets it once EVERY coin on BOTH sides has been named — which needs
+    the partner's wallet to have been scanned. Asking "did my round finish"
+    with a two-party flag means a round that settled hours ago still reads as
+    in-flight because somebody else has not opened their app. Signet round
+    9abeda54… was exactly that: confirmed in block 324,904 and still showing
+    as broadcast.
+
+    This asks the one-party question instead. A UTXO row exists only because a
+    SCAN found the output, and the scanner reads mined blocks — so a row at
+    this txid in this user's wallet means the transaction is in a block and
+    this wallet has seen it. No network call, no dependency on the partner.
+    """
+    wanted = [t for t in (txids or []) if t]
+    if not wanted:
+        return set()
+    placeholders = ", ".join(f":t{i}" for i in range(len(wanted)))
+    values = {f"t{i}": t for i, t in enumerate(wanted)}
+    values["uid"] = user_id
+    rows = await db.fetchall(
+        f"""
+        SELECT DISTINCT u.txid
+        FROM silnt.utxos u
+        JOIN silnt.wallets w ON w.id = u.wallet_id
+        WHERE w."user" = :uid AND u.txid IN ({placeholders})
+        """,
+        values,
+    )
+    return {r["txid"] for r in rows}
+
+
 async def get_next_label_index(wallet_id: str) -> int:
     """
     Return the LOWEST free label index >= 2 for this wallet (m=0 is the BIP-352
