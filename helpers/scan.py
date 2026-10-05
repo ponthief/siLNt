@@ -1898,6 +1898,56 @@ async def get_block_ts(txid: str, network: str = DEFAULT_CONFIG_NETWORK) -> int:
         pass
     return 0
 
+# Bounded so a long-lived process cannot grow it without limit. A bisection
+# touches ~20 heights and the same midpoints recur, so trimming the oldest
+# half keeps the ones worth keeping.
+_BLOCK_TIME_CACHE: dict = {}
+_BLOCK_TIME_CACHE_MAX = 4096
+
+
+def _trim_block_time_cache() -> None:
+    if len(_BLOCK_TIME_CACHE) > _BLOCK_TIME_CACHE_MAX:
+        for k in list(_BLOCK_TIME_CACHE)[: len(_BLOCK_TIME_CACHE) // 2]:
+            _BLOCK_TIME_CACHE.pop(k, None)
+
+
+async def get_block_time(base_mempool_url: str, height: int) -> int:
+    """A block's timestamp, by height. 0 when the explorer cannot say.
+
+    Two hops, because that is what esplora offers: height -> hash (plain text)
+    -> block JSON. mempool.space has a one-call timestamp endpoint, but an
+    instance may be pointed at a self-hosted esplora and this has to work
+    against either.
+
+    Cached per (base, height) for the life of the process: a block's timestamp
+    cannot change, and the bisection in helpers/blocktime.py re-probes the same
+    midpoints on every search over the same range.
+    """
+    base = (base_mempool_url or "https://mempool.space").rstrip("/")
+    key = (base, int(height))
+    if key in _BLOCK_TIME_CACHE:
+        return _BLOCK_TIME_CACHE[key]
+    try:
+        c = get_mempool_client()
+        r = await c.get(f"{base}/api/block-height/{int(height)}")
+        if r.status_code != 200:
+            return 0
+        block_hash = (r.text or "").strip()
+        if not block_hash:
+            return 0
+        r = await c.get(f"{base}/api/block/{block_hash}")
+        if r.status_code != 200:
+            return 0
+        ts = int(r.json().get("timestamp") or 0)
+        if ts:
+            _BLOCK_TIME_CACHE[key] = ts
+            _trim_block_time_cache()
+        return ts
+    except Exception as e:
+        logger.warning(f"block time for {height}: {e}")
+        return 0
+
+
 async def get_tx_status(base_mempool_url: str, txid: str) -> dict | None:
     """
     Returns {"confirmed": bool} if the tx is known to the explorer,

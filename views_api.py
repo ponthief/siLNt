@@ -2002,6 +2002,116 @@ async def api_get_config(
         "dust_threshold_sats": blindbit.dust_threshold_sats or 5000
     }
 
+@silnt_api_router.get("/api/v1/blocks/indexed-range")
+async def api_indexed_range(
+    network: Optional[str] = Query(None),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+) -> dict:
+    """How far back a rescan can reach, as HEIGHTS AND DATES.
+
+    The phone's rescan chooser asks the user when, and the honest floor on
+    "when" is the oldest block the oracle has indexed — not a fixed number of
+    days. A date below `min_scan_height` is refused by the scan endpoint with a
+    400, and one just above it reads blocks the oracle cannot answer for, which
+    comes back as a scan gap rather than as an answer. So the client is told
+    both ends and offers nothing outside them.
+
+    `min_time` and `tip_time` are best-effort: a client that gets 0 for either
+    falls back to offering the last week, which is the one span it can estimate
+    from the tip without asking anything.
+    """
+    if not network:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="A `network` query parameter is required (e.g. ?network=mainnet).",
+        )
+    from .helpers.scan import get_block_time
+
+    cfg = await get_backend_config(network)
+    min_height = int(cfg.min_scan_height or 0)
+    oracle = BlindBitOracleClient(base_url=cfg.blindbit_url)
+    try:
+        tip = int(await oracle.get_chain_tip() or 0)
+    except Exception as e:
+        logger.warning(f"indexed-range: no chain tip for {network}: {e}")
+        tip = 0
+    mempool = cfg.mempool_url or "https://mempool.space"
+    return {
+        "min_height": min_height,
+        "min_time": await get_block_time(mempool, min_height) if min_height else 0,
+        "tip": tip,
+        "tip_time": await get_block_time(mempool, tip) if tip else 0,
+    }
+
+
+@silnt_api_router.get("/api/v1/blocks/height-at")
+async def api_height_at(
+    ts: int = Query(..., description="Unix seconds. The client sends a moment, "
+                                    "not a date, so the timezone stays its own."),
+    network: Optional[str] = Query(None),
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+) -> dict:
+    """The first indexed block at or after `ts`.
+
+    LOOKED UP, not estimated. Ten minutes a block is good enough to turn a
+    few days into a height off the tip, and useless over years: at a planning
+    rate of nine minutes, five years back overshoots by about five months,
+    which for a seven-day window is the wrong window rather than a rounding
+    error. helpers/blocktime.py bisects the explorer's timestamps instead —
+    twenty-odd probes on mainnet, cached, for an action somebody took on
+    purpose.
+
+    The answer is clamped into the indexed range, and `clamped` says so, so a
+    client can tell "this is your date" from "this is as far back as there is".
+    """
+    if not network:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="A `network` query parameter is required (e.g. ?network=mainnet).",
+        )
+    from .helpers.blocktime import clamp, height_at
+    from .helpers.scan import get_block_time
+
+    cfg = await get_backend_config(network)
+    min_height = int(cfg.min_scan_height or 0) or 1
+    oracle = BlindBitOracleClient(base_url=cfg.blindbit_url)
+    try:
+        tip = int(await oracle.get_chain_tip() or 0)
+    except Exception as e:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail="The chain tip is not available right now.",
+        ) from e
+    if not tip or tip < min_height:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail="The indexed range is not available right now.",
+        )
+
+    mempool = cfg.mempool_url or "https://mempool.space"
+
+    async def _bt(h: int) -> int:
+        return await get_block_time(mempool, h)
+
+    found = await height_at(int(ts), min_height, tip, _bt)
+    if found is None:
+        # A probe the explorer could not answer. Refused rather than
+        # estimated: a window in the wrong place reports "nothing found" about
+        # blocks it never read, which is the failure the rescan exists to undo.
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail="Could not read block times from the explorer. Try again shortly.",
+        )
+    height = clamp(found, min_height, tip)
+    return {
+        "height": height,
+        "block_time": await _bt(height),
+        "clamped": height != found,
+        "min_height": min_height,
+        "tip": tip,
+    }
+
+
 @silnt_api_router.get(
     "/api/v1/wallet/{wallet_id}/scan/progress",
     dependencies=[Depends(require_trusted_device)],
