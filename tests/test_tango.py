@@ -1467,13 +1467,20 @@ def _crud_fn(name: str) -> str:
     return src[at:nxt]
 
 
-def test_deleting_a_wallet_takes_its_rounds():
+def test_deleting_a_wallet_takes_its_side_of_its_rounds():
     """a_inputs and b_inputs are the outpoints the wallet put into each round —
     which coins, in which mix, with whom. Left behind, they are the most
-    identifying thing a deleted wallet can leave on the server."""
+    identifying thing a deleted wallet can leave on the server.
+
+    Its SIDE of them. This used to be
+    `DELETE ... WHERE a_wallet_id = :id OR b_wallet_id = :id`, and a round row
+    is one record shared by two wallets: removing a wallet took the PARTNER's
+    Tango history with it (2026-10-05). Theirs became a plain send of the fee,
+    which is what the arithmetic says about a mix once nothing names it."""
     body = _crud_fn("delete_silnt_wallet")
-    assert "silnt.tango_rounds" in body
-    assert "a_wallet_id = :id OR b_wallet_id = :id" in body
+    assert "purge_tango_side(wallet_id)" in body, body
+    # Not the row. That is the partner's record too.
+    assert "DELETE FROM silnt.tango_rounds" not in body, body
 
 
 def test_deleting_a_wallet_takes_its_scan_key():
@@ -1485,10 +1492,16 @@ def test_deleting_a_wallet_takes_its_scan_key():
 
 def test_deleting_an_account_takes_them_too():
     """The account purge deleted the wallet row and left the scan key for it,
-    and every round it had ever been in."""
+    and every round it had ever been in.
+
+    `forget_identity`, which the per-wallet removal does not pass: an account
+    that is going takes its user id and username off the round as well, so
+    list_tango_rounds_for_user stops finding it. A wallet removed and re-added
+    is the same person wanting the same history back, and keeps both."""
     body = _crud_fn("delete_all_silnt_data_for_user")
     assert "silnt.background_scan" in body, "the encrypted scan key survives"
-    assert "silnt.tango_rounds" in body, "the rounds survive"
+    assert "purge_tango_side(wid, forget_identity=True)" in body, body
+    assert "DELETE FROM silnt.tango_rounds" not in body, body
 
 
 def test_connections_go_with_the_last_wallet_on_a_network():

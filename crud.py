@@ -69,6 +69,97 @@ async def get_silnt_wallets(
     )
 
 
+# A tango_rounds row is ONE RECORD SHARED BY TWO WALLETS, and deleting it to
+# clear one side's history deleted the other side's with it. Reported
+# 2026-10-05: removing a wallet took the partner's Tango history away too —
+# their rows became plain sends of the fee, which is what the arithmetic says
+# about a mix when nothing names it.
+#
+# So a broadcast round is redacted rather than deleted. TWO COLUMNS, and the
+# narrowness is the point:
+#
+#   a_inputs    — which of the transaction's inputs were this wallet's coins.
+#                 The one thing on the row that is not already public: the
+#                 transaction is on chain and `tx_hex` here lists every input,
+#                 but "these two of the four were this user's" is nowhere else.
+#   a_wallet_id — emptied so the guards that read `if not wallet_id` skip this
+#                 side. _label_tango_coins is why: it would keep trying to
+#                 label coins in a wallet that no longer exists, never set
+#                 change_labelled, and retry the round every five minutes for
+#                 as long as it survives.
+#
+# NOT a_change_spk, and this is the trap. enqueue_tango_payouts looks the
+# change output's vout up BY that script, and skips any side whose script is
+# missing. Clearing it for a wallet removed between broadcast and confirmation
+# would strand a payout already owed — the change has paid this instance and
+# the value is owed whatever the user has since done with their wallet. Same
+# hazard CLAUDE.md records for reading `enabled` there, reached a different
+# way. a_mix_spk, a_witnesses and a_payout_tweak stay for a weaker reason:
+# every one of them is in the broadcast transaction already, so clearing them
+# buys nothing and risks the labelling and payout paths that read them.
+#
+# Written as whole literal fragments per side rather than an f-string on a
+# side letter, so every column this touches is greppable in the source.
+_TANGO_DROP_SIDE = {
+    "a": "a_inputs = NULL, a_wallet_id = ''",
+    "b": "b_inputs = NULL, b_wallet_id = ''",
+}
+# Account deletion only. a_username is NOT NULL, so the name is replaced rather
+# than cleared, and the user id becomes the empty string — which no live
+# account has, so list_tango_rounds_for_user stops finding the row.
+_TANGO_FORGET_SIDE = {
+    "a": "a_user_id = :ruid, a_username = :rname",
+    "b": "b_user_id = :ruid, b_username = :rname",
+}
+TANGO_FORGOTTEN_USER = ""
+TANGO_FORGOTTEN_NAME = "removed"
+
+
+async def purge_tango_side(wallet_id: str, forget_identity: bool = False) -> None:
+    """Take one wallet off its Tango rounds without taking the partner's too.
+
+    `forget_identity` is for account deletion, where the user id and username
+    have to go as well. A per-wallet removal keeps both: the account is still
+    there, list_tango_rounds_for_user is keyed on the USER, and a wallet
+    removed and re-added is the same person wanting the same history back.
+    """
+    rows = await db.fetchall(
+        "SELECT id, status, a_wallet_id, a_user_id, b_user_id "
+        "FROM silnt.tango_rounds "
+        "WHERE a_wallet_id = :wid OR b_wallet_id = :wid",
+        {"wid": wallet_id},
+    )
+    for r in rows:
+        side, other = ("a", "b") if r["a_wallet_id"] == wallet_id else ("b", "a")
+
+        # A round that never reached the chain is not history — nobody's money
+        # moved — and leaving it would keep the partner's coins reserved
+        # against a wallet that no longer exists. The endpoint tells them
+        # first; see api_delete_silnt_wallet.
+        if r["status"] != "BROADCAST":
+            await db.execute(
+                "DELETE FROM silnt.tango_rounds WHERE id = :id", {"id": r["id"]}
+            )
+            continue
+
+        sets = [_TANGO_DROP_SIDE[side]]
+        params = {"id": r["id"]}
+        if forget_identity:
+            sets.append(_TANGO_FORGET_SIDE[side])
+            params["ruid"] = TANGO_FORGOTTEN_USER
+            params["rname"] = TANGO_FORGOTTEN_NAME
+        await db.execute(
+            "UPDATE silnt.tango_rounds SET " + ", ".join(sets) + " WHERE id = :id",
+            params,
+        )
+
+        # Once neither account is left there is nobody the row is history for.
+        if forget_identity and not r[other + "_user_id"]:
+            await db.execute(
+                "DELETE FROM silnt.tango_rounds WHERE id = :id", {"id": r["id"]}
+            )
+
+
 async def delete_silnt_wallet(wallet_id: str) -> None:
     await db.execute(
         "DELETE FROM silnt.wallets WHERE id = :id",
@@ -83,22 +174,11 @@ async def delete_silnt_wallet(wallet_id: str) -> None:
         "DELETE FROM silnt.plain_incoming WHERE wallet_id = :id",
         {"id": wallet_id},
     )
-    # And its Tango rounds. These carry the wallet's own outpoints in
-    # a_inputs/b_inputs — which coins it put into which round — so leaving them
-    # keeps the most identifying part of a deleted wallet on the server for
-    # good. The endpoint tells the other side before this runs; see
-    # api_delete_silnt_wallet.
-    #
-    # The row is shared with the partner, so removing it also takes the Tango
-    # labelling off THEIR transaction list: their row becomes a plain send of
-    # the fee, and their coins keep the labels the scan wrote on them. That is
-    # the cost of the wallet's side not lingering, and it is the side that
-    # asked.
-    await db.execute(
-        "DELETE FROM silnt.tango_rounds "
-        "WHERE a_wallet_id = :id OR b_wallet_id = :id",
-        {"id": wallet_id},
-    )
+    # And its side of its Tango rounds — the outpoints in a_inputs/b_inputs are
+    # the most identifying thing a removed wallet could leave behind. Its SIDE,
+    # not the rows: see purge_tango_side for why the row is shared and what
+    # deleting it did to the partner.
+    await purge_tango_side(wallet_id)
 
 
 # ── Background scanning (opt-in "Remote Scanner") ─────────────────────────────
@@ -1870,11 +1950,10 @@ async def delete_all_silnt_data_for_user(user_id: str) -> dict:
         # went and the detection key for it stayed, which is the one piece of
         # server-side material a deleted account most needs gone.
         await db.execute("DELETE FROM silnt.background_scan WHERE wallet_id = :wid", {"wid": wid})
-        await db.execute(
-            "DELETE FROM silnt.tango_rounds "
-            "WHERE a_wallet_id = :wid OR b_wallet_id = :wid",
-            {"wid": wid},
-        )
+        # forget_identity: the account is going, so the user id and username go
+        # with this side's outpoints. The row survives for the PARTNER, whose
+        # Tango history it also is, until their side goes too.
+        await purge_tango_side(wid, forget_identity=True)
         await db.execute("DELETE FROM silnt.wallets WHERE id = :wid", {"wid": wid})
 
     # Per-user data (keyed by user_id, not wallet_id) — these must be cleaned even
@@ -3511,21 +3590,64 @@ async def get_tango_txids_for_wallet(wallet_id: str) -> dict:
     does not own, so without them the detail view listed every one of them
     under "alice's share" — reporting a 14,000 round as 16,503 to alice,
     because her 2,503 of change was in the list too.
+
+    MATCHED ON THE USER AS WELL AS THE WALLET. A wallet id is
+    urlsafe_short_hash() at create time, so removing a wallet and adding the
+    same seed back produces a DIFFERENT id for the same wallet, and a round
+    keyed on the old one stops being found. The user id survives, because the
+    LNbits account does — it is what list_tango_rounds_for_user has always
+    used, which is why the Tango screen kept the round while the transaction
+    list lost it. Reported 2026-10-05 as a reinstalled mainnet wallet showing
+    round 7e180d9e… as "Sent -384": 384 was this side's fee share, which is
+    exactly what a mix looks like once nothing names it.
+
+    Scoped to the wallet's own network, and only ever consulted for a txid this
+    wallet already holds coins in, so a second wallet on the same account
+    cannot pick up the first one's rounds.
     """
+    wallet = await get_silnt_wallet(wallet_id)
+    uid = getattr(wallet, "user", None) if wallet else None
+    net = getattr(wallet, "network", None) if wallet else None
+
+    mine = "(a_wallet_id = :wid OR b_wallet_id = :wid)"
+    params = {"wid": wallet_id}
+    if uid and net:
+        mine = (
+            "(a_wallet_id = :wid OR b_wallet_id = :wid "
+            "OR (network = :net AND (a_user_id = :uid OR b_user_id = :uid)))"
+        )
+        params["uid"] = uid
+        params["net"] = net
+
     rows = await db.fetchall(
         """
-        SELECT txid, denom_sats, pieces, a_wallet_id, a_username, b_username,
+        SELECT txid, denom_sats, pieces, a_wallet_id, b_wallet_id,
+               a_user_id, b_user_id, a_username, b_username,
                a_fee_sats, b_fee_sats, a_change_sats, b_change_sats,
                vsize, fee_rate
         FROM silnt.tango_rounds
         WHERE status = 'BROADCAST' AND txid IS NOT NULL
-          AND (a_wallet_id = :wid OR b_wallet_id = :wid)
-        """,
-        {"wid": wallet_id},
+          AND """
+        + mine,
+        params,
     )
     out = {}
     for r in rows:
-        mine_is_a = r["a_wallet_id"] == wallet_id
+        # The wallet id first: it is exact, and it is the only thing that can
+        # tell the two sides apart when both belong to the same account.
+        if r["a_wallet_id"] == wallet_id:
+            mine_is_a = True
+        elif r["b_wallet_id"] == wallet_id:
+            mine_is_a = False
+        elif uid and r["a_user_id"] == uid and r["b_user_id"] != uid:
+            mine_is_a = True
+        elif uid and r["b_user_id"] == uid and r["a_user_id"] != uid:
+            mine_is_a = False
+        else:
+            # Nothing says which side this wallet was. Reading the wrong one
+            # would report the partner's fee and change as this wallet's, so
+            # the row keeps its plain arithmetic instead of gaining a lie.
+            continue
         my_fee = r["a_fee_sats"] if mine_is_a else r["b_fee_sats"]
         my_change = r["a_change_sats"] if mine_is_a else r["b_change_sats"]
         their_change = r["b_change_sats"] if mine_is_a else r["a_change_sats"]
