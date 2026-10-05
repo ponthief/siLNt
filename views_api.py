@@ -3499,7 +3499,13 @@ async def api_plain_preview(
     server is told the addresses actually in play and cannot derive the next one
     — which is the whole reason it is never given the xpub.
     """
+    from .helpers.scan_rate_limiter import check_plain_preview_allowed
+
     wallet = await _plain_wallet_or_403(wallet_id, key_info)
+    # The one read in the app that had no limit of any kind, and it opens a
+    # connection to the chain index on every call. Checked after ownership, so
+    # a stranger's request cannot spend the owner's allowance.
+    check_plain_preview_allowed(key_info.wallet.user)
     if not address:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST, detail="No addresses supplied."

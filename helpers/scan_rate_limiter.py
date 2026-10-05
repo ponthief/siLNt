@@ -27,12 +27,28 @@ MAX_CONCURRENT_PER_USER    = 1            # only one active scan per user
 MAX_SCAN_STARTS_PER_IP_HR  = 30           # 30 scan-starts/hour per IP
 MAX_BLOCKS_PER_USER_HR     = 500_000      # ~half a million blocks/hour per user
 
+# The plain/SegWit address preview. A different cost from a BIP-352 scan — one
+# Fulcrum socket and a listunspent per address, no EC math — but it is the one
+# read in the app with NO limit of any kind, and it opens a connection to the
+# chain index on every call.
+#
+# Legitimate traffic is small and known: the card walks on mount, the
+# foreground watcher polls every five minutes, the wallet screen's
+# pull-to-refresh, and once after a send. Thirty a minute is far above all of
+# that together and still caps a client holding a button down.
+#
+# The Refresh button came off the phone's card on 2026-10-05 over exactly this
+# worry, and removing a button is not the fix: anyone can call the endpoint
+# directly. The limit is.
+MAX_PLAIN_PREVIEWS_PER_USER_MIN = 30
+
 
 # ── State (in-memory — fine for single-process LNbits) ───────────────────────
 _last_scan_time:   dict     = {}                     # wallet_id -> ts
 _active_scans:     dict     = defaultdict(set)       # user_id -> {wallet_id, ...}
 _ip_scan_log:      dict     = defaultdict(list)      # ip -> [ts, ts, ...]
 _user_blocks_log:  dict     = defaultdict(list)      # user_id -> [(ts, count), ...]
+_plain_preview_log: dict    = defaultdict(list)      # user_id -> [ts, ts, ...]
 
 
 def _prune_old(entries: list, age_seconds: int) -> list:
@@ -104,6 +120,22 @@ def check_scan_allowed(
         f"Scan allowed: user={user_id[:8]} wallet={wallet_id[:8]} "
         f"blocks={estimated_blocks} ip={ip}"
     )
+
+
+def check_plain_preview_allowed(user_id: str) -> None:
+    """Raise 429 if this user is asking about their SegWit addresses too fast.
+
+    Per user rather than per wallet: the cost is the chain-index connection,
+    and one account can have a wallet on each network.
+    """
+    now = time.time()
+    _plain_preview_log[user_id] = _prune_old(_plain_preview_log[user_id], 60)
+    if len(_plain_preview_log[user_id]) >= MAX_PLAIN_PREVIEWS_PER_USER_MIN:
+        raise HTTPException(
+            status_code=HTTPStatus.TOO_MANY_REQUESTS,
+            detail="Checking those addresses too often. Try again in a minute.",
+        )
+    _plain_preview_log[user_id].append(now)
 
 
 def mark_scan_finished(
