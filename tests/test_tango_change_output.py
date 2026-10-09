@@ -241,15 +241,25 @@ def test_the_address_comes_off_the_round_not_the_live_config():
 
 def test_routing_needs_the_whole_configuration():
     """Address, scan key and a payout wallet. Routing with any of them missing
-    takes the coin and has no way to send the value on."""
+    takes the coin and has no way to send the value on.
+
+    The payout wallet is asked for through payout_source() rather than by
+    name, since there are two kinds now — an LNbits wallet on this server or
+    an NWC connection to one somewhere else — and "either" is the
+    requirement."""
     body = _fn("views_api.py", "_tango_routes_change")
     assert "cfg.tango_payout_ready(network)" in body
-    ready = (ROOT / "models.py").read_text()
-    ready = ready[ready.index("def tango_payout_ready"):]
-    ready = ready[: ready.index("\n    def ")]
+    src = (ROOT / "models.py").read_text()
+    ready = src[src.index("def tango_payout_ready"):]
+    ready = ready[: ready.index("\n    def ")] if "\n    def " in ready else ready
     for field in ("tango_change_sp_address", "tango_change_scan_secret",
-                  "tango_change_payout_wallet_id"):
+                  "payout_source()"):
         assert field in ready, field
+    # And payout_source means exactly those two, neither of them optional.
+    source = src[src.index("def payout_source"):]
+    source = source[: source.index("\n    def ")]
+    assert "tango_change_payout_nwc" in source
+    assert "tango_change_payout_wallet_id" in source
 
 
 def test_the_derivation_uses_the_whole_frozen_input_set():
@@ -268,15 +278,42 @@ def test_a_routed_change_is_not_labelled_as_the_user_s_coin():
     assert "None if rnd.b_payout else rnd.b_change_spk" in src
 
 
-def test_the_scan_key_is_not_handed_to_every_user():
+def test_the_secrets_are_not_handed_to_every_user():
     """GET /backend/config returns this model to any authenticated caller,
-    which was harmless while nothing in it was a secret. The scan key is the
-    first, and it would identify every coin the service has collected."""
+    which was harmless while nothing in it was a secret.
+
+    The scan key was the first: a VIEW key, which would identify every coin
+    the service has collected and let the holder take none. The NWC connection
+    string is the second and is worse — it is a SPENDING credential for the
+    payout wallet, so whoever holds it can empty it. The comment above the
+    tuple says a future secret that is not listed is a leak, and this is what
+    makes that true of the next one as well.
+    """
     src = (ROOT / "views_api.py").read_text()
-    assert '_REDACTED_CONFIG_FIELDS = ("tango_change_scan_secret",)' in src
+    redacted = src[src.index("_REDACTED_CONFIG_FIELDS = ("):]
+    redacted = redacted[: redacted.index(")")]
+    assert "tango_change_scan_secret" in redacted
+    assert "tango_change_payout_nwc" in redacted
     body = _fn("views_api.py", "api_get_backend_config")
     assert "is_lnbits_admin(key_info.wallet.user)" in body
     assert "_REDACTED_CONFIG_FIELDS" in body
+
+
+def test_the_connection_string_is_never_rendered_whole():
+    """Not in a log line, not in the payout health endpoint, not in the
+    liquidity record. A redaction that only covers the config endpoint is a
+    redaction with three ways round it."""
+    nwc = (ROOT / "helpers" / "nwc.py").read_text()
+    assert "def redacted" in nwc
+    body = nwc[nwc.index("def redacted"):]
+    body = body[: body.index("\n    def ")]
+    assert "secret=…" in body
+    assert "self.secret" not in body
+
+    liq = _fn("views_api.py", "tango_payout_liquidity")
+    assert "tango_change_payout_nwc" not in liq
+    health = _fn("views_api.py", "tango_routing_status")
+    assert "tango_change_payout_nwc" not in health
 
 
 def test_the_payout_wallet_is_an_id_and_not_a_key():

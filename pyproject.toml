@@ -16,6 +16,10 @@ dependencies = [
  "httpx>=0.27.0",
  "mnemonic>=0.21",
  "pydantic>=1.10.22",
+ # A relay client, for the Nostr Wallet Connect payout source (helpers/nwc.py).
+ # Imported lazily: an instance that pays out from an LNbits wallet, or not at
+ # all, runs without it.
+ "websockets>=12.0",
 ]
 
 [tool.uv]

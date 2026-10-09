@@ -240,23 +240,44 @@ Needed, and not yet designed:
 Until that path exists, this feature takes money it might not be able to
 give back.
 
-## Signet must not pay out over mainnet Lightning
+## The payout wallet must be on the chain it is paying for
 
-A Tango on signet produces **worthless** change. A Lightning address is not
-network-scoped — `satoshi@coinos.io` is a mainnet endpoint — so a signet round
-whose change is routed would pay real sats for test coins. Every signet user
-would be able to mint money out of a faucet.
+A Tango on signet produces **worthless** change. Pay it out of a mainnet
+wallet and the instance buys test coins with real sats — every signet user
+able to mint money out of a faucet, on repeat.
 
-So one of:
+This was first written as "signet must not pay out over mainnet Lightning",
+and the feature shipped **mainnet-only**: `PAYOUT_NETWORKS = ("mainnet",)`,
+the Lightning-address setting not offered anywhere else, and the clients told
+by the server rather than checking the chain themselves. That was the honest
+statement of the rule given what a payout wallet was — an LNbits wallet on
+this server, running on whatever funding source LNbits was configured with,
+which nothing in this extension can interrogate. Mainnet had to be assumed and
+everything else refused.
 
-* the feature is **mainnet-only**, and the Lightning-address setting does not
-  appear on a signet build at all (simplest, and honest);
-* the payout goes to signet Lightning, which almost nothing supports;
-* `tango_change_payout_enabled` is per network in `BackendConfig`, defaults
-  false everywhere, and turning it on for signet is the operator's mistake to
-  make.
+**Settled 2026-10-09.** The rule is not about chains and never was; it is
+about the wallet. Nostr Wallet Connect (NIP-47) reaches a wallet somebody else
+runs, and its `get_info` reports `network` — `mainnet`, `testnet`, `signet` or
+`regtest`. So the wallet is asked, and the answer is compared with the round's
+chain:
 
-The setting is stored per user; whether it is offered is per network.
+* `tango_change_payout_nwc` in `BackendConfig`, per network, holds the
+  connection string. Set, it is the payout source; blank, the LNbits wallet
+  is. It is a **spending credential** — redacted from `GET /backend/config`,
+  never logged whole, never in the health endpoint.
+* `helpers/nwc.network_mismatch` is the refusal. A wallet on another chain is
+  refused and told which; **a wallet that will not say is also refused**,
+  because the thing a default would buy is the faucet attack above.
+* Checked twice: in the liquidity read, which is what decides whether a round
+  may route at all, and again in `_pay_payout_invoice` immediately before
+  spending — a connection string can be re-pointed between the two.
+* An LNbits payout wallet is still mainnet-only, for the original reason.
+
+So a Coinos **signet** wallet pays signet change in signet sats, and no
+operator setting anywhere can assert that a chain is acceptable.
+
+The setting is stored per user; whether it is offered is per network, and now
+per payout wallet.
 
 ## Solvency
 
@@ -323,7 +344,7 @@ pretend otherwise.
    above. Recommendation:
    `min(change − DUST_SATS, max(0.5% × change, floor))`, with a floor around
    50–100 sats.
-2. **Which networks offer it.** Mainnet-only, or per-network config defaulting
-   to off. A signet round paying out real Lightning sats is free money.
+2. ~~**Which networks offer it.**~~ Settled 2026-10-09: whichever chain the
+   configured payout wallet reports it is on. See the section above.
 3. **The failed-payout path**, above. Needed before this can hold anyone's
    money, not after.

@@ -50,27 +50,54 @@ DEFAULT_FEE_PCT = 0.005          # 0.5%
 DEFAULT_FEE_FLOOR_SATS = 100     # a routing fee plus a low-fee-rate sweep
 
 
-# WHICH CHAINS CAN PAY OUT, and it is one.
+# WHICH CHAINS CAN PAY OUT, and the answer depends on what is paying.
 #
-# A Lightning address is not network-scoped — satoshi@coinos.io is a mainnet
-# endpoint, and there is no signet equivalent anyone runs. A signet round's
-# change is worthless test coin. Route it and the instance pays real sats for
+# THE RULE HAS ALWAYS BEEN ONE RULE: the wallet the payout leaves from must be
+# on the same chain as the round whose change it is paying. Route a signet
+# round's change out of a mainnet wallet and the instance pays real sats for
 # faucet money, which every signet user could do on repeat.
 #
-# So the setting is not offered off mainnet and the backend refuses to route
-# there, rather than relying on an operator not to enable it. The two clients
-# mirror this to decide whether to show the setting at all: a field that
-# silently cannot work is worse than no field.
+# For an LNBITS payout wallet that collapses to "mainnet only", and did so
+# invisibly: a wallet on this server runs on whatever funding source LNbits
+# was configured with, this extension cannot ask it which chain that is, and
+# in practice it is mainnet. Hardcoding the chain was the only honest way to
+# state the rule, so it read as a rule about chains.
+#
+# An NWC payout wallet is somebody else's wallet, and NIP-47 has it SAY which
+# chain it is on: `get_info` reports mainnet, testnet, signet or regtest. So
+# the rule can be enforced as what it is, against the wallet that will do the
+# paying — see helpers/nwc.network_mismatch, which is checked live rather than
+# stored, and which refuses a wallet that will not say. That is what lets a
+# Coinos signet wallet pay signet change (2026-10-09), and it is not a
+# loosening: nothing here decides a chain is acceptable, it decides that this
+# chain is the wallet's own.
+#
+# The two clients mirror none of this. They read `offered` off the server and
+# show the setting or do not — see check:payout. A field that silently cannot
+# work is worse than no field, and a client-side network check is how one
+# would come back.
 PAYOUT_NETWORKS = ("mainnet",)
 
+SOURCE_LNBITS = "lnbits"
+SOURCE_NWC = "nwc"
 
-def payout_offered(network: str) -> bool:
+
+def payout_offered(network: str, source: str = SOURCE_LNBITS) -> bool:
     """Whether this chain can pay a Tango's change over Lightning at all.
 
-    Deliberately not configurable. See PAYOUT_NETWORKS — the failure it
-    prevents is the instance funding a faucet, and that is not a preference.
+    Still not an operator preference. With an LNbits wallet it is the chain
+    list above, because nothing can ask that wallet what it runs on. With an
+    NWC wallet the chain is whatever the wallet reports, so every chain is
+    possible HERE and the real refusal happens where the answer is known —
+    nwcclient.check_network, before a round is allowed to route and again
+    before a payout is sent.
     """
-    return (network or "").strip().lower() in PAYOUT_NETWORKS
+    net = (network or "").strip().lower()
+    if not net:
+        return False
+    if (source or "").strip().lower() == SOURCE_NWC:
+        return True
+    return net in PAYOUT_NETWORKS
 
 
 class PayoutPlan:

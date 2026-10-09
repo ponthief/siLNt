@@ -241,11 +241,20 @@ def test_a_routed_payout_carries_no_reason():
     assert payout_plan(5_000).reason is None
 
 
-# ── mainnet only, and not as a preference ───────────────────────────────────
+# ── the payout wallet has to be on the chain it is paying for ───────────────
+#
+# ONE RULE, which used to be stated as a list of chains because with an LNbits
+# wallet on this server that is all it could be: nothing here can ask such a
+# wallet which funding source it runs on, so mainnet had to be assumed and
+# every other chain refused. An NWC wallet reports its own chain, so the rule
+# is enforced against the wallet instead — see helpers/nwc.network_mismatch,
+# which is what actually refuses, and which refuses a wallet that will not say.
 
 
-def test_only_mainnet_can_pay_out():
+def test_an_lnbits_wallet_can_still_only_pay_mainnet():
+    """Unchanged, and for the unchanged reason."""
     assert payout_offered("mainnet")
+    assert payout_offered("mainnet", "lnbits")
     for network in ("signet", "testnet", "regtest", "", None, "MAINNET "):
         if network == "MAINNET ":
             assert payout_offered(network), "case and whitespace are not a network"
@@ -253,16 +262,64 @@ def test_only_mainnet_can_pay_out():
         assert not payout_offered(network), network
 
 
-def test_the_network_rule_is_not_configurable():
-    """A Lightning address is a mainnet endpoint and signet change is
-    worthless, so routing it pays real sats for faucet coins — on repeat, by
-    anyone. That is not an operator preference."""
+def test_an_nwc_wallet_is_not_refused_by_chain_here():
+    """Because here is not where the chain is known. payout_offered answers
+    "is this setting worth showing"; nwc.network_mismatch answers "may this
+    wallet pay this round", and it is the one with the wallet's own answer in
+    front of it."""
+    for network in ("mainnet", "signet", "testnet", "regtest"):
+        assert payout_offered(network, "nwc"), network
+    # Still not a chain-less yes: a blank network is nobody's chain.
+    for network in ("", None):
+        assert not payout_offered(network, "nwc")
+
+
+def test_the_network_rule_is_still_not_configurable():
+    """No config value anywhere says "signet is fine". What changed is that
+    the wallet gets asked; what did not is that an operator cannot assert it.
+    """
     src = (ROOT / "helpers" / "tangopayout.py").read_text()
     body = src[src.index("def payout_offered"):]
     body = body[: body.index("\ndef ")] if "\ndef " in body else body
     assert "PAYOUT_NETWORKS" in body
-    # No config argument to override it with.
-    assert "def payout_offered(network: str) -> bool:" in src
+    # The only argument besides the network is WHICH KIND of wallet pays,
+    # which is read off what is configured rather than asserted by it.
+    assert "def payout_offered(network: str, source: str = SOURCE_LNBITS)" in src
+    model = (ROOT / "models.py").read_text()
+    source = model[model.index("def payout_source"):]
+    source = source[: source.index("\n    def ")]
+    assert "tango_change_payout_nwc" in source
+    assert "network" not in source, "the source is not chosen per network by hand"
+
+
+def test_a_wallet_that_will_not_say_its_chain_is_refused():
+    """The important half. A missing `network` in get_info was impossible to
+    have while the payout wallet was always this server's; over NWC it is
+    somebody else's wallet, and the specific thing a default would buy is an
+    instance paying real sats out for signet change, on repeat, to anyone."""
+    from helpers.nwc import network_mismatch
+
+    for reported in ("", None, "lightning", "bitcoin-signet"):
+        why = network_mismatch(reported, "signet")
+        assert why and "does not report" in why, reported
+
+
+def test_a_wallet_on_the_wrong_chain_is_refused_and_says_which():
+    from helpers.nwc import network_mismatch
+
+    why = network_mismatch("mainnet", "signet")
+    assert why and "mainnet" in why and "signet" in why
+    assert network_mismatch("signet", "mainnet")
+
+
+def test_a_wallet_on_the_right_chain_passes():
+    from helpers.nwc import network_mismatch
+
+    assert network_mismatch("signet", "signet") is None
+    assert network_mismatch("mainnet", "mainnet") is None
+    # What services actually send for mainnet, which NIP-47 does not list.
+    assert network_mismatch("bitcoin", "mainnet") is None
+    assert network_mismatch(" Signet ", "signet") is None
 
 
 def test_the_config_needs_all_three_before_it_will_route():
