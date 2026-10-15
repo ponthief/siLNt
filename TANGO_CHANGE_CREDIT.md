@@ -240,48 +240,47 @@ Needed, and not yet designed:
 Until that path exists, this feature takes money it might not be able to
 give back.
 
-## A test chain's change must never leave as real sats
+## Mainnet only, and it stays that way
 
-A Tango on signet produces **worthless** change. Pay it to a mainnet Lightning
-address and the instance buys test coins with real sats — every signet user
-able to mint money out of a faucet, on repeat.
+A Tango on signet produces **worthless** change. Pay it to a Lightning address
+and the instance buys test coins with real sats — every signet user able to
+mint money out of a faucet, on repeat.
 
-This was first written as "signet must not pay out over mainnet Lightning",
-and the feature shipped **mainnet-only**: `PAYOUT_NETWORKS = ("mainnet",)`,
-the Lightning-address setting not offered anywhere else, and the clients told
-by the server rather than checking the chain themselves. That was the honest
-statement of the rule given what could be asked. The payout wallet is an
-LNbits wallet on this server, running on a local Lightning node, and nothing
-in an extension can interrogate that node — so mainnet had to be assumed and
-everything else refused, including the operator running a signet node.
+So the feature is **mainnet-only**: `PAYOUT_NETWORKS = ("mainnet",)`, the
+Lightning-address setting not offered anywhere else, and the clients told by
+the server (`offered`) rather than checking the chain themselves.
 
-**Settled 2026-10-15.** The rule is not about chains; it is about where the
-money is going. BOLT 11 names its chain in the human-readable part, so the
-check moved onto the invoice:
+**Off mainnet the change goes on chain**, into its owner's own wallet. That is
+not a degraded mode and needs no code of its own — it is what every round did
+before this feature existed. `payout_offered` false makes `tango_payout_ready`
+false, makes `_tango_routes_change` false, and the client derives its own
+change script and keeps the coin.
 
-* `helpers/bolt11net.py` reads the prefix — `lnbc` mainnet, `lntb` testnet,
-  `lntbs` (and legacy `lnsb`) signet, `lnbcrt` regtest. Matched
-  **longest-first**: `lnbcrt` starts with `lnbc` and `lntbs` starts with
-  `lntb`, so a shortest-first reader calls every regtest invoice mainnet,
-  which is the direction that spends real money.
-* Checked when the address is **saved** — one extra LNURL call for a probe
-  invoice, for the same reason the provider's minimum is checked there: by
-  payout the coin has left the user's wallet and become ours, and "your
-  address is on the wrong network" cannot be handed back then.
-* Checked **again immediately before paying**, because a provider can be
-  re-pointed between the two and that is the call that spends.
-* An invoice it cannot identify is **refused**, not assumed. The cost of being
-  wrong that way is a payout that does not go; the other way it is money.
+**Settled 2026-10-15**, after two attempts to widen it. Both are recorded here
+because both looked reasonable:
 
-So `payout_offered` is true for any named chain with a payout wallet, and an
-operator running a signet node pays signet change. A node on the wrong chain
-cannot pay another chain's invoice anyway — that fails, retries and is
-reported, and nothing moves.
+* **NWC.** A Nostr Wallet Connect connection reaches a wallet somebody else
+  runs — a Coinos account — and NIP-47's `get_info` reports which chain it is
+  on, so the wallet could be asked rather than assumed. Removed: this instance
+  pays from a local Lightning node through LNbits and from nowhere else, and a
+  payout path through a third-party custodian is not one to have.
 
-**Not NWC.** A Nostr Wallet Connect payout source, reaching a wallet somebody
-else runs, was added on 2026-10-09 and removed on 2026-10-15: this instance
-pays from a local Lightning node through LNbits and from nowhere else, and
-nothing stores a spending credential in a config blob.
+* **Reading the chain off the invoice.** BOLT 11 names its chain in the
+  human-readable part, so a crossing can be refused as a fact rather than by a
+  list. That check **stayed** — `helpers/bolt11net.py`, called immediately
+  before the payment — but as a last line in front of the money, not as a
+  licence to offer the setting off mainnet. It should never fire: no address
+  is saved off mainnet and no round routes there. It is what makes the rule a
+  property of the code rather than of one constant nobody re-reads before
+  widening it. Prefixes are matched **longest-first**: `lnbcrt` starts with
+  `lnbc` and `lntbs` starts with `lntb`, so shortest-first calls every regtest
+  invoice mainnet, which is the direction that spends real money.
+
+What a third attempt would need is an answer to "what pays the invoice" —
+signet Lightning wants a signet node, a signet channel and a counterparty's
+signet liquidity — not a narrower refusal. A wallet that cannot pay the
+invoice takes the change output and then fails six times, which is worse for
+the user than never offering it.
 
 The setting is stored per user; whether it is offered is per network.
 
@@ -350,8 +349,7 @@ pretend otherwise.
    above. Recommendation:
    `min(change − DUST_SATS, max(0.5% × change, floor))`, with a floor around
    50–100 sats.
-2. ~~**Which networks offer it.**~~ Settled 2026-10-15: every chain, with the
-   invoice's own prefix refusing a payout that would cross one. See the
-   section above.
+2. ~~**Which networks offer it.**~~ Settled 2026-10-15: mainnet, and it stays
+   that way. Off mainnet the change stays on chain. See the section above.
 3. **The failed-payout path**, above. Needed before this can hold anyone's
    money, not after.

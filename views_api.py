@@ -45,14 +45,12 @@ from .helpers.dust_check import evaluate_dust_for_wallet
 from .helpers.errors import exc_text as _exc_text
 from .helpers.lnaddress import (
     LnAddressError,
-    LnAddressTemporaryError,
-    request_invoice,
     resolve as resolve_ln_address,
 )
-# The one check that stops a test chain's change leaving as real sats. Named
-# on import rather than reached for inside the payout, because there are two
-# call sites — saving the address and paying it — and they have to be the same
-# rule.
+# The last gate in front of the money: an invoice for the wrong chain is not
+# paid. PAYOUT_NETWORKS already refuses every chain but mainnet, so in normal
+# service this never fires — it is what makes "a test chain's change never
+# leaves as real sats" true of the code rather than of one constant.
 from .helpers.bolt11net import network_mismatch as invoice_network_mismatch
 from .helpers.tangopayout import (
     TANGO_ADDRESS_PIN_SERVICE,
@@ -4557,20 +4555,22 @@ async def api_sp_contacts_delete(
 # today. See TANGO_CHANGE_CREDIT.md and helpers/tangopayout.py.
 
 async def _require_payout_network(network: str) -> None:
-    """There has to be somewhere to pay the change FROM on this chain.
+    """Mainnet, and somewhere to pay from.
 
-    The chain itself is no longer refused here — see tangopayout.payout_offered
-    for why that list went. What refuses a signet round paying a mainnet
-    address is the invoice's own prefix, checked in bolt11net.network_mismatch
-    when the address is saved and again before anything is sent.
+    A Lightning payout off mainnet would have the instance buying faucet coins
+    with real sats — see tangopayout.PAYOUT_NETWORKS, which is not an operator
+    preference. Off mainnet the change stays on chain in its owner's wallet,
+    which is what every round did before this feature existed.
     """
     cfg = await get_backend_config(network)
     if not cfg.payout_offered(network):
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
             detail=(
-                f"Tango change cannot be paid out on {network} from the "
-                f"configured payout wallet."
+                f"Tango change is not paid out over Lightning on {network}; "
+                f"it stays in your wallet on chain. A Lightning address is a "
+                f"mainnet endpoint and {network} coins are not worth real "
+                f"sats."
             ),
         )
 
@@ -4645,19 +4645,12 @@ async def api_tango_ln_address_set(
     floor = min_change_to_route(
         cfg.tango_change_fee_pct, cfg.tango_change_fee_floor_sats
     )
-    # What the chain probe below will ask for. The smallest payout this
-    # instance would ever send when that is known, and this provider's own
-    # minimum when it is not — either way an amount it should be willing to
-    # quote, since a provider that will not is already refused just below.
-    probe_sats = max(1, endpoint.min_sendable_msat // 1000)
     if floor is not None:
         smallest = payout_plan(
             floor,
             fee_pct=cfg.tango_change_fee_pct,
             fee_floor_sats=cfg.tango_change_fee_floor_sats,
         )
-        if smallest.routed:
-            probe_sats = smallest.net_sats
         if smallest.routed and not endpoint.accepts_sats(smallest.net_sats):
             raise HTTPException(
                 status_code=HTTPStatus.BAD_REQUEST,
@@ -4668,27 +4661,6 @@ async def api_tango_ln_address_set(
                     f"address that accepts small payments."
                 ),
             )
-
-    # AND IT HAS TO BE AN ADDRESS ON THIS CHAIN, which costs one more request
-    # and is the whole of what keeps a signet round from paying out real sats.
-    # An LNURL endpoint does not declare a chain anywhere; the invoice it makes
-    # does, in its first four characters, so the only way to know is to ask for
-    # one. Same reasoning as the minimum above: by payout time the coin has
-    # left their wallet and become ours, and "your address is on the wrong
-    # network" is not something that can be handed back then.
-    #
-    # The amount is the smallest this instance would ever send, so the probe
-    # asks for something the provider will actually quote. A provider that
-    # cannot make this invoice has already failed the check above.
-    try:
-        probe = await request_invoice(endpoint, probe_sats)
-    except LnAddressTemporaryError as e:
-        raise HTTPException(status_code=HTTPStatus.BAD_GATEWAY, detail=str(e))
-    except LnAddressError as e:
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
-    mismatch = invoice_network_mismatch(probe, network)
-    if mismatch:
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=mismatch)
 
     await set_tango_ln_address(
         key_info.wallet.user,
@@ -4876,7 +4848,12 @@ async def _attempt_tango_payout(
     wallet cannot cover is held back rather than attempted, and why an unknown
     balance attempts anyway.
     """
-    from .helpers.lnaddress import resolve as resolve_ln_address_now
+    from .helpers.lnaddress import (
+        LnAddressError,
+        LnAddressTemporaryError,
+        request_invoice,
+        resolve as resolve_ln_address_now,
+    )
     from .helpers.tangopayoutrun import (
         failure_body,
         next_attempt_at,
@@ -4934,11 +4911,13 @@ async def _attempt_tango_payout(
         try:
             endpoint = await resolve_ln_address_now(address)
             bolt11 = await request_invoice(endpoint, int(row["net_sats"]))
-            # THE LAST THING BEFORE THE MONEY MOVES, and the only check that
-            # stops a signet round's worthless change going out as real sats.
-            # It was checked when the address was saved; an address's provider
-            # can be re-pointed at another chain since, and this is the call
-            # that spends. See helpers/bolt11net.py.
+            # THE LAST THING BEFORE THE MONEY MOVES. A payout should never
+            # reach here on anything but mainnet — PAYOUT_NETWORKS refuses the
+            # setting off it, so no address is saved and no round routes — and
+            # this fires anyway, on the invoice itself. It is what makes "a
+            # test chain's change never leaves as real sats" a property of the
+            # code rather than of one constant nobody re-reads before widening
+            # it. See helpers/bolt11net.py.
             mismatch = invoice_network_mismatch(bolt11, row["network"])
             if mismatch:
                 bolt11 = ""
@@ -5250,19 +5229,18 @@ async def tango_routing_status(network: str) -> dict:
         {
             "name": "network",
             "ok": offered,
-            # NOT a list of chains any more. What refuses a signet round
-            # paying a mainnet address is the invoice's own prefix, read at
-            # save time and again before paying (helpers/bolt11net.py), so
-            # the only thing left for this gate to report is whether there is
-            # a wallet to pay from at all.
+            # Two things, and an operator reading a 'no' needs to know which:
+            # the chain is refused outright off mainnet, and a payout wallet
+            # is something they can go and set.
             "detail": f"{network} change can be paid out, from the payout "
                       f"wallet below"
             if offered
-            else f"{network} change has nowhere to be paid out from — set a "
-                 f"payout wallet. Its Lightning node must be on {network}: "
-                 f"an invoice for another chain is refused before it is paid, "
-                 f"which is what stops {network} change going out as real "
-                 f"sats.",
+            else f"{network} change is never routed — it stays on chain in "
+                 f"the user's own wallet. A Lightning address is a mainnet "
+                 f"endpoint and {network} coins are not worth real sats."
+            if network.strip().lower() != "mainnet"
+            else "mainnet change can be routed, but there is no payout wallet "
+                 "set to send it from",
         },
         {
             "name": "enabled",

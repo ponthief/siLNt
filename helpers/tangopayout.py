@@ -57,39 +57,44 @@ DEFAULT_FEE_FLOOR_SATS = 100     # a routing fee plus a low-fee-rate sweep
 # worthless change to a mainnet Lightning address and the instance buys faucet
 # coins with real money, on repeat, for anyone who asks.
 #
-# That used to be written as PAYOUT_NETWORKS = ("mainnet",) and enforced by
-# refusing every other chain outright, because the payout wallet is an LNbits
-# wallet on this server — running on whatever local Lightning node LNbits was
-# pointed at — and nothing in an extension can ask that node which chain it is
-# on. Refusing everything was the only honest move available. It also refused
-# the case an operator running a signet node actually wants.
+# SO IT IS MAINNET ONLY, AND IT STAYS THAT WAY (2026-10-15, on the user's
+# instruction, after a week of trying to widen it). A signet round's change
+# goes where it has always gone: ON CHAIN, into its owner's own wallet,
+# exactly as every round did before this feature existed. There is nothing to
+# configure and nothing to turn on — `payout_offered` is false off mainnet, so
+# `tango_payout_ready` is false, so `_tango_routes_change` is false, so the
+# client derives its own change script and keeps the coin.
 #
-# The INVOICE can be asked, and it is the thing the money is about to go to.
-# BOLT 11 names its chain in the human-readable part, so `helpers/bolt11net.py`
-# reads it and the payment is refused unless it matches the round's chain —
-# checked when the address is saved, and again before anything is sent. An
-# invoice that cannot be identified is refused too: "we could not tell" is not
-# an argument for spending.
+# Two attempts to make signet pay out are recorded here because both looked
+# reasonable and both are refused:
 #
-# So every chain may pay out here, and the refusal happens where the answer is
-# known. A node on the wrong chain cannot pay another chain's invoice anyway;
-# that fails, retries and is reported, and no money moves.
+#   * an NWC connection to a wallet somebody else runs (Coinos), which can be
+#     asked which chain it is on. Removed: this instance pays from a local
+#     Lightning node through LNbits and from nowhere else, and a payout path
+#     through a third-party custodian is not one to have.
 #
-# The two clients mirror none of this. They read `offered` off the server and
-# show the setting or do not — see check:payout. A field that silently cannot
-# work is worse than no field, and a client-side network check is how one would
-# come back.
+#   * reading the chain off the INVOICE — BOLT 11 names it — and refusing a
+#     crossing. That check exists and is worth having (see bolt11net.py), but
+#     as a last line in front of the money, NOT as a licence to offer the
+#     setting off mainnet. Signet Lightning needs a signet node, a signet
+#     channel and a counterparty's signet liquidity; a wallet that cannot pay
+#     a signet invoice would take the change output and then fail six times,
+#     which is worse for the user than never offering it.
+#
+# Widening this needs a real answer to "what pays the invoice", not a way to
+# make the refusal narrower.
+PAYOUT_NETWORKS = ("mainnet",)
 
 
 def payout_offered(network: str) -> bool:
     """Whether this chain can pay a Tango's change over Lightning at all.
 
-    Every named chain can, given a payout wallet. What stops a signet round
-    paying a mainnet address is bolt11net.network_mismatch, which is a fact
-    about the invoice rather than a list anyone maintains — and not an
-    operator preference either way.
+    Deliberately not configurable. See PAYOUT_NETWORKS — the failure it
+    prevents is the instance funding a faucet, and that is not a preference.
+    Off mainnet the change stays on chain, which is not a degraded mode: it is
+    what the protocol did before any of this existed.
     """
-    return bool((network or "").strip())
+    return (network or "").strip().lower() in PAYOUT_NETWORKS
 
 
 class PayoutPlan:

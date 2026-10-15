@@ -241,39 +241,66 @@ def test_a_routed_payout_carries_no_reason():
     assert payout_plan(5_000).reason is None
 
 
-# ── a test chain's change must never leave as real sats ────────────────────
+# ── mainnet only, and it stays that way ────────────────────────────────────
 #
-# ONE RULE, and it was stated as a list of chains for as long as there was no
-# way to check the real thing. The payout wallet is an LNbits wallet on this
-# server running on a local Lightning node, and nothing in an extension can ask
-# that node which chain it is on — so mainnet was assumed and every other chain
-# refused outright, which also refused the operator running a signet node.
+# A Tango on signet produces WORTHLESS change. Pay it to a Lightning address
+# and the instance buys test coins with real sats — every signet user able to
+# mint money out of a faucet, on repeat.
 #
-# The INVOICE says. BOLT 11 names its chain in the first few characters, so the
-# refusal moved to the thing the money is about to go to — checked when the
-# address is saved and again before anything is sent.
+# Settled 2026-10-15 after two attempts to widen it, both recorded in
+# tangopayout.py because both looked reasonable: an NWC connection to a wallet
+# that reports its own chain, and reading the chain off the invoice. The
+# second check stayed, as a last line in front of the money; neither is a
+# licence to offer the setting off mainnet.
+#
+# Off mainnet the change goes where it always went: ON CHAIN, into its owner's
+# own wallet. That is not a degraded mode, it is what the protocol did before
+# this feature existed.
 
 
-def test_every_chain_may_pay_out_now():
-    """What `offered` answers is "is this setting worth showing", and the
-    answer no longer depends on a list anyone maintains."""
-    for network in ("mainnet", "signet", "testnet", "regtest", "MAINNET "):
-        assert payout_offered(network), network
-    # A blank network is nobody's chain.
-    for network in ("", None, "   "):
-        assert not payout_offered(network)
+def test_only_mainnet_can_pay_out():
+    assert payout_offered("mainnet")
+    for network in ("signet", "testnet", "regtest", "", None, "MAINNET "):
+        if network == "MAINNET ":
+            assert payout_offered(network), "case and whitespace are not a network"
+            continue
+        assert not payout_offered(network), network
 
 
-def test_the_rule_is_still_not_an_operator_preference():
-    """No config value anywhere says "signet is fine". What changed is that
-    the invoice gets read; what did not is that nobody can assert past it."""
+def test_the_network_rule_is_not_configurable():
+    """No config value anywhere says "signet is fine", and no argument to
+    payout_offered lets a caller assert one either — the two widenings that
+    were tried both worked by adding a parameter here."""
     src = (ROOT / "helpers" / "tangopayout.py").read_text()
     body = src[src.index("def payout_offered"):]
     body = body[: body.index("\ndef ")] if "\ndef " in body else body
-    assert "def payout_offered(network: str) -> bool:" in body
+    assert "PAYOUT_NETWORKS" in body
+    assert "def payout_offered(network: str) -> bool:" in src
     model = (ROOT / "models.py").read_text()
-    assert "tango_change_payout_network" not in model
-    assert "payout_network_override" not in model
+    for invented in ("tango_change_payout_network", "payout_network_override",
+                     "tango_change_payout_nwc"):
+        assert invented not in model, invented
+
+
+def test_signet_change_stays_in_the_wallet():
+    """"Only on chain" is not a separate code path — it is what happens when
+    nothing routes. payout_offered false makes tango_payout_ready false, which
+    makes _tango_routes_change false, which leaves the client deriving its own
+    change script and keeping the coin. Pinned by the chain of reads, because
+    each link is a one-liner somebody could helpfully 'simplify'."""
+    model = (ROOT / "models.py").read_text()
+    ready = model[model.index("def tango_payout_ready"):]
+    ready = ready[: ready.index("\n    def ")] if "\n    def " in ready else ready
+    assert "self.payout_offered(network)" in ready
+
+    offered = model[model.index("def payout_offered"):]
+    offered = offered[: offered.index("\n    def ")]
+    assert "payout_offered(network)" in offered
+
+    src = (ROOT / "views_api.py").read_text()
+    routes = src[src.index("async def _tango_routes_change"):]
+    routes = routes[: routes.index("\nasync def ")]
+    assert "cfg.tango_payout_ready(network)" in routes
 
 
 # ── the invoice's own prefix ────────────────────────────────────────────────
@@ -351,17 +378,14 @@ def test_an_unreadable_invoice_is_refused_rather_than_assumed():
     assert network_mismatch("", "mainnet")
 
 
-def test_it_is_checked_when_the_address_is_saved_and_before_paying():
-    """Both, and for the reason the minimum-amount check is already done at
-    save time: by payout the coin has left their wallet and become ours, and
-    "your address is on the wrong network" cannot be handed back then. The
-    second check is not redundant — a provider can be re-pointed in between,
-    and that one is the call that spends."""
+def test_the_invoice_is_checked_before_the_money_moves():
+    """BELT AND BRACES, and the braces are PAYOUT_NETWORKS. A payout should
+    never reach this on anything but mainnet — the setting is not offered, no
+    address is saved, no round routes — and it fires anyway, on the invoice
+    itself. That is what makes "a test chain's change never leaves as real
+    sats" a property of the code rather than of one constant nobody re-reads
+    before widening it."""
     src = (ROOT / "views_api.py").read_text()
-    save = src[src.index("async def api_tango_ln_address_set"):]
-    save = save[: save.index("\n@silnt_api_router")]
-    assert "invoice_network_mismatch(probe, network)" in save
-
     pay = src[src.index("async def _attempt_tango_payout"):]
     pay = pay[: pay.index("\nasync def ")]
     assert 'invoice_network_mismatch(bolt11, row["network"])' in pay
