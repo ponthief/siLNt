@@ -77,22 +77,6 @@ class BackendConfig(BaseModel):
     # liquidity — an internal ledger entry was the old design, and paying
     # somebody else's node is not.
     tango_change_payout_wallet_id: str = ""
-    # OR a wallet somewhere else entirely, over Nostr Wallet Connect. The
-    # whole connection string, which CARRIES A SPENDING KEY — anyone holding
-    # it can empty that wallet — so nothing that renders a config renders this
-    # one whole; see helpers/nwc.NwcConnection.redacted.
-    #
-    # This is what makes a non-mainnet payout possible at all. An LNbits
-    # wallet on this server runs on whatever funding source LNbits was given
-    # and cannot be asked which chain that is, so it has to be assumed to be
-    # mainnet. An NWC wallet reports its own chain, which is checked against
-    # the round's before anything routes — so a Coinos SIGNET wallet can pay
-    # signet change, and a mainnet one still cannot.
-    #
-    # Set it and it is the payout source; leave it blank and the LNbits wallet
-    # above is. Both set is not an error and not a muddle either: NWC wins,
-    # and the payout health endpoint names which one is in use.
-    tango_change_payout_nwc: str = ""
     tango_change_fee_pct: float = 0.005        # 0.5% of the change
     tango_change_fee_floor_sats: int = 100     # cost recovery; see tangopayout
     # A one-confirmation payout can be reversed by a reorg, and a Lightning
@@ -105,16 +89,6 @@ class BackendConfig(BaseModel):
     # 10,000 and not of 20,000.
     tango_change_min_wallet_balance_sats: int = 10_000
 
-    def payout_source(self) -> str:
-        """'nwc', 'lnbits', or '' when nothing is configured to pay from."""
-        from .helpers.tangopayout import SOURCE_LNBITS, SOURCE_NWC
-
-        if (self.tango_change_payout_nwc or "").strip():
-            return SOURCE_NWC
-        if (self.tango_change_payout_wallet_id or "").strip():
-            return SOURCE_LNBITS
-        return ""
-
     def payout_offered(self, network: str) -> bool:
         """Whether this chain could pay out, given what is configured to pay.
 
@@ -124,16 +98,18 @@ class BackendConfig(BaseModel):
         """
         from .helpers.tangopayout import payout_offered
 
-        source = self.payout_source()
-        return bool(source) and payout_offered(network, source)
+        return bool(
+            (self.tango_change_payout_wallet_id or "").strip()
+            and payout_offered(network)
+        )
 
     def tango_payout_ready(self, network: str) -> bool:
         """Is the change payout usable on this network right now?
 
-        Three things, and the network is not one an operator can override —
-        see helpers/tangopayout.payout_offered for why paying out signet
-        change from a mainnet wallet is free money, and helpers/nwc for the
-        live check that enforces it where the chain is actually knowable.
+        The chain is not one an operator can override, and is no longer one
+        they have to: helpers/bolt11net.py refuses an invoice that is not for
+        this chain, which is where paying signet change in real sats was
+        always actually going to happen.
         """
         return bool(
             self.tango_change_payout_enabled
@@ -143,7 +119,7 @@ class BackendConfig(BaseModel):
             and (self.tango_change_scan_secret or "").strip()
             # And somewhere to pay from. Routing a change with no payout
             # wallet would take the coin and have no way to send the value on.
-            and self.payout_source()
+            and (self.tango_change_payout_wallet_id or "").strip()
             and self.payout_offered(network)
         )
 

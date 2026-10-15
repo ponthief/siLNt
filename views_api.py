@@ -45,17 +45,20 @@ from .helpers.dust_check import evaluate_dust_for_wallet
 from .helpers.errors import exc_text as _exc_text
 from .helpers.lnaddress import (
     LnAddressError,
+    LnAddressTemporaryError,
+    request_invoice,
     resolve as resolve_ln_address,
 )
+# The one check that stops a test chain's change leaving as real sats. Named
+# on import rather than reached for inside the payout, because there are two
+# call sites — saving the address and paying it — and they have to be the same
+# rule.
+from .helpers.bolt11net import network_mismatch as invoice_network_mismatch
 from .helpers.tangopayout import (
     TANGO_ADDRESS_PIN_SERVICE,
     min_change_to_route,
     payout_plan,
 )
-# Protocol only — no socket, no relay client. nwcclient is imported where it is
-# used so a server with no websocket library still starts, and still serves
-# every wallet that does not pay out over NWC.
-from .helpers.nwc import NwcError
 from .helpers.scan_rate_limiter import (
     check_scan_allowed,
     clear_wallet_limits,
@@ -904,16 +907,7 @@ ROUTED_CHANGE_IS_OURS_TO_DERIVE = (
 # convention, so adding a secret and not listing it fails review rather than
 # shipping quietly — the GET below hands this model to every authenticated
 # user, which was harmless while nothing in it was a secret.
-# THE SECOND ONE IS WORSE THAN THE FIRST. tango_change_scan_secret is a VIEW
-# key: leaked, it tells somebody which coins are the service's and lets them
-# take none. An NWC connection string is a SPENDING credential for the payout
-# wallet — whoever holds it can empty it — so it is redacted here, never
-# logged whole (helpers/nwc.NwcConnection.redacted), and never returned by the
-# payout health endpoint.
-_REDACTED_CONFIG_FIELDS = (
-    "tango_change_scan_secret",
-    "tango_change_payout_nwc",
-)
+_REDACTED_CONFIG_FIELDS = ("tango_change_scan_secret",)
 
 
 @silnt_api_router.get("/api/v1/backend/config")
@@ -973,19 +967,6 @@ async def api_update_backend_config(
                     "afterwards find."
                 ),
             )
-    # A connection string that cannot be parsed is refused here rather than at
-    # payout time, when the change output has already become the instance's
-    # and the user is owed. It is 200 opaque characters in a form field, and
-    # the one moment somebody can fix a typo is while they are looking at it.
-    nwc_uri = (data.tango_change_payout_nwc or "").strip()
-    if nwc_uri:
-        from .helpers.nwc import NwcError, parse_uri
-
-        try:
-            parse_uri(nwc_uri)
-        except NwcError as e:
-            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
-
     if addr and data.tango_change_payout_enabled and not data.payout_offered(
         network or DEFAULT_CONFIG_NETWORK
     ):
@@ -993,11 +974,8 @@ async def api_update_backend_config(
             status_code=HTTPStatus.BAD_REQUEST,
             detail=(
                 f"Tango change cannot be routed on "
-                f"{network or DEFAULT_CONFIG_NETWORK} from the configured "
-                f"payout wallet. An LNbits wallet on this server is assumed "
-                f"to be mainnet and cannot be asked otherwise; an NWC wallet "
-                f"reports its own chain, and one on this chain can pay this "
-                f"chain's change."
+                f"{network or DEFAULT_CONFIG_NETWORK} without a payout wallet "
+                f"to send it from."
             ),
         )
     net = network or DEFAULT_CONFIG_NETWORK
@@ -4579,13 +4557,12 @@ async def api_sp_contacts_delete(
 # today. See TANGO_CHANGE_CREDIT.md and helpers/tangopayout.py.
 
 async def _require_payout_network(network: str) -> None:
-    """The payout wallet has to be on the chain whose change it is paying.
+    """There has to be somewhere to pay the change FROM on this chain.
 
-    Not an operator preference — see tangopayout.payout_offered. With an
-    LNbits wallet on this server that collapses to mainnet, because nothing
-    can ask it what it runs on. With an NWC wallet it is the chain the wallet
-    itself reports, checked live at nwcclient.check_network before a round
-    routes and again before a payout is sent.
+    The chain itself is no longer refused here — see tangopayout.payout_offered
+    for why that list went. What refuses a signet round paying a mainnet
+    address is the invoice's own prefix, checked in bolt11net.network_mismatch
+    when the address is saved and again before anything is sent.
     """
     cfg = await get_backend_config(network)
     if not cfg.payout_offered(network):
@@ -4668,12 +4645,19 @@ async def api_tango_ln_address_set(
     floor = min_change_to_route(
         cfg.tango_change_fee_pct, cfg.tango_change_fee_floor_sats
     )
+    # What the chain probe below will ask for. The smallest payout this
+    # instance would ever send when that is known, and this provider's own
+    # minimum when it is not — either way an amount it should be willing to
+    # quote, since a provider that will not is already refused just below.
+    probe_sats = max(1, endpoint.min_sendable_msat // 1000)
     if floor is not None:
         smallest = payout_plan(
             floor,
             fee_pct=cfg.tango_change_fee_pct,
             fee_floor_sats=cfg.tango_change_fee_floor_sats,
         )
+        if smallest.routed:
+            probe_sats = smallest.net_sats
         if smallest.routed and not endpoint.accepts_sats(smallest.net_sats):
             raise HTTPException(
                 status_code=HTTPStatus.BAD_REQUEST,
@@ -4684,6 +4668,27 @@ async def api_tango_ln_address_set(
                     f"address that accepts small payments."
                 ),
             )
+
+    # AND IT HAS TO BE AN ADDRESS ON THIS CHAIN, which costs one more request
+    # and is the whole of what keeps a signet round from paying out real sats.
+    # An LNURL endpoint does not declare a chain anywhere; the invoice it makes
+    # does, in its first four characters, so the only way to know is to ask for
+    # one. Same reasoning as the minimum above: by payout time the coin has
+    # left their wallet and become ours, and "your address is on the wrong
+    # network" is not something that can be handed back then.
+    #
+    # The amount is the smallest this instance would ever send, so the probe
+    # asks for something the provider will actually quote. A provider that
+    # cannot make this invoice has already failed the check above.
+    try:
+        probe = await request_invoice(endpoint, probe_sats)
+    except LnAddressTemporaryError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_GATEWAY, detail=str(e))
+    except LnAddressError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+    mismatch = invoice_network_mismatch(probe, network)
+    if mismatch:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=mismatch)
 
     await set_tango_ln_address(
         key_info.wallet.user,
@@ -4871,12 +4876,7 @@ async def _attempt_tango_payout(
     wallet cannot cover is held back rather than attempted, and why an unknown
     balance attempts anyway.
     """
-    from .helpers.lnaddress import (
-        LnAddressError,
-        LnAddressTemporaryError,
-        request_invoice,
-        resolve as resolve_ln_address_now,
-    )
+    from .helpers.lnaddress import resolve as resolve_ln_address_now
     from .helpers.tangopayoutrun import (
         failure_body,
         next_attempt_at,
@@ -4893,15 +4893,10 @@ async def _attempt_tango_payout(
     txid, vout = row["txid"], int(row["vout"])
     attempts = int(row["attempts"] or 0) + 1
     permanent = False
-    # Permanent AND ours: the payout stops being retried and is still reported
-    # as 'failed' rather than 'unpayable', because the user's address is fine
-    # and telling them to change it would be a lie. See status_after.
-    ours = False
     error = ""
     bolt11 = ""
 
     cfg = await get_backend_config(row["network"])
-    source = cfg.payout_source()
     wallet_id = (cfg.tango_change_payout_wallet_id or "").strip()
     address = (row.get("ln_address") or "").strip()
 
@@ -4931,7 +4926,7 @@ async def _attempt_tango_payout(
 
     if not address:
         permanent, error = True, "No Lightning address on record for this payout."
-    elif not source:
+    elif not wallet_id:
         # Ours, and not retryable by waiting — but not the user's fault either,
         # so it is not 'unpayable'. An operator has to fix it.
         error = "No payout wallet is configured on this server."
@@ -4939,6 +4934,15 @@ async def _attempt_tango_payout(
         try:
             endpoint = await resolve_ln_address_now(address)
             bolt11 = await request_invoice(endpoint, int(row["net_sats"]))
+            # THE LAST THING BEFORE THE MONEY MOVES, and the only check that
+            # stops a signet round's worthless change going out as real sats.
+            # It was checked when the address was saved; an address's provider
+            # can be re-pointed at another chain since, and this is the call
+            # that spends. See helpers/bolt11net.py.
+            mismatch = invoice_network_mismatch(bolt11, row["network"])
+            if mismatch:
+                bolt11 = ""
+                raise LnAddressError(mismatch)
         except LnAddressTemporaryError as e:
             error = str(e)
         except LnAddressError as e:
@@ -4948,8 +4952,16 @@ async def _attempt_tango_payout(
 
     if bolt11 and not error:
         try:
-            payment_hash = await _pay_payout_invoice(
-                cfg, row, source, wallet_id, bolt11, txid, vout
+            from lnbits.core.services import pay_invoice
+
+            payment = await pay_invoice(
+                wallet_id=wallet_id,
+                payment_request=bolt11,
+                description=f"Tango change payout {txid[:12]}…:{vout}",
+                extra={"tag": "silnt_tango_change", "round": row["round_id"]},
+            )
+            payment_hash = getattr(payment, "payment_hash", None) or getattr(
+                payment, "checking_id", None
             )
             await update_tango_payout(
                 txid, vout,
@@ -4965,18 +4977,12 @@ async def _attempt_tango_payout(
                 f"(fee {row['fee_sats']})"
             )
             return "paid"
-        except NwcError as e:
-            # The wallet refusing, rather than failing: a connection with no
-            # send permission, a budget spent, a method it does not implement.
-            # None of that clears by asking again, and five more attempts only
-            # delay telling an operator the thing they can act on.
-            permanent, ours, error = True, True, str(e)
         except Exception as e:
             # No route, no liquidity, an invoice that expired while we held it.
             # Ours to fix, and worth retrying.
             error = _exc_text(e)
 
-    status = status_after(attempts, permanent, ours)
+    status = status_after(attempts, permanent)
     fields = {
         "status": status,
         "attempts": attempts,
@@ -5071,139 +5077,6 @@ async def run_tango_payouts() -> dict:
     return out
 
 
-async def _pay_payout_invoice(cfg, row, source: str, wallet_id: str,
-                              bolt11: str, txid: str, vout: int) -> Optional[str]:
-    """Send the money, whichever wallet is paying. Returns the payment hash.
-
-    THE CHAIN IS CHECKED AGAIN HERE on the NWC path, and not because the
-    liquidity pass did not check it. These are minutes or hours apart, a
-    connection string can be re-pointed at another wallet between them, and
-    this is the call that actually spends. The cost is one round trip against
-    a relay already being dialled; the thing it refuses is paying a signet
-    round's change out of a mainnet wallet.
-
-    A preimage, not a payment hash, is what NIP-47 gives back — it is the
-    proof the payment settled. The hash is recoverable from it, and the column
-    is called payment_hash, so the preimage goes in as what it is: evidence
-    this specific invoice was paid, kept where somebody auditing a payout will
-    look for it.
-    """
-    from .helpers.tangopayout import SOURCE_NWC
-
-    if source != SOURCE_NWC:
-        from lnbits.core.services import pay_invoice
-
-        payment = await pay_invoice(
-            wallet_id=wallet_id,
-            payment_request=bolt11,
-            description=f"Tango change payout {txid[:12]}…:{vout}",
-            extra={"tag": "silnt_tango_change", "round": row["round_id"]},
-        )
-        return getattr(payment, "payment_hash", None) or getattr(
-            payment, "checking_id", None
-        )
-
-    from .helpers.nwcclient import check_network, pay_bolt11
-
-    uri = (cfg.tango_change_payout_nwc or "").strip()
-    mismatch = await check_network(uri, row["network"])
-    if mismatch:
-        # NwcError, so this stops the retries: a wallet on the wrong chain
-        # does not move onto the right one by being asked six times.
-        raise NwcError(mismatch)
-    result = await pay_bolt11(uri, bolt11)
-    return str(result.get("preimage") or "") or None
-
-
-# How long an NWC wallet's answer is reused, and why there is a cache here at
-# all when the LNbits path has none.
-#
-# THIS RUNS WHERE SOMEBODY IS WAITING. _tango_routes_change calls it at propose
-# and again at accept, inside the request. For an LNbits wallet that is a row
-# in this server's own database and caching it would be silly. For an NWC
-# wallet it is two round trips to a relay somebody else runs, and a slow one
-# would be felt as a slow Tango.
-#
-# Thirty seconds is chosen against what the answer is used for: an
-# amount-independent floor with a working buffer under it (see
-# tangopayoutrun.can_route, which explains why the amount deliberately is not
-# part of this). A balance half a minute stale cannot push a decision past
-# that buffer in any way the buffer was not already there to absorb.
-#
-# FAILURES ARE CACHED TOO, deliberately: a relay that is down should not be
-# dialled afresh by every propose on the instance.
-#
-# NOT USED WHEN PAYING. _pay_payout_invoice re-checks the chain live, because
-# that is the call that actually spends and the connection string may have
-# been re-pointed since.
-NWC_STATE_TTL_SECONDS = 30
-_nwc_state_cache: dict = {}
-
-
-def _nwc_cache_key(network: str, uri: str) -> str:
-    """Keyed on the CONNECTION as well as the chain, so re-pointing the string
-    at another wallet invalidates the answer rather than inheriting it. The
-    uri is hashed rather than kept: it is a spending credential, and a
-    process-lifetime dict is a thing people print while debugging."""
-    return (
-        f"{network}:"
-        + hashlib.sha256(uri.encode("utf-8")).hexdigest()[:16]
-    )
-
-
-async def _nwc_payout_balance(cfg, network: str, out: dict):
-    """The NWC wallet's spendable balance, or None with `out["reason"]` set.
-
-    TWO QUESTIONS IN ONE ROUND TRIP, and the order matters. Which chain the
-    wallet is on is asked FIRST: a wallet with a healthy balance on the wrong
-    chain is the exact failure this feature had to be kept away from signet
-    for — an instance paying real sats for faucet coins — and a balance read
-    that passed it would have rounds routing against it.
-
-    Every failure here reports ok=False rather than raising. A balance this
-    cannot read is not a reason to take somebody's change: not offering the
-    setting for a few minutes costs a user a privacy improvement, offering it
-    against an unknown wallet costs them a coin.
-    """
-    from .helpers.nwcclient import check_network, get_balance_sats
-
-    uri = (cfg.tango_change_payout_nwc or "").strip()
-    key = _nwc_cache_key(network, uri)
-    now = time.time()
-    cached = _nwc_state_cache.get(key)
-    if cached and cached[0] > now:
-        _, balance, reason = cached
-        if reason:
-            out["reason"] = reason
-            return None
-        return balance
-
-    balance, reason = None, None
-    try:
-        mismatch = await check_network(uri, network)
-        if mismatch:
-            reason = mismatch
-            logger.error(
-                f"tango payout: {network} payout wallet refused: {mismatch}"
-            )
-        else:
-            balance = await get_balance_sats(uri)
-    except NwcError as e:
-        reason = f"The NWC payout wallet refused: {e}"
-    except Exception as e:
-        reason = f"The NWC payout wallet could not be reached: {_exc_text(e)}"
-
-    # Pruned on the way in. A new connection string is a new key, so without
-    # this the dict would keep a row per string the operator ever saved.
-    for stale in [k for k, v in _nwc_state_cache.items() if v[0] <= now]:
-        _nwc_state_cache.pop(stale, None)
-    _nwc_state_cache[key] = (now + NWC_STATE_TTL_SECONDS, balance, reason)
-    if reason:
-        out["reason"] = reason
-        return None
-    return balance
-
-
 async def tango_payout_liquidity(network: str) -> dict:
     """Can the payout wallet cover a new obligation, and by how much?
 
@@ -5221,17 +5094,11 @@ async def tango_payout_liquidity(network: str) -> dict:
         liquidity_reason,
     )
 
-    from .helpers.tangopayout import SOURCE_NWC
-
     cfg = await get_backend_config(network)
     threshold = max(0, int(cfg.tango_change_min_wallet_balance_sats or 0))
     wallet_id = (cfg.tango_change_payout_wallet_id or "").strip()
-    source = cfg.payout_source()
     out = {
-        "source": source,
-        # Never the connection string: it is a spending credential. The wallet
-        # id is not one and stays, so an operator can tell which wallet this is.
-        "wallet_id": "" if source == SOURCE_NWC else wallet_id,
+        "wallet_id": wallet_id,
         "threshold_sats": threshold,
         "balance_sats": None,
         "owed_sats": 0,
@@ -5239,35 +5106,25 @@ async def tango_payout_liquidity(network: str) -> dict:
         "ok": False,
         "reason": None,
     }
-    if not source:
+    if not wallet_id:
         out["reason"] = "No payout wallet is configured."
         return out
 
-    if source == SOURCE_NWC:
-        # THE CHAIN CHECK IS PART OF READING THE BALANCE, not a separate call
-        # an operator could forget to wire up. This function is what decides
-        # whether a round may route, so a wallet on the wrong chain has to
-        # fail it — and `get_info` is the same round trip that would otherwise
-        # be spent proving the connection works at all.
-        balance = await _nwc_payout_balance(cfg, network, out)
-        if balance is None:
-            return out
-    else:
-        try:
-            from lnbits.core.crud import get_wallet
+    try:
+        from lnbits.core.crud import get_wallet
 
-            wallet = await get_wallet(wallet_id)
-        except Exception as e:
-            logger.warning(f"tango payout liquidity: wallet lookup: {_exc_text(e)}")
-            wallet = None
-        if not wallet:
-            out["reason"] = "The configured payout wallet could not be read."
-            return out
+        wallet = await get_wallet(wallet_id)
+    except Exception as e:
+        logger.warning(f"tango payout liquidity: wallet lookup: {_exc_text(e)}")
+        wallet = None
+    if not wallet:
+        out["reason"] = "The configured payout wallet could not be read."
+        return out
 
-        msat = getattr(wallet, "balance_msat", None)
-        if msat is None:
-            msat = getattr(wallet, "balance", 0) or 0
-        balance = int(msat) // 1000
+    msat = getattr(wallet, "balance_msat", None)
+    if msat is None:
+        msat = getattr(wallet, "balance", 0) or 0
+    balance = int(msat) // 1000
 
     totals = await tango_payout_totals(network)
     owed = int(totals.get("owed_sats") or 0)
@@ -5382,30 +5239,30 @@ async def tango_routing_status(network: str) -> dict:
     Each one needs a different thing done about it, and working that out meant
     reading five tables. This answers it in one place.
     """
-    from .helpers.tangopayout import SOURCE_NWC
     from .helpers.tangopayoutrun import DEFAULT_MIN_CONFIRMATIONS
 
     cfg = await get_backend_config(network)
     liq = await tango_payout_liquidity(network)
     pin = await tango_address_pin(network)
-    source = cfg.payout_source()
+    wallet_id = (cfg.tango_change_payout_wallet_id or "").strip()
     offered = cfg.payout_offered(network)
     gates = [
         {
             "name": "network",
             "ok": offered,
-            # Names the SOURCE, because that is what the answer turns on now
-            # and an operator reading "not available on signet" would go
-            # looking for a chain setting that does not exist.
-            "detail": f"{network} change can be paid out from the configured "
-                      f"{source or 'no'} wallet"
+            # NOT a list of chains any more. What refuses a signet round
+            # paying a mainnet address is the invoice's own prefix, read at
+            # save time and again before paying (helpers/bolt11net.py), so
+            # the only thing left for this gate to report is whether there is
+            # a wallet to pay from at all.
+            "detail": f"{network} change can be paid out, from the payout "
+                      f"wallet below"
             if offered
-            else f"{network} change cannot be paid out from an LNbits wallet "
-                 f"on this server: it runs on whatever funding source LNbits "
-                 f"was given, nothing here can ask it which chain that is, "
-                 f"and a mainnet wallet paying {network} change would be "
-                 f"buying faucet coins with real sats. Connect an NWC wallet "
-                 f"on {network} instead — it reports its own chain.",
+            else f"{network} change has nowhere to be paid out from — set a "
+                 f"payout wallet. Its Lightning node must be on {network}: "
+                 f"an invoice for another chain is refused before it is paid, "
+                 f"which is what stops {network} change going out as real "
+                 f"sats.",
         },
         {
             "name": "enabled",
@@ -5427,17 +5284,8 @@ async def tango_routing_status(network: str) -> dict:
         },
         {
             "name": "payout_wallet",
-            "ok": bool(source),
-            # The connection string is a spending credential and never appears
-            # here. Which KIND of wallet is in use does, because it is the
-            # difference between "this cannot pay signet" and "this can".
-            "detail": (
-                f"paying from an {source} wallet"
-                if source == SOURCE_NWC
-                else "paying from an LNbits wallet on this server"
-                if source
-                else "nowhere to pay the value on from"
-            ),
+            "ok": bool(wallet_id),
+            "detail": "somewhere to pay the value on from",
         },
         {
             # NOT a configuration question: this one asks whether the stored

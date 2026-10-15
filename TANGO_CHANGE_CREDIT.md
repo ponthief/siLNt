@@ -240,44 +240,50 @@ Needed, and not yet designed:
 Until that path exists, this feature takes money it might not be able to
 give back.
 
-## The payout wallet must be on the chain it is paying for
+## A test chain's change must never leave as real sats
 
-A Tango on signet produces **worthless** change. Pay it out of a mainnet
-wallet and the instance buys test coins with real sats — every signet user
+A Tango on signet produces **worthless** change. Pay it to a mainnet Lightning
+address and the instance buys test coins with real sats — every signet user
 able to mint money out of a faucet, on repeat.
 
 This was first written as "signet must not pay out over mainnet Lightning",
 and the feature shipped **mainnet-only**: `PAYOUT_NETWORKS = ("mainnet",)`,
 the Lightning-address setting not offered anywhere else, and the clients told
 by the server rather than checking the chain themselves. That was the honest
-statement of the rule given what a payout wallet was — an LNbits wallet on
-this server, running on whatever funding source LNbits was configured with,
-which nothing in this extension can interrogate. Mainnet had to be assumed and
-everything else refused.
+statement of the rule given what could be asked. The payout wallet is an
+LNbits wallet on this server, running on a local Lightning node, and nothing
+in an extension can interrogate that node — so mainnet had to be assumed and
+everything else refused, including the operator running a signet node.
 
-**Settled 2026-10-09.** The rule is not about chains and never was; it is
-about the wallet. Nostr Wallet Connect (NIP-47) reaches a wallet somebody else
-runs, and its `get_info` reports `network` — `mainnet`, `testnet`, `signet` or
-`regtest`. So the wallet is asked, and the answer is compared with the round's
-chain:
+**Settled 2026-10-15.** The rule is not about chains; it is about where the
+money is going. BOLT 11 names its chain in the human-readable part, so the
+check moved onto the invoice:
 
-* `tango_change_payout_nwc` in `BackendConfig`, per network, holds the
-  connection string. Set, it is the payout source; blank, the LNbits wallet
-  is. It is a **spending credential** — redacted from `GET /backend/config`,
-  never logged whole, never in the health endpoint.
-* `helpers/nwc.network_mismatch` is the refusal. A wallet on another chain is
-  refused and told which; **a wallet that will not say is also refused**,
-  because the thing a default would buy is the faucet attack above.
-* Checked twice: in the liquidity read, which is what decides whether a round
-  may route at all, and again in `_pay_payout_invoice` immediately before
-  spending — a connection string can be re-pointed between the two.
-* An LNbits payout wallet is still mainnet-only, for the original reason.
+* `helpers/bolt11net.py` reads the prefix — `lnbc` mainnet, `lntb` testnet,
+  `lntbs` (and legacy `lnsb`) signet, `lnbcrt` regtest. Matched
+  **longest-first**: `lnbcrt` starts with `lnbc` and `lntbs` starts with
+  `lntb`, so a shortest-first reader calls every regtest invoice mainnet,
+  which is the direction that spends real money.
+* Checked when the address is **saved** — one extra LNURL call for a probe
+  invoice, for the same reason the provider's minimum is checked there: by
+  payout the coin has left the user's wallet and become ours, and "your
+  address is on the wrong network" cannot be handed back then.
+* Checked **again immediately before paying**, because a provider can be
+  re-pointed between the two and that is the call that spends.
+* An invoice it cannot identify is **refused**, not assumed. The cost of being
+  wrong that way is a payout that does not go; the other way it is money.
 
-So a Coinos **signet** wallet pays signet change in signet sats, and no
-operator setting anywhere can assert that a chain is acceptable.
+So `payout_offered` is true for any named chain with a payout wallet, and an
+operator running a signet node pays signet change. A node on the wrong chain
+cannot pay another chain's invoice anyway — that fails, retries and is
+reported, and nothing moves.
 
-The setting is stored per user; whether it is offered is per network, and now
-per payout wallet.
+**Not NWC.** A Nostr Wallet Connect payout source, reaching a wallet somebody
+else runs, was added on 2026-10-09 and removed on 2026-10-15: this instance
+pays from a local Lightning node through LNbits and from nowhere else, and
+nothing stores a spending credential in a config blob.
+
+The setting is stored per user; whether it is offered is per network.
 
 ## Solvency
 
@@ -344,7 +350,8 @@ pretend otherwise.
    above. Recommendation:
    `min(change − DUST_SATS, max(0.5% × change, floor))`, with a floor around
    50–100 sats.
-2. ~~**Which networks offer it.**~~ Settled 2026-10-09: whichever chain the
-   configured payout wallet reports it is on. See the section above.
+2. ~~**Which networks offer it.**~~ Settled 2026-10-15: every chain, with the
+   invoice's own prefix refusing a payout that would cross one. See the
+   section above.
 3. **The failed-payout path**, above. Needed before this can hold anyone's
    money, not after.

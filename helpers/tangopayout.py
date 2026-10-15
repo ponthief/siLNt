@@ -50,54 +50,46 @@ DEFAULT_FEE_PCT = 0.005          # 0.5%
 DEFAULT_FEE_FLOOR_SATS = 100     # a routing fee plus a low-fee-rate sweep
 
 
-# WHICH CHAINS CAN PAY OUT, and the answer depends on what is paying.
+# WHICH CHAINS CAN PAY OUT, and the rule is not about chains.
 #
-# THE RULE HAS ALWAYS BEEN ONE RULE: the wallet the payout leaves from must be
-# on the same chain as the round whose change it is paying. Route a signet
-# round's change out of a mainnet wallet and the instance pays real sats for
-# faucet money, which every signet user could do on repeat.
+# IT HAS ALWAYS BEEN ONE RULE: a Tango's change must never leave as real sats
+# when the round that produced it was on a test chain. Route a signet round's
+# worthless change to a mainnet Lightning address and the instance buys faucet
+# coins with real money, on repeat, for anyone who asks.
 #
-# For an LNBITS payout wallet that collapses to "mainnet only", and did so
-# invisibly: a wallet on this server runs on whatever funding source LNbits
-# was configured with, this extension cannot ask it which chain that is, and
-# in practice it is mainnet. Hardcoding the chain was the only honest way to
-# state the rule, so it read as a rule about chains.
+# That used to be written as PAYOUT_NETWORKS = ("mainnet",) and enforced by
+# refusing every other chain outright, because the payout wallet is an LNbits
+# wallet on this server — running on whatever local Lightning node LNbits was
+# pointed at — and nothing in an extension can ask that node which chain it is
+# on. Refusing everything was the only honest move available. It also refused
+# the case an operator running a signet node actually wants.
 #
-# An NWC payout wallet is somebody else's wallet, and NIP-47 has it SAY which
-# chain it is on: `get_info` reports mainnet, testnet, signet or regtest. So
-# the rule can be enforced as what it is, against the wallet that will do the
-# paying — see helpers/nwc.network_mismatch, which is checked live rather than
-# stored, and which refuses a wallet that will not say. That is what lets a
-# Coinos signet wallet pay signet change (2026-10-09), and it is not a
-# loosening: nothing here decides a chain is acceptable, it decides that this
-# chain is the wallet's own.
+# The INVOICE can be asked, and it is the thing the money is about to go to.
+# BOLT 11 names its chain in the human-readable part, so `helpers/bolt11net.py`
+# reads it and the payment is refused unless it matches the round's chain —
+# checked when the address is saved, and again before anything is sent. An
+# invoice that cannot be identified is refused too: "we could not tell" is not
+# an argument for spending.
+#
+# So every chain may pay out here, and the refusal happens where the answer is
+# known. A node on the wrong chain cannot pay another chain's invoice anyway;
+# that fails, retries and is reported, and no money moves.
 #
 # The two clients mirror none of this. They read `offered` off the server and
 # show the setting or do not — see check:payout. A field that silently cannot
-# work is worse than no field, and a client-side network check is how one
-# would come back.
-PAYOUT_NETWORKS = ("mainnet",)
-
-SOURCE_LNBITS = "lnbits"
-SOURCE_NWC = "nwc"
+# work is worse than no field, and a client-side network check is how one would
+# come back.
 
 
-def payout_offered(network: str, source: str = SOURCE_LNBITS) -> bool:
+def payout_offered(network: str) -> bool:
     """Whether this chain can pay a Tango's change over Lightning at all.
 
-    Still not an operator preference. With an LNbits wallet it is the chain
-    list above, because nothing can ask that wallet what it runs on. With an
-    NWC wallet the chain is whatever the wallet reports, so every chain is
-    possible HERE and the real refusal happens where the answer is known —
-    nwcclient.check_network, before a round is allowed to route and again
-    before a payout is sent.
+    Every named chain can, given a payout wallet. What stops a signet round
+    paying a mainnet address is bolt11net.network_mismatch, which is a fact
+    about the invoice rather than a list anyone maintains — and not an
+    operator preference either way.
     """
-    net = (network or "").strip().lower()
-    if not net:
-        return False
-    if (source or "").strip().lower() == SOURCE_NWC:
-        return True
-    return net in PAYOUT_NETWORKS
+    return bool((network or "").strip())
 
 
 class PayoutPlan:

@@ -86,28 +86,28 @@ def give_up(attempts: int, permanent: bool) -> bool:
     return bool(permanent) or int(attempts) >= MAX_ATTEMPTS
 
 
-def status_after(attempts: int, permanent: bool, ours: bool = False) -> str:
+def status_after(attempts: int, permanent: bool) -> str:
     """'pending' while it is still worth trying, else why it stopped.
 
     'unpayable' and 'failed' are deliberately different words. Unpayable is
-    about the destination — a bad address, a provider that refuses the amount —
-    and the user can fix it by changing their address. Failed is everything
-    else, which is ours: no route, no liquidity, a node that would not answer
-    six times. An operator reading the list should be able to tell at a glance
-    which ones are waiting on the user and which are waiting on them.
+    about the destination — a bad address, an address on the wrong chain, a
+    provider that refuses the amount — and the user can fix it by changing
+    their address. Failed is everything else, which is ours: no route, no
+    liquidity, a node that would not answer six times. An operator reading the
+    list should be able to tell at a glance which ones are waiting on the user
+    and which are waiting on them.
 
-    `ours` separates the two ideas that used to be one. A permanent failure
-    was assumed to be the destination's, which held while the only way to fail
-    permanently was a Lightning address that did not resolve. An NWC payout
-    wallet can refuse permanently too — a connection with no send permission,
-    a spent budget, a method it does not implement — and that is ours however
-    final it is. Reporting it as 'unpayable' would tell a user with a perfectly
-    good address to go and change it.
+    PERMANENT MEANS THE DESTINATION'S, and that holds because every permanent
+    failure comes from resolving or quoting the user's own address. It briefly
+    did not: an NWC payout wallet could refuse permanently too — no send
+    permission, a spent budget — which is ours however final it is, and an
+    `ours` argument existed to keep that from telling a user with a perfectly
+    good address to go and change it. NWC is gone (2026-10-15) and so is the
+    argument. Anything that can refuse permanently from OUR side again needs
+    it back, not a third status.
     """
     if not give_up(attempts, permanent):
         return "pending"
-    if permanent and ours:
-        return "failed"
     return "unpayable" if permanent else "failed"
 
 

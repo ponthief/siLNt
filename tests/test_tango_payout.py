@@ -241,85 +241,132 @@ def test_a_routed_payout_carries_no_reason():
     assert payout_plan(5_000).reason is None
 
 
-# ── the payout wallet has to be on the chain it is paying for ───────────────
+# ── a test chain's change must never leave as real sats ────────────────────
 #
-# ONE RULE, which used to be stated as a list of chains because with an LNbits
-# wallet on this server that is all it could be: nothing here can ask such a
-# wallet which funding source it runs on, so mainnet had to be assumed and
-# every other chain refused. An NWC wallet reports its own chain, so the rule
-# is enforced against the wallet instead — see helpers/nwc.network_mismatch,
-# which is what actually refuses, and which refuses a wallet that will not say.
+# ONE RULE, and it was stated as a list of chains for as long as there was no
+# way to check the real thing. The payout wallet is an LNbits wallet on this
+# server running on a local Lightning node, and nothing in an extension can ask
+# that node which chain it is on — so mainnet was assumed and every other chain
+# refused outright, which also refused the operator running a signet node.
+#
+# The INVOICE says. BOLT 11 names its chain in the first few characters, so the
+# refusal moved to the thing the money is about to go to — checked when the
+# address is saved and again before anything is sent.
 
 
-def test_an_lnbits_wallet_can_still_only_pay_mainnet():
-    """Unchanged, and for the unchanged reason."""
-    assert payout_offered("mainnet")
-    assert payout_offered("mainnet", "lnbits")
-    for network in ("signet", "testnet", "regtest", "", None, "MAINNET "):
-        if network == "MAINNET ":
-            assert payout_offered(network), "case and whitespace are not a network"
-            continue
-        assert not payout_offered(network), network
+def test_every_chain_may_pay_out_now():
+    """What `offered` answers is "is this setting worth showing", and the
+    answer no longer depends on a list anyone maintains."""
+    for network in ("mainnet", "signet", "testnet", "regtest", "MAINNET "):
+        assert payout_offered(network), network
+    # A blank network is nobody's chain.
+    for network in ("", None, "   "):
+        assert not payout_offered(network)
 
 
-def test_an_nwc_wallet_is_not_refused_by_chain_here():
-    """Because here is not where the chain is known. payout_offered answers
-    "is this setting worth showing"; nwc.network_mismatch answers "may this
-    wallet pay this round", and it is the one with the wallet's own answer in
-    front of it."""
-    for network in ("mainnet", "signet", "testnet", "regtest"):
-        assert payout_offered(network, "nwc"), network
-    # Still not a chain-less yes: a blank network is nobody's chain.
-    for network in ("", None):
-        assert not payout_offered(network, "nwc")
-
-
-def test_the_network_rule_is_still_not_configurable():
+def test_the_rule_is_still_not_an_operator_preference():
     """No config value anywhere says "signet is fine". What changed is that
-    the wallet gets asked; what did not is that an operator cannot assert it.
-    """
+    the invoice gets read; what did not is that nobody can assert past it."""
     src = (ROOT / "helpers" / "tangopayout.py").read_text()
     body = src[src.index("def payout_offered"):]
     body = body[: body.index("\ndef ")] if "\ndef " in body else body
-    assert "PAYOUT_NETWORKS" in body
-    # The only argument besides the network is WHICH KIND of wallet pays,
-    # which is read off what is configured rather than asserted by it.
-    assert "def payout_offered(network: str, source: str = SOURCE_LNBITS)" in src
+    assert "def payout_offered(network: str) -> bool:" in body
     model = (ROOT / "models.py").read_text()
-    source = model[model.index("def payout_source"):]
-    source = source[: source.index("\n    def ")]
-    assert "tango_change_payout_nwc" in source
-    assert "network" not in source, "the source is not chosen per network by hand"
+    assert "tango_change_payout_network" not in model
+    assert "payout_network_override" not in model
 
 
-def test_a_wallet_that_will_not_say_its_chain_is_refused():
-    """The important half. A missing `network` in get_info was impossible to
-    have while the payout wallet was always this server's; over NWC it is
-    somebody else's wallet, and the specific thing a default would buy is an
-    instance paying real sats out for signet change, on repeat, to anyone."""
-    from helpers.nwc import network_mismatch
-
-    for reported in ("", None, "lightning", "bitcoin-signet"):
-        why = network_mismatch(reported, "signet")
-        assert why and "does not report" in why, reported
+# ── the invoice's own prefix ────────────────────────────────────────────────
 
 
-def test_a_wallet_on_the_wrong_chain_is_refused_and_says_which():
-    from helpers.nwc import network_mismatch
+def _net(bolt11):
+    from helpers.bolt11net import invoice_network
 
-    why = network_mismatch("mainnet", "signet")
+    return invoice_network(bolt11)
+
+
+def test_the_four_chains_are_read_off_the_prefix():
+    assert _net("lnbc100n1pxyz") == "mainnet"
+    assert _net("lntb100n1pxyz") == "testnet"
+    assert _net("lntbs100n1pxyz") == "signet"
+    assert _net("lnbcrt100n1pxyz") == "regtest"
+
+
+def test_the_longer_prefixes_win():
+    """THE ONE THAT SPENDS MONEY IF IT IS WRONG. `lnbcrt` starts with `lnbc`,
+    so a shortest-first reader calls every regtest invoice mainnet — and
+    `lntbs` starts with `lntb`, so signet reads as testnet. Both orderings are
+    pinned because neither is visible in a passing day of use."""
+    assert _net("lnbcrt1u1pabc") == "regtest"
+    assert _net("lnbcrt1u1pabc") != "mainnet"
+    assert _net("lntbs1u1pabc") == "signet"
+    assert _net("lntbs1u1pabc") != "testnet"
+
+
+def test_the_older_signet_prefix_is_accepted():
+    """`lnsb` is what some implementations wrote before `lntbs` settled.
+    Refusing it would break the case this whole change exists to allow."""
+    assert _net("lnsb1u1pabc") == "signet"
+
+
+def test_case_and_space_do_not_change_the_answer():
+    assert _net("  LNBC100n1Pxyz ") == "mainnet"
+
+
+def test_an_unreadable_invoice_names_no_chain():
+    for bad in ("", None, "not-an-invoice", "lnxx1u1pabc", "bc1qxyz"):
+        assert _net(bad) is None
+
+
+def test_a_matching_invoice_is_paid():
+    from helpers.bolt11net import network_mismatch
+
+    assert network_mismatch("lntbs1u1pabc", "signet") is None
+    assert network_mismatch("lnbc1u1pabc", "mainnet") is None
+
+
+def test_a_mainnet_invoice_is_refused_for_signet_change():
+    """The faucet attack, and the only thing standing in front of it: a signet
+    round's worthless change paid to a mainnet address is real sats for test
+    coins, on repeat, by anyone."""
+    from helpers.bolt11net import network_mismatch
+
+    why = network_mismatch("lnbc1u1pabc", "signet")
     assert why and "mainnet" in why and "signet" in why
-    assert network_mismatch("signet", "mainnet")
 
 
-def test_a_wallet_on_the_right_chain_passes():
-    from helpers.nwc import network_mismatch
+def test_the_other_direction_is_refused_too():
+    from helpers.bolt11net import network_mismatch
 
-    assert network_mismatch("signet", "signet") is None
-    assert network_mismatch("mainnet", "mainnet") is None
-    # What services actually send for mainnet, which NIP-47 does not list.
-    assert network_mismatch("bitcoin", "mainnet") is None
-    assert network_mismatch(" Signet ", "signet") is None
+    assert network_mismatch("lntbs1u1pabc", "mainnet")
+
+
+def test_an_unreadable_invoice_is_refused_rather_than_assumed():
+    """"We could not tell" is not an argument for spending. The cost of being
+    wrong this way is a payout that does not go; the other way it is money."""
+    from helpers.bolt11net import network_mismatch
+
+    why = network_mismatch("lnxx1u1pabc", "mainnet")
+    assert why and "cannot identify" in why
+    assert network_mismatch("", "mainnet")
+
+
+def test_it_is_checked_when_the_address_is_saved_and_before_paying():
+    """Both, and for the reason the minimum-amount check is already done at
+    save time: by payout the coin has left their wallet and become ours, and
+    "your address is on the wrong network" cannot be handed back then. The
+    second check is not redundant — a provider can be re-pointed in between,
+    and that one is the call that spends."""
+    src = (ROOT / "views_api.py").read_text()
+    save = src[src.index("async def api_tango_ln_address_set"):]
+    save = save[: save.index("\n@silnt_api_router")]
+    assert "invoice_network_mismatch(probe, network)" in save
+
+    pay = src[src.index("async def _attempt_tango_payout"):]
+    pay = pay[: pay.index("\nasync def ")]
+    assert 'invoice_network_mismatch(bolt11, row["network"])' in pay
+    # Before the payment, not after it.
+    assert pay.index("invoice_network_mismatch") < pay.index("pay_invoice(")
 
 
 def test_the_config_needs_all_three_before_it_will_route():
@@ -331,6 +378,7 @@ def test_the_config_needs_all_three_before_it_will_route():
     assert "tango_change_payout_enabled" in body
     assert "tango_change_sp_address" in body
     assert "payout_offered(network)" in body
+    assert "tango_change_payout_wallet_id" in body
 
 
 def test_the_feature_is_off_by_default():
