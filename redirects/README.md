@@ -87,9 +87,19 @@ worth a decision of their own:
   identifier, not copy: renaming it breaks resolution. Now
   `dominus@whispawallet.com`.
 - `thrilla@bitaurus.net` — retired. It was two separate things wearing one
-  address, and both are now `admin@whispawallet.com`:
-  - **the device-confirmation sender**, which followed the mail server;
-  - **the GPG signing key's uid**. The key was *not* rotated: a new uid was
+  address, and they have since gone separate ways, which is the point of
+  listing them apart:
+  - **the outbound mail sender** — registration, device confirmation, password
+    resets, invites — now `support@whispawallet.com`. It is a mailbox people
+    reply to, so it is named for what a reply should reach. **It is not
+    configured in this repository**: nothing here sets a `From` header. Every
+    send goes through LNbits' `send_email_notification`, which supplies the
+    sender from the instance's own email settings, so changing it is a change
+    to LNbits, not a deploy of siLNt.
+  - **the GPG signing key's uid**, still `admin@whispawallet.com`. Deliberately
+    NOT moved with the sender: it is an identity `gpg` prints, not an address
+    anybody writes to, and moving it is a key operation rather than a mail
+    setting. The key was *not* rotated: a new uid was
     added, made primary, and the old one revoked, so the fingerprint
     `F061 E3E9 56FC F57F 99D2  FE48 81DC EBD9 74E9 CABE` is unchanged and every
     release signed before the change still verifies. download.html's
