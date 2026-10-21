@@ -63,6 +63,17 @@ class RegistrationRequest(BaseModel):
     username: str
     email:    str
     password: str
+    # The Turnstile solve, when this instance has a secret configured. Optional
+    # on the model so a deployment with no keys — and the mobile app, which
+    # registers through the same endpoint and renders no widget — keeps
+    # working; `start_registration` decides whether its absence is fatal.
+    turnstile_token: Optional[str] = None
+    # The version of the signup terms the client displayed and the user ticked.
+    # Optional on the model, and checked in `start_registration`, so an app
+    # build predating the terms page fails with a sentence rather than a
+    # pydantic error about a field it has never heard of. helpers/terms.py says
+    # what the number is and — more importantly — what it is not.
+    terms_version: Optional[int] = None
 
 
 class VerifyRegistrationRequest(BaseModel):
@@ -153,6 +164,91 @@ def _decode_verification_token(token: str) -> Optional[dict]:
 
 # ── Start registration: send email ────────────────────────────────────────────
 
+async def _require_turnstile(data: RegistrationRequest, request: Request) -> None:
+    """Refuse the registration unless this caller has solved the bot check.
+
+    Returns quietly when the instance has no Turnstile secret, which is how
+    every deployment behaved before the keys existed and how one that never
+    sets them keeps behaving.
+
+    The `enforce` setting decides what a MISSING token means — see
+    TurnstileConfig, which carries the reasoning. A token that is PRESENT is
+    always verified, whatever the mode and whoever sent it: a caller offering
+    a solve is asking to be judged on it, and accepting one unchecked is the
+    failure mode this whole path exists to avoid.
+    """
+    from ..crud import get_turnstile_config
+    from .turnstile import turnstile_enabled, verify_turnstile
+
+    cfg = await get_turnstile_config()
+    if not turnstile_enabled(cfg.secret_key):
+        return
+
+    token = (data.turnstile_token or "").strip()
+    if not token:
+        # No Origin header means no browser, which today means the mobile app.
+        # Spoofable, and documented as such where the setting is defined.
+        from_browser = bool(request.headers.get("origin"))
+        if cfg.enforce == "always" or from_browser:
+            raise HTTPException(
+                HTTPStatus.BAD_REQUEST,
+                "Please complete the human-verification check and try again.",
+            )
+        return
+
+    from .device_auth import get_client_ip
+
+    ok, reason = await verify_turnstile(token, cfg.secret_key, get_client_ip(request))
+    if not ok:
+        # The reason is Cloudflare's, rendered into a sentence, and never
+        # contains a key. It is surfaced rather than swallowed because the
+        # common failures — an expired solve, a site/secret key mismatch —
+        # are ones the person in front of the form or the operator reading
+        # the log can actually act on.
+        logger.warning(f"Turnstile refused a registration attempt: {reason}")
+        raise HTTPException(HTTPStatus.BAD_REQUEST, reason)
+
+
+def _require_terms(data: RegistrationRequest, request: Request) -> None:
+    """Refuse a registration that names terms this instance does not publish.
+
+    A browser must send a version, because the web form has the tick box and
+    will not submit without it. A client with no Origin header — today, the
+    mobile app, which has no terms screen yet — may omit it, and that gap is
+    deliberate and temporary rather than a decision that the app's users agree
+    to nothing. It is recorded in RELEASING/CHANGELOG as the follow-up it is.
+
+    A version that is PRESENT is always checked, from any client, for the same
+    reason a Turnstile token that is present is always verified: a caller
+    making a claim is asking to be held to it.
+    """
+    from .terms import TERMS_VERSION, terms_version_ok
+
+    if data.terms_version is None:
+        if request.headers.get("origin"):
+            raise HTTPException(
+                HTTPStatus.BAD_REQUEST,
+                "Please accept the terms to create an account.",
+            )
+        return
+
+    if not terms_version_ok(data.terms_version):
+        raise HTTPException(
+            HTTPStatus.BAD_REQUEST,
+            f"These terms have been updated (this app is showing version "
+            f"{data.terms_version}, the current version is {TERMS_VERSION}). "
+            f"Reload the page and read them again before continuing.",
+        )
+
+    # Logged, because this is the whole of the record: who, and which version.
+    # No password, no token — see the module docstring on what must never
+    # reach a log line.
+    logger.info(
+        f"Registration accepted terms v{data.terms_version} "
+        f"for {data.email.strip().lower()}"
+    )
+
+
 async def start_registration(
     data: RegistrationRequest, request: Request
 ) -> dict:
@@ -164,6 +260,15 @@ async def start_registration(
         raise HTTPException(
             HTTPStatus.FORBIDDEN, "Username/password auth disabled."
         )
+
+    # THE BOT CHECK COMES FIRST — before the field validation, before the
+    # uniqueness lookups, before the bcrypt hash. helpers/turnstile.py says
+    # why at length; the short version is that the uniqueness check answers
+    # "Username or email already in use", which is a membership oracle, and a
+    # gate placed after it protects the expensive part while leaving the
+    # interesting part open.
+    await _require_turnstile(data, request)
+    _require_terms(data, request)
 
     username = data.username.strip()
     email    = data.email.strip().lower()

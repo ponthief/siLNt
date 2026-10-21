@@ -311,6 +311,7 @@ from .models import (
     FcmTokenData,
     AdminDeleteAccountData,
     NtfyConfig,
+    TurnstileConfig,
     USERNAME_PATTERN,
     RESERVED_USERNAMES,
     RECENT_REJECT_COOLDOWN,
@@ -5565,6 +5566,97 @@ async def api_test_ntfy(
             detail=f"No notifications delivered. {result.get('errors') or result.get('skipped') or ''}",
         )
     return result
+
+# ── Turnstile (the registration form's bot check) ────────────────────────────
+
+@silnt_api_router.get("/api/v1/auth/signup-config")
+async def api_signup_config() -> dict:
+    """What the signup form needs to know before it can render. PUBLIC.
+
+    Public because the caller has no account yet — the same reason
+    register-start and register-verify are. Nothing here is a secret: the site
+    key is embedded in every page that renders the widget, and the terms
+    version is a number.
+
+    THE SITE KEY IS PUBLISHED ONLY WHEN A SECRET IS SET, and that pairing is
+    the point. A site key alone renders a widget whose answer nothing verifies
+    — the form would look guarded and would not be. Withholding it instead
+    makes the client fall back to the maths question, which is weak and
+    honest, rather than strong-looking and fake.
+
+    Served from the backend rather than baked into the web build so a key can
+    be rotated without a redeploy. A rotation that needs a rebuild is a
+    rotation that does not happen.
+    """
+    from .crud import get_turnstile_config
+    from .helpers.terms import TERMS_EFFECTIVE, TERMS_VERSION
+    from .helpers.turnstile import turnstile_enabled
+
+    cfg = await get_turnstile_config()
+    enabled = turnstile_enabled(cfg.secret_key)
+    return {
+        "turnstile_site_key": cfg.site_key if enabled else "",
+        "terms_version": TERMS_VERSION,
+        "terms_effective": TERMS_EFFECTIVE,
+    }
+
+
+@silnt_api_router.get("/api/v1/turnstile/config")
+async def api_get_turnstile_config(
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+) -> dict:
+    """The admin view of the keys. The secret is never returned.
+
+    `secret_set` instead of the value, because the admin page only needs to
+    answer "is this configured" and a credential echoed into a page is a
+    credential in a screenshot, a browser cache and a support ticket.
+    """
+    require_admin(key_info)
+    from .crud import get_turnstile_config
+    from .helpers.turnstile import turnstile_enabled
+
+    cfg = await get_turnstile_config()
+    return {
+        "site_key": cfg.site_key,
+        "secret_set": turnstile_enabled(cfg.secret_key),
+        "enforce": cfg.enforce,
+    }
+
+
+@silnt_api_router.put("/api/v1/turnstile/config")
+async def api_update_turnstile_config(
+    data: TurnstileConfig,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+) -> dict:
+    require_admin(key_info)
+    from .crud import get_turnstile_config, update_turnstile_config
+    from .helpers.turnstile import turnstile_enabled
+
+    data.site_key = (data.site_key or "").strip()
+    if data.enforce not in ("browser", "always"):
+        data.enforce = "browser"
+    # An empty secret keeps the stored one; "-" clears it. update_turnstile_config
+    # carries the reasoning.
+    saved = await update_turnstile_config(data)
+
+    # Saving a site key with no secret anywhere is the one combination that
+    # produces a form that LOOKS protected, so it is refused at the door
+    # rather than quietly ignored by signup-config.
+    cfg = await get_turnstile_config()
+    if saved.site_key and not turnstile_enabled(cfg.secret_key):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=(
+                "A site key without a secret key renders a widget nothing "
+                "verifies. Save both, or clear the site key."
+            ),
+        )
+    return {
+        "site_key": cfg.site_key,
+        "secret_set": turnstile_enabled(cfg.secret_key),
+        "enforce": cfg.enforce,
+    }
+
 
 # ── Admin alerts (e.g. BitMail tampering) ────────────────────────────────────
 @silnt_api_router.get("/api/v1/admin/alerts")

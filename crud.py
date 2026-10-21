@@ -17,6 +17,7 @@ from .models import (
     WalletAddress,
     CloudflareConfig,
     NtfyConfig,
+    TurnstileConfig,
     UpdateUtxoLabel,
     TrustedDevice,
     UserPrefs,
@@ -38,6 +39,7 @@ db = Database("ext_silnt")
 DEFAULT_CONFIG_NETWORK = "signet"
 CF_CONFIG_ID = "cloudflare_config"
 NTFY_CONFIG_ID = "ntfy_config"
+TURNSTILE_CONFIG_ID = "turnstile_config"
 BIP352_CHANGE_LABEL_INDEX = 1
 
 async def create_silnt_wallet(wallet: WalletAccount) -> WalletAccount:
@@ -781,6 +783,54 @@ async def update_ntfy_config(config: NtfyConfig) -> NtfyConfig:
         await db.execute(
             "INSERT INTO silnt.backend_config (id, json_data) VALUES (:id, :json_data)",
             {"id": NTFY_CONFIG_ID, "json_data": json_data},
+        )
+    return config
+
+
+async def get_turnstile_config() -> TurnstileConfig:
+    row = await db.fetchone(
+        "SELECT json_data FROM silnt.backend_config WHERE id = :id",
+        {"id": TURNSTILE_CONFIG_ID},
+    )
+    return TurnstileConfig(**json.loads(row["json_data"])) if row else TurnstileConfig()
+
+
+async def update_turnstile_config(config: TurnstileConfig) -> TurnstileConfig:
+    """Store the Turnstile keys.
+
+    A BLANK SECRET IS NOT A SAVE. The admin page shows the stored secret as a
+    placeholder rather than a value — it is a credential, and echoing it into
+    the DOM of a page anyone can screenshot is not worth the convenience — so
+    an operator who edits only the site key posts an empty secret back. Taken
+    literally that disables the bot check, from a form where nothing said so.
+
+    So an empty secret keeps whatever is stored, and clearing it is an
+    explicit act: save the literal string "-", which no Cloudflare secret can
+    be. The admin page says this beside the field. The site key has no such
+    rule because it is public and is echoed back in full.
+    """
+    stored = await get_turnstile_config()
+
+    incoming = (config.secret_key or "").strip()
+    if incoming == "-":
+        config.secret_key = ""
+    elif not incoming:
+        config.secret_key = stored.secret_key
+
+    json_data = config.json()
+    existing = await db.fetchone(
+        "SELECT id FROM silnt.backend_config WHERE id = :id",
+        {"id": TURNSTILE_CONFIG_ID},
+    )
+    if existing:
+        await db.execute(
+            "UPDATE silnt.backend_config SET json_data = :json_data WHERE id = :id",
+            {"json_data": json_data, "id": TURNSTILE_CONFIG_ID},
+        )
+    else:
+        await db.execute(
+            "INSERT INTO silnt.backend_config (id, json_data) VALUES (:id, :json_data)",
+            {"id": TURNSTILE_CONFIG_ID, "json_data": json_data},
         )
     return config
 

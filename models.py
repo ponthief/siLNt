@@ -329,6 +329,46 @@ class NtfyConfig(BaseModel):
     priority: str = "default"             # ntfy priority: min|low|default|high|urgent
 
 
+class TurnstileConfig(BaseModel):
+    """Cloudflare Turnstile keys for the registration form.
+
+    The SECRET is what turns the check on (see helpers/turnstile.py): a site
+    key on its own renders a widget nothing verifies, which looks like
+    protection and is not. Both live here rather than in the environment
+    because they are rotated from the admin page, and a key rotation that
+    needs a redeploy is a key rotation that does not happen.
+
+    The secret NEVER leaves the backend. `GET /api/v1/auth/signup-config` is
+    public and publishes the site key alone.
+    """
+
+    site_key: str = ""
+    secret_key: str = ""
+
+    # WHICH CLIENTS MUST SOLVE IT, and this is the setting that keeps the
+    # phone working.
+    #
+    # The mobile app registers through the SAME endpoint as the web form
+    # (RegisterScreen.tsx → /api/v1/auth/register-start) and renders no
+    # widget, because Turnstile is a browser control and there is no native
+    # one. So "require a token from everybody" locks every phone out of
+    # onboarding — which on mainnet is the ONLY way in.
+    #
+    #   "browser"  require a solve from requests that carry an Origin header,
+    #              which browsers send and the app does not. The default.
+    #   "always"   require one from every caller. Correct only for an instance
+    #              whose onboarding is web-only; it breaks the app.
+    #
+    # BE CLEAR ABOUT WHAT "browser" BUYS. An Origin header is set by the
+    # client, so anyone willing to omit it skips the check. That is not a hole
+    # to plug here — a native app cannot prove it is one — it is the shape of
+    # the control: Turnstile raises the cost of pointing a script at the
+    # public signup FORM, and is not an authentication boundary. What bounds
+    # abuse for every client is that no account exists until an emailed link
+    # or code comes back.
+    enforce: str = "browser"
+
+
 class SetupBip353Request(BaseModel):
     username: str  # e.g. "alice" → alice@yourdomain.com
     ttl: int = 300  # DNS TTL in seconds
