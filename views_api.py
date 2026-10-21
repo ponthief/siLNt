@@ -354,16 +354,25 @@ async def api_wallets_retrieve(
     return await get_silnt_wallets(key_info.wallet.user, network)
 
 
-@silnt_api_router.get(
-    "/api/v1/wallet/{wallet_id}", dependencies=[Depends(require_trusted_device)]
-)
-async def api_wallet_retrieve(wallet_id: str) -> WalletAccount:
-    silnt_wallet = await get_silnt_wallet(wallet_id)
-    if not silnt_wallet:
-        raise HTTPException(
-            status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
-        )
-    return silnt_wallet
+@silnt_api_router.get("/api/v1/wallet/{wallet_id}")
+async def api_wallet_retrieve(
+    wallet_id: str,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+) -> WalletAccount:
+    """One wallet, the caller's own.
+
+    IT USED TO RETURN ANY WALLET BY ID. The dependency was declared as
+    `dependencies=[Depends(require_trusted_device)]`, which proves the caller
+    holds a key and then THROWS THE IDENTITY AWAY — so the handler had nothing
+    to compare against and returned whatever row the id named: another user's
+    LNbits user id, balance, SP address and scan heights, which for a wallet
+    whose purpose is unlinkability is the disclosure that matters most.
+
+    That form is the bug, not an accident of this one route. A handler cannot
+    authorise what it cannot see, so any route naming a resource takes
+    `key_info` as a parameter and resolves the id through _get_owned_wallet.
+    """
+    return await _get_owned_wallet(wallet_id, key_info)
 
 
 @silnt_api_router.post("/api/v1/wallet", status_code=HTTPStatus.OK)
@@ -546,11 +555,13 @@ async def api_wallet_update(
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ) -> dict:
     try:
-        wallet = await get_silnt_wallet(wallet_id)
-        if not wallet:
-            raise HTTPException(
-                status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
-            )
+        # OWNERSHIP, which this had `key_info` for and never used. It fetched
+        # the wallet by id alone and wrote to it, so any account holder could
+        # retitle a stranger's wallet — and, the field that matters, move its
+        # `last_height`. A resume point pushed forward means blocks are never
+        # read and a payment sits in one nothing will scan: silent, and
+        # indistinguishable from the user's own mistake.
+        wallet = await _get_owned_wallet(wallet_id, key_info)
         if data.hr_address is not None and data.hr_address != wallet.hr_address:
             # Validate BIP353 resolves to this wallet's SP address
             try:
@@ -578,6 +589,13 @@ async def api_wallet_update(
             await update_title(wallet.id, data.title)
         if data.balance is not None and data.balance != wallet.balance:
             await update_balance(wallet.id, data.balance)
+    except HTTPException:
+        # BEFORE the catch-all, or every deliberate refusal in this function
+        # comes back as a 400 whose detail is the string "404: Wallet does not
+        # exist." — the status wrong, the message doubled up, and the
+        # authorization refusal above indistinguishable from a validation
+        # error. The same ordering /tx/broadcast and /swap/in/{id} already use.
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST, detail=str(exc)
@@ -585,15 +603,18 @@ async def api_wallet_update(
     return {}
 
 
-@silnt_api_router.delete(
-    "/api/v1/wallet/{wallet_id}", dependencies=[Depends(require_trusted_device)]
-)
-async def api_wallet_delete(wallet_id: str):
-    wallet = await get_silnt_wallet(wallet_id)
-    if not wallet:
-        raise HTTPException(
-            status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
-        )
+@silnt_api_router.delete("/api/v1/wallet/{wallet_id}")
+async def api_wallet_delete(
+    wallet_id: str,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    # THE WORST OF THE SET, and for the same reason as the GET above: declared
+    # with `dependencies=[...]`, so the identity was discarded and this deleted
+    # whatever wallet the id named. Since the id is derivable from a published
+    # SP address (see _get_owned_wallet), one request computed from an address
+    # anyone can read destroyed a stranger's wallet row, cancelled their
+    # pending BitMail requests and removed their DNS records.
+    wallet = await _get_owned_wallet(wallet_id, key_info)
     # In-memory scan state goes first, before anything can fail: a wallet id is
     # reproducible from the seed ("sp" + sha256(network:sp_address)), so
     # importing the same recovery phrase again produces the SAME id. Anything
@@ -1284,11 +1305,24 @@ async def api_stop_scan(
 # key from the wallet's sp_address. Disabling deletes the key from the server.
 
 async def _get_owned_wallet(wallet_id: str, key_info: WalletTypeInfo):
+    """The wallet, or a refusal. The ONLY way a handler should resolve a
+    caller-supplied wallet id.
+
+    SOMEBODY ELSE'S WALLET IS 404, NOT 403, and that is not cosmetic here.
+    A wallet id is `"sp" + sha256(f"{network}:{sp_address}")[:20]`
+    (api_wallet_create), and an SP address is PUBLISHED — handing it out is
+    the entire product. So anyone who has ever been paid by a user can compute
+    that user's wallet id with two lines of Python.
+
+    Against a derivable id, 403 is an existence oracle: it answers "is this SP
+    address registered on this instance, and does it belong to someone else"
+    for any address an attacker cares to try. 404 for both cases answers
+    nothing. A legitimate client never sees either code — it only ever asks
+    for its own wallets — so there is no diagnostic value being given up.
+    """
     wallet = await get_silnt_wallet(wallet_id)
-    if not wallet:
+    if not wallet or wallet.user != key_info.wallet.user:
         raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
-    if wallet.user != key_info.wallet.user:
-        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
     return wallet
 
 
@@ -1853,9 +1887,14 @@ async def api_broadcast_transaction(
     key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
 ):
     try:
-        _bwallet = await get_silnt_wallet(data.wallet_id)
-        if not _bwallet:
-            raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet not found.")
+        # The check /tx/prepare and /tx/build both have, and this one did not.
+        # Without it a caller could pass somebody else's wallet_id with any
+        # `spent_outpoints` and have mark_utxos_spent_by_tx below write
+        # `unconfirmed_spent` over their coins: the balance drops and the send
+        # path excludes them until a rescan reconciles. Not theft — the coins
+        # cannot be signed away — but a denial of funds against a wallet the
+        # caller has no relationship with.
+        _bwallet = await _get_owned_wallet(data.wallet_id, key_info)
         blindbit = await get_backend_config(_bwallet.network)
         base = (blindbit.mempool_url or "https://mempool.space").rstrip("/")
         mempool_url = f"{base}/api/tx"
@@ -2129,9 +2168,15 @@ async def api_height_at(
 
 @silnt_api_router.get(
     "/api/v1/wallet/{wallet_id}/scan/progress",
-    dependencies=[Depends(require_trusted_device)],
 )
-async def api_scan_progress(wallet_id: str):
+async def api_scan_progress(
+    wallet_id: str,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    # Reported another wallet's scan state to anyone with an account: the
+    # height it has reached, how much it has found, whether it has a gap.
+    # Less than the GET above returns, and the same missing check.
+    await _get_owned_wallet(wallet_id, key_info)
     return get_scan_progress(wallet_id)
 
 
@@ -3097,12 +3142,18 @@ async def api_get_bitmail_domain(
     return {"domain": domain}
 
 @silnt_api_router.post(
-    "/api/v1/utxos/restore", dependencies=[Depends(require_trusted_device_admin)]
+    "/api/v1/utxos/restore"
 )
-async def api_restore_utxo(data: RestoreUtxoRequest):
-    wallet = await get_silnt_wallet(data.wallet_id)
-    if not wallet:
-        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet not found.")
+async def api_restore_utxo(
+    data: RestoreUtxoRequest,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    # Same `dependencies=[...]` shape, same consequence: it resolved
+    # data.wallet_id with no owner and then wrote UTXO state and recomputed
+    # `balance` on it. Narrower than the others — only an `unconfirmed_spent`
+    # coin whose spending transaction has vanished — and still a write into a
+    # wallet the caller does not own.
+    wallet = await _get_owned_wallet(data.wallet_id, key_info)
 
     # Find the UTXO and confirm it's unconfirmed_spent
     utxo = await get_utxo(data.wallet_id, data.txid, data.vout)

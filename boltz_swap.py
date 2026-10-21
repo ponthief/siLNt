@@ -210,7 +210,15 @@ async def api_swap_in_status(
     """Poll a swap's status from Boltz (client can also use the WS directly)."""
     try:
         rec = await get_boltz_swap(swap_id)
-        network = rec.network if rec and rec.network else DEFAULT_CONFIG_NETWORK
+        # The odd sibling: /funded, /refund and DELETE all refuse a swap that
+        # is not the caller's, and this read did not — it looked the record up
+        # only to pick a network and then returned Boltz's status for any id.
+        # Same shape as those three, so the file reads one way throughout.
+        if not rec:
+            raise HTTPException(HTTPStatus.NOT_FOUND, "Swap not found.")
+        if rec.wallet_id != key_info.wallet.id and rec.silnt_wallet_id != key_info.wallet.id:
+            raise HTTPException(HTTPStatus.FORBIDDEN, "Not your swap.")
+        network = rec.network or DEFAULT_CONFIG_NETWORK
         status = await _boltz_get(f"/v2/swap/submarine/{swap_id}", network)
         return status
     except HTTPException:
