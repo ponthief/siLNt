@@ -261,6 +261,23 @@ async def start_registration(
             HTTPStatus.FORBIDDEN, "Username/password auth disabled."
         )
 
+    # THE RATE LIMIT COMES BEFORE EVEN THAT. Turnstile is a network call to
+    # Cloudflare and the uniqueness lookup is the membership oracle; a local
+    # counter is cheaper than either, so it is what a flood should hit. It also
+    # means a flood cannot spend this instance's Turnstile quota or block on
+    # somebody else's service while doing it.
+    #
+    # Added 2026-11-04, after ten accounts were created on a live instance.
+    # Those came in through LNbits' own signup rather than here — this endpoint
+    # cannot produce an account with no email, since pending_registrations has
+    # email as its primary key — but it was the next door along and it had no
+    # lock on it at all. helpers/register_rate_limiter.py says what each limit
+    # is for.
+    from .device_auth import get_client_ip
+    from .register_rate_limiter import check_registration_allowed
+
+    check_registration_allowed(get_client_ip(request), data.email or "")
+
     # THE BOT CHECK COMES FIRST — before the field validation, before the
     # uniqueness lookups, before the bcrypt hash. helpers/turnstile.py says
     # why at length; the short version is that the uniqueness check answers
@@ -386,6 +403,14 @@ async def start_registration(
             HTTPStatus.BAD_GATEWAY,
             "Could not send verification email — please try again later.",
         )
+
+    # The per-address cooldown starts HERE, not at the top, because it is about
+    # mail that actually went out. A send that failed raised above and never
+    # reaches this line, so a verification email nobody received does not lock
+    # its own address out of a retry.
+    from .register_rate_limiter import record_registration_email
+
+    record_registration_email(email)
 
     logger.info(f"Verification email sent to {email} for pending username {username}")
     return {
