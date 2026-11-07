@@ -2575,7 +2575,63 @@ async def api_device_check(
                 status       = "trusted",
                 device_count = await count_trusted_devices(user_id),
                 cap          = MAX_TRUSTED_DEVICES_PER_USER,
-            )    
+            )
+
+    # NO VALID TRUSTED-DEVICE COOKIE — somebody has signed in to this account on
+    # a device that is not one of its confirmed ones. That is the event worth
+    # telling the owner about, and this is the only endpoint that sees it.
+    #
+    # This endpoint stays CHECK-ONLY in every other respect: it sends no
+    # confirmation code and mutates no device state. The code goes out only when
+    # the user explicitly asks, via /auth/device-request-confirm — which is why
+    # this alert does NOT belong there, where it sat until 2026-11-07 and
+    # answered "yes, this device is mine" with "someone may have your password".
+    #
+    # WHAT MAKES IT SAFE TO PUT ON A POLLED ENDPOINT: should_send_login_alert
+    # dedupes on (user, sha256(ua|ip)) for 12 hours, which is what its docstring
+    # was written for — "prevents spamming the user when an untrusted device
+    # repeatedly hits device-check (refreshes, VPN flaps, dropped cookies)".
+    # PendingDeviceView polls this on mount and LoginView calls it on every
+    # sign-in, so without that dedupe this would be a mail loop.
+    #
+    # Only when the account ALREADY HAS a confirmed device. On a brand-new
+    # account the first sign-in is by definition from an unconfirmed device, and
+    # warning somebody that their own new account was accessed by an unknown
+    # device is noise that teaches them to ignore the real one.
+    #
+    # Never fatal: the caller is asking "is this device trusted", and a mail
+    # failure must not turn that into an error.
+    try:
+        if await count_trusted_devices(user_id) > 0:
+            sig = hashlib.sha256(f"{ua}|{ip}".encode()).hexdigest()[:32]
+            if await should_send_login_alert(user_id, sig):
+                account = await get_account(user_id)
+                if account and account.email:
+                    subject = "New device sign-in to your wallet"
+                    body = (
+                        f"Hi {account.username or 'there'},\n\n"
+                        f"Your account was just signed in to from a device that isn't "
+                        f"one of your confirmed devices:\n\n"
+                        f"  Browser: {ua or 'unknown'}\n"
+                        f"  IP:      {ip or 'unknown'}\n"
+                        f"  Time:    {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}\n\n"
+                        f"If this was you, just confirm the device from the app to start "
+                        f"using it — nothing else to do.\n\n"
+                        f"If this WASN'T you, someone may have your password. Your wallet "
+                        f"is still safe (they can't use it without also confirming the "
+                        f"device by email), but you should change your password and "
+                        f"contact your administrator.\n\n"
+                        f"(Note: the IP shown may be a CDN/proxy IP and may not "
+                        f"reflect the actual location.)"
+                    )
+                    res = await send_email_notification(
+                        to_emails=[account.email], message=body, subject=subject
+                    )
+                    if res.get("status") != "ok":
+                        logger.warning(f"Login-alert email failed for {user_id}: {res}")
+    except Exception as e:
+        logger.warning(f"Login-alert send skipped: {e}")
+
     return DeviceCheckResponse(
         status       = "untrusted",
         device_count = await count_trusted_devices(user_id),
@@ -2649,42 +2705,21 @@ async def api_device_request_confirm(
         logger.warning(f"Device code email failed: {res}")
         raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                             detail="Could not send confirmation code. Please contact your administrator.")
-    # No valid trusted-device cookie. This endpoint is CHECK-ONLY: it never sends
-    # a confirmation email or mutates state. That avoids auto-emailing on every
-    # untrusted check (e.g. right after a user revokes their own device, or when
-    # a privacy browser / VPN drops the cookie). The confirmation email is sent
-    # only when the user explicitly asks, via /auth/device-request-confirm.
-    try:
-        existing_count = await count_trusted_devices(user_id)
-        if existing_count > 0:
-            sig = hashlib.sha256(f"{ua}|{ip}".encode()).hexdigest()[:32]
-            if await should_send_login_alert(user_id, sig):
-                account = await get_account(user_id)
-                if account and account.email:
-                    subject = "New device sign-in to your wallet"
-                    body = (
-                        f"Hi {account.username or 'there'},\n\n"
-                        f"Your account was just signed in to from a device that isn't "
-                        f"one of your confirmed devices:\n\n"
-                        f"  Browser: {ua or 'unknown'}\n"
-                        f"  IP:      {ip or 'unknown'}\n"
-                        f"  Time:    {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}\n\n"
-                        f"If this was you, just confirm the device from the app to start "
-                        f"using it — nothing else to do.\n\n"
-                        f"If this WASN'T you, someone may have your password. Your wallet "
-                        f"is still safe (they can't use it without also confirming the "
-                        f"device by email), but you should change your password and "
-                        f"contact your administrator.\n\n"
-                        f"(Note: the IP shown may be a CDN/proxy IP and may not "
-                        f"reflect the actual location.)"
-                    )
-                    res = await send_email_notification(
-                        to_emails=[account.email], message=body, subject=subject
-                    )
-                    if res.get("status") != "ok":
-                        logger.warning(f"Login-alert email failed for {user_id}: {res}")
-    except Exception as e:
-        logger.warning(f"Login-alert send skipped: {e}")
+    # EXACTLY ONE EMAIL LEAVES THIS ENDPOINT, and that is the whole point of it.
+    #
+    # The "New device sign-in to your wallet" alert used to be sent from here
+    # too, immediately after the code (reported 2026-11-07 as "confirming a
+    # device sends an email that new sign in attempt, but there is no email
+    # with the code"). It never belonged: this endpoint is reached only when
+    # the user presses "Send confirmation email", which is them saying the
+    # device is theirs — and answering that with "someone may have your
+    # password" is both alarming and wrong. It now lives in device-check, where
+    # its own comment and should_send_login_alert's docstring always said it
+    # was: both describe device-check by name.
+    #
+    # Two emails to one address in one request is also the likeliest reason one
+    # of them went missing, so the code mail no longer races an alarm out of
+    # the same handler.
     return {"status": "sent"}
    
 @silnt_api_router.post("/api/v1/auth/device-verify-code")
