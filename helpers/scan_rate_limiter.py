@@ -179,7 +179,7 @@ def clear_wallet_limits(wallet_id: str, user_id: Optional[str] = None) -> None:
     """Drop the per-wallet limiter state for a wallet that no longer exists.
 
     Wallet ids are reproducible from the seed, so deleting a wallet and
-    importing the same recovery phrase again yields the SAME id. Without this,
+    importing the same seed phrase again yields the SAME id. Without this,
     the new wallet starts life inside the old one's cooldown, and — if the old
     wallet was deleted mid-scan — inside a concurrency slot that is never
     released, so every scan on the account is refused with "another scan is

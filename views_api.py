@@ -617,7 +617,7 @@ async def api_wallet_delete(
     wallet = await _get_owned_wallet(wallet_id, key_info)
     # In-memory scan state goes first, before anything can fail: a wallet id is
     # reproducible from the seed ("sp" + sha256(network:sp_address)), so
-    # importing the same recovery phrase again produces the SAME id. Anything
+    # importing the same seed phrase again produces the SAME id. Anything
     # left in these dictionaries is inherited by the new wallet — an active
     # flag it cannot clear, a cooldown it did not earn, a concurrency slot that
     # blocks every scan on the account.

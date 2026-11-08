@@ -305,7 +305,7 @@ def _validate_or_generate_mnemonic(
             raise HTTPException(
                 status_code=HTTPStatus.BAD_REQUEST,
                 detail="Invalid mnemonic — the checksum (last word) is incorrect. "
-                       "Double-check your recovery phrase.",
+                       "Double-check your seed phrase.",
             )
         return normalized, False
 

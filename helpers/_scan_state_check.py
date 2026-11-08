@@ -4,7 +4,7 @@ Standalone check for scan state that outlives the scan. No pytest, no DB.
 
 The bug this pins down: a wallet id is reproducible from the seed
 ("sp" + sha256(network:sp_address)), so deleting a wallet and importing the same
-recovery phrase again produces the SAME id. Every dictionary in this process
+seed phrase again produces the SAME id. Every dictionary in this process
 keyed by wallet id is therefore inherited by the new wallet — and one of them,
 helpers/scan._scan_progress, decides whether anything is allowed to scan:
 
@@ -108,7 +108,7 @@ check("marking it inactive twice is harmless", sp.get_scan_progress("spWALLET")[
 check("marking a wallet that never scanned invents nothing", "spNEVER" not in sp._scan_progress)
 
 
-print("\ndelete, then import the same recovery phrase")
+print("\ndelete, then import the same seed phrase")
 # Reproduces the wedge exactly: a scan that failed with the flag still up, then
 # the wallet deleted, then the same seed imported back to the same id.
 sp.set_scan_progress("spSAMEID", 5, 500, 0)          # scan running
