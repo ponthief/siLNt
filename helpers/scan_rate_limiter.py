@@ -155,6 +155,22 @@ def mark_scan_finished(
     If reset_wallet_cooldown is True (user explicitly stopped), clear the per-wallet
     cooldown so they can retry immediately — the block budget is the real oracle-load
     guard, and a self-initiated stop isn't the rapid-rescan case the cooldown targets.
+
+    OTHERWISE THE COOLDOWN IS RE-STAMPED HERE, which is the whole point of doing
+    it at the END. Reported 2026-11-09: *"as I was scanning in web, there was no
+    rate limit so I was able to press check for payments repeatedly. scans took
+    longer than 1 minute so maybe you set timer at the start, not the end."*
+
+    Exactly that. `check_scan_allowed` stamps `_last_scan_time` when the scan is
+    ALLOWED, so the sixty seconds run alongside the scan rather than after it. A
+    scan of more than a minute — which is most of them on mainnet — leaves the
+    window already expired at the moment it finishes, and the next press goes
+    straight through. The limit was real and unreachable.
+
+    Stamping at both ends is deliberate rather than belt-and-braces: the START
+    stamp is what a second press DURING a short scan hits, and the FINISH stamp
+    is what the next press after a long one hits. `_active_scans` bounds overlap
+    but says nothing about rate.
     """
     _active_scans[user_id].discard(wallet_id)
 
@@ -173,6 +189,9 @@ def mark_scan_finished(
 
     if reset_wallet_cooldown:
         _last_scan_time.pop(wallet_id, None)
+    else:
+        # The cooldown starts counting from the END of the scan.
+        _last_scan_time[wallet_id] = time.time()
 
 
 def clear_wallet_limits(wallet_id: str, user_id: Optional[str] = None) -> None:
