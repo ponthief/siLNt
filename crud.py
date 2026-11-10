@@ -4552,26 +4552,36 @@ async def twofa_session_valid(user_id: str, token: str) -> bool:
 
 
 async def revoke_twofa_session(user_id: str, token: str) -> int:
-    """One session — what signing out revokes."""
+    """One session — what signing out revokes.
+
+    THE ROW COUNT COMES OFF `rowcount`, never from the call itself:
+    `db.execute` returns a CursorResult, and returning it from a function
+    annotated `-> int` is how sign-out threw *"int() argument must be a
+    string… not 'CursorResult'"* on a live instance (2026-11-10). The
+    trusted-device functions above have always done it this way.
+    """
     if not token:
         return 0
-    return await db.execute(
+    result = await db.execute(
         "DELETE FROM silnt.twofa_sessions WHERE token_hash = :th AND user_id = :uid",
         {"th": _token_hash(token), "uid": user_id},
     )
+    return getattr(result, "rowcount", 0) or 0
 
 
 async def revoke_all_twofa_sessions(user_id: str) -> int:
-    return await db.execute(
+    result = await db.execute(
         "DELETE FROM silnt.twofa_sessions WHERE user_id = :uid", {"uid": user_id}
     )
+    return getattr(result, "rowcount", 0) or 0
 
 
 async def purge_expired_twofa_sessions() -> int:
-    return await db.execute(
+    result = await db.execute(
         "DELETE FROM silnt.twofa_sessions WHERE expires_at < :now",
         {"now": int(time.time())},
     )
+    return getattr(result, "rowcount", 0) or 0
 
 
 # ── Emailed codes ─────────────────────────────────────────────────────────────
