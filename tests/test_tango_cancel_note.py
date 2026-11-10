@@ -205,10 +205,22 @@ def test_the_column_is_guaranteed_whatever_order_an_instance_arrived_in():
     src = (ROOT / "migrations.py").read_text()
     body = src[src.index("async def m044_tango_cancel_note_backfill"):]
     assert "ADD COLUMN IF NOT EXISTS cancel_note TEXT" in body
-    # Above everything else, or an instance past that number skips it too.
+    # ABOVE EVERY MIGRATION THAT EXISTED WHEN IT WAS WRITTEN, or an instance
+    # already past that number skips the repair too.
+    #
+    # This asserted `max(nums) == 44` until 2026-11-10, which read as "no
+    # migration may ever follow" and broke on the first unrelated one (m045,
+    # two-factor). That was never the rule: LNbits runs them in order, so a
+    # LATER migration cannot stop an instance reaching 044 — what would is an
+    # EARLIER number, which is the hazard m039 fell into. So the pin is on the
+    # numbers below it, and 044 may now have successors.
     import re
     nums = [int(m) for m in re.findall(r"^async def m(\d+)_", src, re.M)]
-    assert max(nums) == 44, nums
+    assert 44 in nums, nums
+    assert max(n for n in nums if n <= 44) == 44, nums
+    # And nothing has quietly renumbered the repair below the migration it
+    # repairs.
+    assert 44 > 39
     # And m039 stays: an instance that ran it must not run it again.
     assert "async def m039_tango_cancel_note" in src
 

@@ -78,6 +78,22 @@ from .helpers.device_auth import (
     cookie_name_for_user,    
     MAX_TRUSTED_DEVICES_PER_USER
 )
+from .helpers.appenv import silnt_env
+from .helpers import totp as totp_helper
+from .helpers.twofa import (
+    EMAIL_CODE_TTL_SECONDS,
+    SESSION_TTL_SECONDS,
+    check_email_send_allowed,
+    check_verify_allowed,
+    clear_session_cookie,
+    clear_verify_attempts,
+    new_session_token,
+    read_session_token,
+    record_email_send,
+    record_verify_attempt,
+    requires_twofa,
+    set_session_cookie,
+)
 from .helpers.user import is_lnbits_admin, require_admin, validate_born_height
 from .helpers.scan import BlindBitOracleClient
 from .helpers.fee_rates_backend import  get_recommended_fees, get_btc_usd_rate
@@ -254,6 +270,18 @@ from .crud import (
     should_send_login_alert,
     create_device_code,
     verify_device_code,
+    get_twofa,
+    twofa_is_enabled,
+    start_twofa_totp,
+    confirm_twofa_totp,
+    note_twofa_counter,
+    disable_twofa,
+    create_twofa_session,
+    revoke_twofa_session,
+    revoke_all_twofa_sessions,
+    create_twofa_code,
+    verify_twofa_code,
+    twofa_session_valid,
     mark_self_revoke,
     in_self_revoke_grace,
     DEFAULT_CONFIG_NETWORK
@@ -2800,6 +2828,301 @@ async def api_sign_out_others(
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="No active device.")
     removed = await revoke_all_other_devices(user_id, current)
     return {"removed_count": removed}
+
+async def _json_body(request: Request) -> dict:
+    """The request body as a dict, or {} — never a raise.
+
+    Every one of these endpoints validates the FIELDS it needs and says what is
+    missing, so a malformed body should reach that message rather than a bare
+    422 from the parser. The device endpoints inline this same try/except; it
+    is named here because four of them would otherwise repeat it.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+# ── Two-factor authentication ─────────────────────────────────────────────────
+#
+# WHAT THESE GATE, and the limit of it, is in helpers/twofa.py's docstring: the
+# account's sign-in belongs to LNbits core and cannot be gated here, so the
+# second factor stands in front of the WALLET — every endpoint hanging off
+# require_trusted_device — and only for the browser surface.
+#
+# WHICH DEPENDENCY EACH ONE TAKES IS THE DESIGN.
+#
+#   verify / email-send / status / revoke  →  require_invoice_key
+#       These are the way OUT of the locked state, so they cannot sit behind
+#       the lock. A 2FA-gated verify endpoint is a wallet nobody can open.
+#
+#   totp start / confirm / disable         →  require_trusted_device
+#       Setting the factor up or taking it off is exactly what somebody with
+#       only the password would do, so it belongs behind the device gate — and
+#       once 2FA is on, behind 2FA as well, which that dependency now enforces
+#       by itself. Disable additionally demands a current code.
+
+
+@silnt_api_router.get("/api/v1/auth/2fa")
+async def api_twofa_status(
+    request: Request,
+    key_info: WalletTypeInfo = Depends(require_invoice_key),
+):
+    """What the app needs to lay out the screen, and nothing about the secret.
+
+    `verified` answers "does this session already hold a factor", which is what
+    decides whether a gate renders at all. It is reported even when 2FA is off
+    (as true), because the alternative makes every caller special-case the off
+    state to avoid showing a lock that does not apply.
+    """
+    user_id = key_info.wallet.user
+    row = await get_twofa(user_id)
+    enabled = bool(row and row["enabled"])
+    verified = True
+    if enabled and requires_twofa(request):
+        token = read_session_token(request, user_id)
+        verified = bool(token and await twofa_session_valid(user_id, token))
+    account = await get_account(user_id)
+    return {
+        "enabled": enabled,
+        "totp": bool(row and row["totp_confirmed"]),
+        "verified": verified,
+        # Whether the fallback can be offered at all. An account with no
+        # address cannot be emailed a code, and a button that cannot work is
+        # worse than one that is not there.
+        "email_available": bool(account and account.email),
+        "applies": requires_twofa(request),
+    }
+
+
+@silnt_api_router.post("/api/v1/auth/2fa/totp/start")
+async def api_twofa_totp_start(
+    request: Request,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """Generate a secret and hand back what an authenticator app scans.
+
+    The secret is returned ONCE, here, and never read back out — there is no
+    endpoint that returns an existing one. Somebody who loses the QR before
+    confirming starts again, which costs nothing because an unconfirmed secret
+    was never a login requirement.
+    """
+    user_id = key_info.wallet.user
+    account = await get_account(user_id)
+    secret = totp_helper.generate_secret()
+    try:
+        await start_twofa_totp(user_id, secret)
+    except ValueError:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Two-factor is already set up. Turn it off first to set up a new app.",
+        )
+    issuer = (silnt_env("SILNT_APP_NAME") or "WhiSPa").strip() or "WhiSPa"
+    label = (account.username if account else "") or (account.email if account else "") or "wallet"
+    return {
+        "secret": secret,
+        "uri": totp_helper.provisioning_uri(secret, label, issuer),
+    }
+
+
+@silnt_api_router.post("/api/v1/auth/2fa/totp/confirm")
+async def api_twofa_totp_confirm(
+    request: Request,
+    response: Response,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """A correct code proves the app holds the secret; only then is it on."""
+    user_id = key_info.wallet.user
+    payload = await _json_body(request)
+    code = str((payload or {}).get("code", "")).strip()
+    row = await get_twofa(user_id)
+    if not row or not row["totp_secret"]:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                            detail="Start the setup again — there is no pending secret.")
+    if row["enabled"] and row["totp_confirmed"]:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                            detail="Two-factor is already set up.")
+    check_verify_allowed(user_id)
+    counter = totp_helper.verify(row["totp_secret"], code, last_counter=row["last_counter"])
+    if counter is None:
+        record_verify_attempt(user_id)
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                            detail="That code is not right. Check your authenticator app and try again.")
+    clear_verify_attempts(user_id)
+    await confirm_twofa_totp(user_id, counter)
+    # THE SESSION THAT TURNED IT ON IS VERIFIED, or enabling 2FA would lock the
+    # user out of the very screen they are standing on until they signed out
+    # and back in. The code they just typed is what verified it.
+    token = new_session_token()
+    await create_twofa_session(
+        user_id, token, read_device_id(request, user_id), "totp", SESSION_TTL_SECONDS
+    )
+    set_session_cookie(response, user_id, token)
+    return {"enabled": True, "session": token}
+
+
+@silnt_api_router.post("/api/v1/auth/2fa/disable")
+async def api_twofa_disable(
+    request: Request,
+    response: Response,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """Off, behind a current code.
+
+    The dependency already requires a verified session, so this second check
+    looks redundant — it is not. A session lasts twelve hours; a browser left
+    open and walked away from is exactly the situation where turning the
+    second factor OFF must cost a fresh code rather than a click.
+    """
+    user_id = key_info.wallet.user
+    payload = await _json_body(request)
+    code = str((payload or {}).get("code", "")).strip()
+    row = await get_twofa(user_id)
+    if not row or not row["enabled"]:
+        return {"enabled": False}
+    check_verify_allowed(user_id)
+    ok = False
+    if row["totp_secret"]:
+        counter = totp_helper.verify(row["totp_secret"], code, last_counter=row["last_counter"])
+        if counter is not None:
+            await note_twofa_counter(user_id, counter)
+            ok = True
+    if not ok:
+        ok = await verify_twofa_code(user_id, code)
+    if not ok:
+        record_verify_attempt(user_id)
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                            detail="That code is not right.")
+    clear_verify_attempts(user_id)
+    await disable_twofa(user_id)
+    clear_session_cookie(response, user_id)
+    return {"enabled": False}
+
+
+@silnt_api_router.post("/api/v1/auth/2fa/email/send")
+async def api_twofa_email_send(
+    request: Request,
+    key_info: WalletTypeInfo = Depends(require_invoice_key),
+):
+    """Mail a six-digit code — the fallback that keeps a lost phone from
+    becoming a lost wallet.
+
+    The honest cost of having it at all: the second factor is then only as
+    strong as the mailbox. That was chosen deliberately over recovery codes,
+    because a self-custodial wallet whose owner is locked out of their own
+    account by a dead handset is the worse failure.
+    """
+    user_id = key_info.wallet.user
+    if not await twofa_is_enabled(user_id):
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                            detail="Two-factor is not switched on for this account.")
+    account = await get_account(user_id)
+    if not account or not account.email:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                            detail="This account has no email address, so a code cannot be sent.")
+    check_email_send_allowed(user_id)
+    code = f"{secrets.randbelow(1000000):06d}"
+    await create_twofa_code(user_id, code, ttl_secs=EMAIL_CODE_TTL_SECONDS)
+    ua = request.headers.get("user-agent", "")[:512]
+    ip = get_client_ip(request)
+    subject = "Your sign-in code"
+    body = (
+        f"Hi {account.username or 'there'},\n\n"
+        f"Your sign-in code is:\n\n    {code}\n\n"
+        f"It expires in {EMAIL_CODE_TTL_SECONDS // 60} minutes.\n\n"
+        f"Requested from:\n"
+        f"  Browser: {ua or 'unknown'}\n  IP:      {ip or 'unknown'}\n"
+        f"  Time:    {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}\n\n"
+        f"If this wasn't you, someone may have your password. Change it and "
+        f"contact your administrator. (The IP shown may be a proxy's.)"
+    )
+    res = await send_email_notification(to_emails=[account.email], message=body, subject=subject)
+    if res.get("status") != "ok":
+        logger.warning(f"2FA code email failed: {res}")
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                            detail="Could not send the code. Please contact your administrator.")
+    # Stamped after the send: a code nobody received must not refuse the retry
+    # that would deliver one.
+    record_email_send(user_id)
+    return {"status": "sent"}
+
+
+@silnt_api_router.post("/api/v1/auth/2fa/verify")
+async def api_twofa_verify(
+    request: Request,
+    response: Response,
+    key_info: WalletTypeInfo = Depends(require_invoice_key),
+):
+    """Present the second factor and get a verified session.
+
+    ONE ENDPOINT FOR BOTH FACTORS, and it does not ask which was used. The app
+    code is tried first and the emailed one second, so a user who has an
+    authenticator and also asked for an email can type whichever arrived — a
+    screen that makes somebody declare which six digits they are holding is a
+    screen that can be answered wrongly.
+    """
+    user_id = key_info.wallet.user
+    payload = await _json_body(request)
+    code = str((payload or {}).get("code", "")).strip()
+    if not code.isdigit() or len(code) != 6:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Enter the 6-digit code.")
+    row = await get_twofa(user_id)
+    if not row or not row["enabled"]:
+        # Nothing to present. Not an error: the app may have raced a disable.
+        return {"verified": True, "enabled": False}
+    check_verify_allowed(user_id)
+
+    method = None
+    if row["totp_secret"]:
+        counter = totp_helper.verify(row["totp_secret"], code, last_counter=row["last_counter"])
+        if counter is not None:
+            await note_twofa_counter(user_id, counter)
+            method = "totp"
+    if method is None and await verify_twofa_code(user_id, code):
+        method = "email"
+    if method is None:
+        record_verify_attempt(user_id)
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="That code is incorrect or expired.",
+        )
+
+    clear_verify_attempts(user_id)
+    token = new_session_token()
+    await create_twofa_session(
+        user_id, token, read_device_id(request, user_id), method, SESSION_TTL_SECONDS
+    )
+    set_session_cookie(response, user_id, token)
+    # The token is returned as well as set as a cookie, for a client that
+    # cannot keep a cross-site one — the same two-way arrangement the device id
+    # already has.
+    return {"verified": True, "enabled": True, "session": token, "method": method}
+
+
+@silnt_api_router.post("/api/v1/auth/2fa/session/revoke")
+async def api_twofa_session_revoke(
+    request: Request,
+    response: Response,
+    key_info: WalletTypeInfo = Depends(require_invoice_key),
+):
+    """Signing out drops the verified session.
+
+    Without this the cookie is a session cookie and would survive a sign-out
+    inside the same browser window, so the next sign-in would not ask — which
+    is the whole thing this feature is for.
+    """
+    user_id = key_info.wallet.user
+    payload = await _json_body(request)
+    token = read_session_token(request, user_id) or str((payload or {}).get("session", "")).strip()
+    removed = 0
+    if str((payload or {}).get("all", "")).lower() in ("1", "true", "yes"):
+        removed = await revoke_all_twofa_sessions(user_id)
+    elif token:
+        removed = await revoke_twofa_session(user_id, token)
+    clear_session_cookie(response, user_id)
+    return {"revoked": int(removed or 0)}
+
 
 @silnt_api_router.get("/api/v1/auth/is-admin")
 async def api_is_admin(key_info: WalletTypeInfo = Depends(require_invoice_key)):

@@ -4386,3 +4386,242 @@ async def requeue_failed_tango_payouts(network: str) -> int:
         {"now": int(time.time()), "net": network},
     )
     return n
+
+
+# ── Two-factor authentication ─────────────────────────────────────────────────
+#
+# The setting and the authenticator secret, the sessions that have passed the
+# second factor, and the emailed fallback codes. See migrations.m045_two_factor
+# for why those are three tables rather than one.
+#
+# NOTHING HERE STORES A PLAINTEXT CODE OR TOKEN. The emailed code is hashed the
+# moment it is created (the plaintext goes in the mail and nowhere else) and a
+# session token is stored only as its hash, so the table cannot be read and
+# replayed. The TOTP secret is the one thing that HAS to be stored as itself:
+# verifying a code means recomputing it, and there is no one-way form that
+# allows that. It is not wallet key material — it opens the wallet's UI, not
+# its coins — but it is the reason this feature adds a secret to the database
+# where the project otherwise keeps none.
+
+
+async def get_twofa(user_id: str) -> Optional[dict]:
+    row = await db.fetchone(
+        "SELECT user_id, totp_secret, totp_confirmed, enabled, last_counter "
+        "FROM silnt.twofa WHERE user_id = :uid",
+        {"uid": user_id},
+    )
+    if not row:
+        return None
+    return {
+        "user_id": row["user_id"],
+        "totp_secret": row["totp_secret"],
+        "totp_confirmed": bool(row["totp_confirmed"]),
+        "enabled": bool(row["enabled"]),
+        "last_counter": row["last_counter"],
+    }
+
+
+async def twofa_is_enabled(user_id: str) -> bool:
+    """The one question the request gate asks, kept to a single column read."""
+    row = await db.fetchone(
+        "SELECT enabled FROM silnt.twofa WHERE user_id = :uid", {"uid": user_id}
+    )
+    return bool(row and row["enabled"])
+
+
+async def start_twofa_totp(user_id: str, secret: str) -> None:
+    """Store a NEW, unconfirmed secret.
+
+    Unconfirmed and not enabled: a secret that nothing has proved the app holds
+    must not become a login requirement. Starting setup twice replaces the
+    previous attempt, which is what a user who closed the dialog and came back
+    expects — and the old secret was never usable for anything.
+
+    It REFUSES to overwrite a confirmed one. Otherwise the setup endpoint is a
+    way to rotate somebody's second factor out from under them, and the account
+    that could do it is the one that already failed the check.
+    """
+    now = int(time.time())
+    existing = await get_twofa(user_id)
+    if existing and existing["enabled"] and existing["totp_confirmed"]:
+        raise ValueError("two-factor is already set up")
+    await db.execute(
+        """INSERT INTO silnt.twofa
+              (user_id, totp_secret, totp_confirmed, enabled, last_counter,
+               created_at)
+           VALUES (:uid, :sec, 0, 0, NULL, :now)
+           ON CONFLICT (user_id) DO UPDATE SET
+              totp_secret = :sec, totp_confirmed = 0, enabled = 0,
+              last_counter = NULL""",
+        {"uid": user_id, "sec": secret, "now": now},
+    )
+
+
+async def confirm_twofa_totp(user_id: str, counter: int) -> None:
+    """A correct code proved the app holds the secret: switch it on.
+
+    `last_counter` is set from the SAME code that confirmed it, so the code
+    just typed cannot also be the one that opens the first session.
+    """
+    await db.execute(
+        "UPDATE silnt.twofa SET totp_confirmed = 1, enabled = 1, "
+        "last_counter = :c WHERE user_id = :uid",
+        {"uid": user_id, "c": int(counter)},
+    )
+
+
+async def note_twofa_counter(user_id: str, counter: int) -> None:
+    """Advance the replay guard, never backwards.
+
+    The guard is only as good as this being monotonic: two requests racing
+    with codes one step apart must not leave the EARLIER counter stored, or
+    the later code becomes presentable again.
+    """
+    await db.execute(
+        "UPDATE silnt.twofa SET last_counter = :c "
+        "WHERE user_id = :uid AND (last_counter IS NULL OR last_counter < :c)",
+        {"uid": user_id, "c": int(counter)},
+    )
+
+
+async def disable_twofa(user_id: str) -> None:
+    """Off, and the secret goes with it.
+
+    Leaving the secret behind would make "off" mean "dormant", so re-enabling
+    would silently resurrect an authenticator entry the user may have deleted
+    from their phone months earlier. Setting up again generates a fresh one.
+    Every session goes too: they were only ever evidence about this factor.
+    """
+    await db.execute("DELETE FROM silnt.twofa WHERE user_id = :uid", {"uid": user_id})
+    await db.execute(
+        "DELETE FROM silnt.twofa_sessions WHERE user_id = :uid", {"uid": user_id}
+    )
+    await db.execute("DELETE FROM silnt.twofa_codes WHERE user_id = :uid", {"uid": user_id})
+
+
+# ── Sessions ──────────────────────────────────────────────────────────────────
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256((token or "").encode()).hexdigest()
+
+
+async def create_twofa_session(
+    user_id: str, token: str, device_id: Optional[str], method: str, ttl_secs: int
+) -> None:
+    now = int(time.time())
+    await db.execute(
+        """INSERT INTO silnt.twofa_sessions
+              (token_hash, user_id, device_id, method, created_at, expires_at)
+           VALUES (:th, :uid, :did, :m, :now, :exp)
+           ON CONFLICT (token_hash) DO NOTHING""",
+        {
+            "th": _token_hash(token),
+            "uid": user_id,
+            "did": device_id,
+            "m": method,
+            "now": now,
+            "exp": now + int(ttl_secs),
+        },
+    )
+
+
+async def twofa_session_valid(user_id: str, token: str) -> bool:
+    """Is this session token still good for this user?
+
+    Scoped to the user as well as the token, so a token issued for one account
+    cannot be presented on another's requests — the request's own API key names
+    the user, and the two have to agree.
+    """
+    if not token:
+        return False
+    row = await db.fetchone(
+        "SELECT expires_at FROM silnt.twofa_sessions "
+        "WHERE token_hash = :th AND user_id = :uid",
+        {"th": _token_hash(token), "uid": user_id},
+    )
+    if not row:
+        return False
+    if int(row["expires_at"]) < int(time.time()):
+        await db.execute(
+            "DELETE FROM silnt.twofa_sessions WHERE token_hash = :th",
+            {"th": _token_hash(token)},
+        )
+        return False
+    return True
+
+
+async def revoke_twofa_session(user_id: str, token: str) -> int:
+    """One session — what signing out revokes."""
+    if not token:
+        return 0
+    return await db.execute(
+        "DELETE FROM silnt.twofa_sessions WHERE token_hash = :th AND user_id = :uid",
+        {"th": _token_hash(token), "uid": user_id},
+    )
+
+
+async def revoke_all_twofa_sessions(user_id: str) -> int:
+    return await db.execute(
+        "DELETE FROM silnt.twofa_sessions WHERE user_id = :uid", {"uid": user_id}
+    )
+
+
+async def purge_expired_twofa_sessions() -> int:
+    return await db.execute(
+        "DELETE FROM silnt.twofa_sessions WHERE expires_at < :now",
+        {"now": int(time.time())},
+    )
+
+
+# ── Emailed codes ─────────────────────────────────────────────────────────────
+# The same shape as create_device_code/verify_device_code above, deliberately:
+# hashed, short-lived, attempt-capped, compared in constant time.
+
+
+async def create_twofa_code(user_id: str, code: str, ttl_secs: int = 600) -> None:
+    now = int(time.time())
+    await db.execute(
+        """INSERT INTO silnt.twofa_codes (user_id, code_hash, expires_at, attempts)
+           VALUES (:uid, :ch, :exp, 0)
+           ON CONFLICT (user_id) DO UPDATE SET
+              code_hash = :ch, expires_at = :exp, attempts = 0""",
+        {
+            "uid": user_id,
+            "ch": hashlib.sha256(code.encode()).hexdigest(),
+            "exp": now + int(ttl_secs),
+        },
+    )
+
+
+async def verify_twofa_code(user_id: str, code: str, max_attempts: int = 5) -> bool:
+    """Check an emailed code, consuming it on success.
+
+    Expiry and the attempt cap are both enforced by DELETING the row, so a
+    six-digit code cannot be ground down: five wrong tries and the code is
+    gone, and the next attempt needs a new email.
+    """
+    row = await db.fetchone(
+        "SELECT code_hash, expires_at, attempts FROM silnt.twofa_codes "
+        "WHERE user_id = :uid",
+        {"uid": user_id},
+    )
+    if not row:
+        return False
+    now = int(time.time())
+    if now > int(row["expires_at"]) or int(row["attempts"]) >= max_attempts:
+        await db.execute(
+            "DELETE FROM silnt.twofa_codes WHERE user_id = :uid", {"uid": user_id}
+        )
+        return False
+    supplied = hashlib.sha256((code or "").encode()).hexdigest()
+    if not hmac.compare_digest(supplied, row["code_hash"]):
+        await db.execute(
+            "UPDATE silnt.twofa_codes SET attempts = attempts + 1 WHERE user_id = :uid",
+            {"uid": user_id},
+        )
+        return False
+    await db.execute(
+        "DELETE FROM silnt.twofa_codes WHERE user_id = :uid", {"uid": user_id}
+    )
+    return True

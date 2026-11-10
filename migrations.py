@@ -1402,3 +1402,76 @@ async def m044_tango_cancel_note_backfill(db):
     await db.execute(
         "ALTER TABLE silnt.tango_rounds ADD COLUMN IF NOT EXISTS cancel_note TEXT"
     )
+
+
+async def m045_two_factor(db):
+    """Two-factor authentication for the web app: TOTP or an emailed code.
+
+    THREE TABLES, because they have three different lifetimes.
+
+    `twofa` is the user's SETTING and their authenticator secret. One row per
+    user, and `enabled` is separate from `totp_secret` being present: a secret
+    is generated when setup starts and must not count for anything until a
+    correct code has proved the app actually holds it. Enabling on generation
+    is how somebody ends up locked out by a QR they never finished scanning.
+
+    `last_counter` is the REPLAY GUARD (RFC 6238 §5.2). A TOTP code is valid
+    for up to 90 seconds with a one-step window either side, so without
+    recording the step that was accepted, a code seen over a shoulder or left
+    on screen is good for a second use. helpers/totp.py returns the counter it
+    matched for exactly this column to hold.
+
+    `twofa_sessions` is which sign-ins have passed the second factor. It is a
+    SESSION record rather than a device one — the trusted-device cookie
+    already answers "is this browser known", and a second factor that a known
+    browser never has to present again is not a second factor. Keyed by the
+    hash of the token, never the token: the row is what an attacker reading
+    the database would otherwise be able to replay.
+
+    `twofa_codes` is the emailed fallback, the same shape as `device_codes`
+    above — hashed, short-lived, attempt-capped — because that is the shape
+    that already works here and a second implementation of it would be a
+    second set of bugs.
+    """
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS silnt.twofa (
+            user_id         TEXT PRIMARY KEY,
+            totp_secret     TEXT,
+            totp_confirmed  INTEGER NOT NULL DEFAULT 0,
+            enabled         INTEGER NOT NULL DEFAULT 0,
+            last_counter    BIGINT,
+            -- Epoch seconds, like device_codes.expires_at beside it. There is
+            -- deliberately no `updated_at`: across this schema that NAME means
+            -- a TIMESTAMP column (tests/test_timestamp_columns.py keys off it),
+            -- and nothing here would have read one.
+            created_at      INTEGER NOT NULL
+        );
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS silnt.twofa_sessions (
+            token_hash  TEXT PRIMARY KEY,
+            user_id     TEXT NOT NULL,
+            device_id   TEXT,
+            method      TEXT,
+            created_at  INTEGER NOT NULL,
+            expires_at  INTEGER NOT NULL
+        );
+        """
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS twofa_sessions_user "
+        "ON silnt.twofa_sessions(user_id)"
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS silnt.twofa_codes (
+            user_id     TEXT PRIMARY KEY,
+            code_hash   TEXT NOT NULL,
+            expires_at  INTEGER NOT NULL,
+            attempts    INTEGER NOT NULL DEFAULT 0
+        );
+        """
+    )

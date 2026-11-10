@@ -13,8 +13,14 @@ from lnbits.settings import settings as lnbits_settings
 # Variant for admin-key routes:
 from lnbits.decorators import require_admin_key
 from lnbits.decorators import WalletTypeInfo, require_invoice_key
-from ..crud import get_trusted_device, touch_trusted_device
+from ..crud import (
+    get_trusted_device,
+    touch_trusted_device,
+    twofa_is_enabled,
+    twofa_session_valid,
+)
 from .appenv import silnt_env
+from .twofa import read_session_token, requires_twofa
 
 MAX_TRUSTED_DEVICES_PER_USER = 5
 DEVICE_COOKIE_PREFIX = "silnt_device_id_"
@@ -116,6 +122,37 @@ def get_client_ip(request: Request) -> str:
     return request.client.host if request.client else ""
 
 
+TWOFA_REQUIRED_DETAIL = "twofa-required: second factor not presented for this session"
+
+
+async def _require_twofa_session(request: Request, user_id: str) -> None:
+    """The second factor, for a user who has turned it on.
+
+    IT IS ITS OWN REFUSAL, and that is not cosmetic. Both clients fold a 403
+    from this dependency into `untrusted` (services/deviceCheckOutcome.ts) and
+    untrusted lands on the device-enrollment screen — whose only action is to
+    email a DEVICE code. A bare 403 here would therefore answer "enter your
+    two-factor code" with "we have emailed you a device confirmation", on a
+    browser that is already trusted. The detail is prefixed so the clients can
+    tell the two apart, exactly as `device-not-trusted:` already is.
+
+    Checked AFTER the device gate on purpose: a browser that is not trusted at
+    all has a more basic thing to do first, and asking for a second factor
+    before the device is known would put two code prompts in a row.
+    """
+    if not requires_twofa(request):
+        return
+    if not await twofa_is_enabled(user_id):
+        return
+    token = read_session_token(request, user_id)
+    if token and await twofa_session_valid(user_id, token):
+        return
+    raise HTTPException(
+        status_code=HTTPStatus.FORBIDDEN,
+        detail=TWOFA_REQUIRED_DETAIL,
+    )
+
+
 async def require_trusted_device(
     request: Request,
     key_info: WalletTypeInfo = Depends(require_invoice_key),
@@ -144,6 +181,8 @@ async def require_trusted_device(
     except Exception as e:
         logger.warning(f"touch_trusted_device failed: {e}")
 
+    await _require_twofa_session(request, user_id)
+
     return key_info
 
 
@@ -171,4 +210,7 @@ async def require_trusted_device_admin(
         await touch_trusted_device(user_id, cookie_value)
     except Exception as e:
         logger.warning(f"touch_trusted_device failed: {e}")
+    # The admin-key routes too: a second factor that the admin surface walks
+    # around is a second factor on the read paths only.
+    await _require_twofa_session(request, user_id)
     return key_info
