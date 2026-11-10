@@ -83,15 +83,42 @@ class FakeResponse:
 # ── Who it applies to ─────────────────────────────────────────────────────────
 
 
-def test_a_browser_is_in_scope(tf):
-    assert tf.requires_twofa(FakeRequest({"origin": "https://wallet.example"})) is True
+def test_the_web_app_is_in_scope(tf):
+    assert tf.requires_twofa(FakeRequest({"X-Silnt-Web": "1"})) is True
 
 
 def test_the_phone_is_not(tf):
-    """THE LOCKOUT THIS AVOIDS. React Native sends no Origin and has no 2FA
-    screen to render, so enforcing it there puts a wallet behind a prompt that
-    cannot appear. Widening this means building the flow there first."""
+    """THE LOCKOUT THIS AVOIDS. React Native has no 2FA screen to render, so
+    enforcing it there puts a wallet behind a prompt that cannot appear.
+    Widening this means building the flow there first."""
     assert tf.requires_twofa(FakeRequest({"user-agent": "okhttp/4.9"})) is False
+
+
+def test_a_GET_is_in_scope_exactly_as_a_POST_IS(tf):
+    """THE BUG THIS REPLACED, and the reason the signal is a header.
+
+    This read `Origin`, copied from turnstile.py where it is correct — that
+    guards one POST endpoint, and a browser sends Origin on every POST. This
+    guards EVERY request, and a browser does NOT send Origin on a same-origin
+    GET, which behind Caddy is almost all of them. Measured in Chromium:
+
+        GET  /api/get   → origin: null
+        POST /api/post  → origin: http://127.0.0.1:8770
+
+    So the gate said "not required" for every read and "required" for every
+    write: a fresh sign-in was told it was verified and never prompted, the
+    first POST was refused, and the screen that re-checks before routing asked
+    with a GET, was told "verified", and showed nothing. Reported 2026-11-10.
+
+    The header does not vary by method, which is the whole point of it.
+    """
+    for headers in (
+        {"X-Silnt-Web": "1"},                                   # a GET
+        {"X-Silnt-Web": "1", "origin": "https://wallet.example"},  # a POST
+    ):
+        assert tf.requires_twofa(FakeRequest(headers)) is True
+    # And Origin alone no longer decides anything.
+    assert tf.requires_twofa(FakeRequest({"origin": "https://wallet.example"})) is False
 
 
 def test_the_scope_is_a_header_and_that_is_known(tf):
@@ -99,6 +126,9 @@ def test_the_scope_is_a_header_and_that_is_known(tf):
     property the trusted-device gate has. Pinned so nobody reads more into the
     feature than it carries."""
     assert tf.requires_twofa(FakeRequest({})) is False
+    # Only an exact "1" — a header echoed back with some other value is not an
+    # assertion that this is the web app.
+    assert tf.requires_twofa(FakeRequest({"X-Silnt-Web": "yes"})) is False
 
 
 # ── The verified session ──────────────────────────────────────────────────────

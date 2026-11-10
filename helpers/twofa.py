@@ -57,6 +57,11 @@ VERIFY_WINDOW_SECONDS = 300
 MAX_EMAIL_SENDS = 5
 EMAIL_SEND_WINDOW_SECONDS = 3600
 
+# WHICH CLIENT IS ASKING. The browser app sets this on every request it makes;
+# the React Native client does not. See requires_twofa for why `Origin` was the
+# wrong thing to read and what it cost.
+WEB_CLIENT_HEADER = "X-Silnt-Web"
+
 SESSION_COOKIE_PREFIX = "silnt_2fa_"
 SESSION_HEADER = "X-Silnt-2FA"
 COOKIE_DOMAIN = silnt_env("SILNT_DEVICE_COOKIE_DOMAIN") or None
@@ -75,13 +80,35 @@ def _prune(entries: list, age: int) -> list:
 def requires_twofa(request: Request) -> bool:
     """Does the second factor apply to THIS request?
 
-    Only to a browser, identified the way `turnstile.py` identifies one: an
-    `Origin` header, which a browser always sends on a cross-origin POST and
-    the React Native client does not. The reasoning and the caveat are in this
-    module's docstring — the phone has no flow to present, so widening this
-    without building one locks every phone user out of their own wallet.
+    Only to the web app, which says so on every request it makes
+    (`X-Silnt-Web`, set in the browser client's own fetch wrapper). The phone
+    has no 2FA screen, so enforcing it there would put a wallet behind a prompt
+    that cannot render — see this module's docstring.
+
+    **IT USED TO READ `Origin`, AND THAT WAS BROKEN IN A WAY WORTH RECORDING.**
+    Chosen by analogy with `turnstile.py`, where it is correct: that guards one
+    POST endpoint, and a browser sends `Origin` on every POST. This guards
+    EVERY request, and a browser does **not** send `Origin` on a same-origin
+    GET — which is what the deployed app behind Caddy makes almost all of them.
+    Measured in Chromium against a same-origin page:
+
+        GET  /api/get   → origin: null
+        POST /api/post  → origin: http://127.0.0.1:8770
+
+    So the gate answered "not required" for every GET and "required" for every
+    POST. Reported 2026-11-10: the status read is a GET, so a fresh sign-in was
+    told the session was verified and never prompted; then the first POST — the
+    Turn off button — was refused with `twofa-required`; and the screen that
+    re-checks before routing asked with a GET, was told "verified", and
+    declined to show the gate, leaving a page of failed requests and no screen.
+    One wrong signal, three symptoms.
+
+    A header the client sets on every request is the honest form of "which app
+    is this". It is client-settable, so it is not a boundary against a script
+    holding the account's API key — the same caveat the trusted-device gate has
+    always carried, and stated in this module's docstring rather than implied.
     """
-    return bool(request.headers.get("origin"))
+    return request.headers.get(WEB_CLIENT_HEADER) == "1"
 
 
 # ── The verified-session token ────────────────────────────────────────────────
