@@ -324,3 +324,48 @@ def test_the_secret_is_never_read_back_out():
     status = status[: status.index("@silnt_api_router", 10)]
     assert "totp_secret" not in status
     assert '"secret"' not in status
+
+
+# ── Turning it off keeps the authenticator ────────────────────────────────────
+
+
+def test_disable_keeps_the_secret():
+    """Reported 2026-11-10: "turning 2fa off and then on prompts to install it
+    again in the authenticator app, as the previous app's code is invalid."
+
+    It used to DELETE the row, on the tidier reasoning that leaving the secret
+    makes "off" mean "dormant". The cost of that rule was paid by the user on
+    every round trip: a re-scan, and a dead entry left behind on the phone.
+    `enabled` is what a request reads; the secret outlives the decision — the
+    same shape the Tango payout address already has, and for the same reason.
+    """
+    src = (ROOT / "crud.py").read_text()
+    body = src[src.index("async def disable_twofa("):]
+    body = body[: body.index("\n# ── Sessions")]
+    assert "UPDATE silnt.twofa SET enabled = 0" in body
+    assert "DELETE FROM silnt.twofa WHERE" not in body, "the secret must survive"
+    # The sessions and any emailed code still go — they were evidence about a
+    # factor that is now off.
+    assert "DELETE FROM silnt.twofa_sessions" in body
+    assert "DELETE FROM silnt.twofa_codes" in body
+
+
+def test_turning_it_back_on_still_costs_a_code():
+    """Keeping the secret must not make re-enabling a click: a code from that
+    app is what proves the user still holds it."""
+    src = (ROOT / "views_api.py").read_text()
+    body = src[src.index("async def api_twofa_totp_confirm("):]
+    body = body[: body.index("@silnt_api_router", 10)]
+    assert "totp_helper.verify(" in body
+    assert "confirm_twofa_totp(" in body
+
+
+def test_a_new_secret_is_still_reachable_while_off():
+    """Somebody who has lost the app entirely needs a route to a fresh secret,
+    and with disable no longer discarding one, start is the only route."""
+    src = (ROOT / "crud.py").read_text()
+    body = src[src.index("async def start_twofa_totp("):]
+    body = body[: body.index("\nasync def ", 10)]
+    # Refused only while the factor is actually in force.
+    assert 'existing["enabled"] and existing["totp_confirmed"]' in body
+

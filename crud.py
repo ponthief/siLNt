@@ -4437,9 +4437,12 @@ async def start_twofa_totp(user_id: str, secret: str) -> None:
     previous attempt, which is what a user who closed the dialog and came back
     expects — and the old secret was never usable for anything.
 
-    It REFUSES to overwrite a confirmed one. Otherwise the setup endpoint is a
-    way to rotate somebody's second factor out from under them, and the account
-    that could do it is the one that already failed the check.
+    It REFUSES to overwrite a secret that is currently IN FORCE. Otherwise the
+    setup endpoint is a way to rotate somebody's second factor out from under
+    them, and the account that could do it is the one that already failed the
+    check. While 2FA is OFF it does replace the stored secret, which is how
+    somebody who has lost the authenticator app asks for a new one — the only
+    route to that, since turning it off no longer discards it.
     """
     now = int(time.time())
     existing = await get_twofa(user_id)
@@ -4485,14 +4488,30 @@ async def note_twofa_counter(user_id: str, counter: int) -> None:
 
 
 async def disable_twofa(user_id: str) -> None:
-    """Off, and the secret goes with it.
+    """Off — but the authenticator secret STAYS.
 
-    Leaving the secret behind would make "off" mean "dormant", so re-enabling
-    would silently resurrect an authenticator entry the user may have deleted
-    from their phone months earlier. Setting up again generates a fresh one.
-    Every session goes too: they were only ever evidence about this factor.
+    It used to delete the row, on the reasoning that leaving the secret behind
+    makes "off" mean "dormant". Reported 2026-11-10: *"turning 2fa off and then
+    on prompts to install it again in the authenticator app, as the previous
+    app's code is invalid"* — and that is the cost of the tidier rule, paid by
+    the user every time. Somebody turning the factor off for an afternoon does
+    not expect to re-scan a QR and leave a dead entry behind on their phone.
+
+    So `enabled` is what a request reads and the secret outlives the decision —
+    the same shape the Tango payout address already has, for the same reason:
+    a setting whose only way back on is re-doing the setup is a one-way door.
+
+    Turning it back on still costs a CODE from that app (api_twofa_totp_confirm
+    accepts one against the stored secret while disabled), which is what proves
+    the user still holds it. Somebody who no longer has the app asks for a new
+    secret explicitly, which `start_twofa_totp` gives while 2FA is off.
+
+    The sessions and any emailed code still go: those were only ever evidence
+    about a factor that is now off.
     """
-    await db.execute("DELETE FROM silnt.twofa WHERE user_id = :uid", {"uid": user_id})
+    await db.execute(
+        "UPDATE silnt.twofa SET enabled = 0 WHERE user_id = :uid", {"uid": user_id}
+    )
     await db.execute(
         "DELETE FROM silnt.twofa_sessions WHERE user_id = :uid", {"uid": user_id}
     )
