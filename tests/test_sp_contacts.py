@@ -147,7 +147,8 @@ def _row_fn(pj_decrypt):
     src = (ROOT / "crud.py").read_text()
     at = src.index("_CIPHERTEXT_PREFIX = ")
     end = src.index("\nasync def create_sp_contact(")
-    ns = {"_pj_decrypt": pj_decrypt}
+    ns = {"_pj_decrypt": pj_decrypt, "_key_fingerprint": lambda k: "fp",
+          "_payjoin_enc_key": lambda: "key"}
     exec(src[at:end], ns)
     return ns["_decrypt_sp_contact_row"]
 
@@ -209,3 +210,132 @@ def test_the_swallowing_except_is_gone():
 def test_the_list_does_not_ask_whether_an_unreadable_one_is_a_wallet():
     body = _fn("views_api.py", "api_sp_contacts_list")
     assert "c.unreadable" in body
+
+
+# ── a row written under the instance's OTHER key is still read ────────────────
+#
+# LNbits takes auth_secret_key from AUTH_SECRET_KEY, else from
+# <data folder>/.lnbits_auth_key_v1. Setting the variable later, removing it,
+# or recreating the folder changes which one answers, and every row written
+# under the other stops decrypting. Reported 2026-11-12 as
+# "could not decrypt contact … ValueError".
+
+def _crypto_ns(tmp_path, *, auth_secret_key, env=None, key_file=None):
+    """The real key + decrypt block from crud.py, with LNbits stubbed."""
+    import base64
+    import hashlib
+    import sys
+    import types
+
+    if key_file is not None:
+        (tmp_path / ".lnbits_auth_key_v1").write_text(key_file)
+
+    class FakeCipher:
+        """Keyed, authenticated, text-only: wrong key raises ValueError, as the
+        real one does on a padding failure."""
+        def __init__(self, key):
+            self.key = key
+
+        def _tag(self):
+            return hashlib.sha256(("tag|" + self.key).encode()).hexdigest()[:8]
+
+        def encrypt(self, data):
+            return "U2FsdGVk" + base64.b64encode(
+                (self._tag() + data.decode()).encode()).decode()
+
+        def decrypt(self, cipher):
+            raw = base64.b64decode(cipher[len("U2FsdGVk"):]).decode()
+            if raw[:8] != self._tag():
+                raise ValueError("Padding is incorrect.")
+            return raw[8:]
+
+    settings = types.SimpleNamespace(
+        auth_secret_key=auth_secret_key, lnbits_data_folder=str(tmp_path))
+    mods = {
+        "lnbits": types.ModuleType("lnbits"),
+        "lnbits.settings": types.ModuleType("lnbits.settings"),
+        "lnbits.utils": types.ModuleType("lnbits.utils"),
+        "lnbits.utils.crypto": types.ModuleType("lnbits.utils.crypto"),
+    }
+    mods["lnbits.settings"].settings = settings
+    mods["lnbits.utils.crypto"].AESCipher = FakeCipher
+    saved = {k: sys.modules.get(k) for k in mods}
+    sys.modules.update(mods)
+
+    src = (ROOT / "crud.py").read_text()
+    block = src[src.index("def _payjoin_enc_key()"):src.index("def _xpub_fingerprint_hash")]
+    ns: dict = {}
+    import os
+    old_env = {k: os.environ.get(k) for k in (env or {})}
+    os.environ.update(env or {})
+    try:
+        exec(block, ns)
+        ns["_restore"] = lambda: (
+            [sys.modules.pop(k, None) if v is None else sys.modules.__setitem__(k, v)
+             for k, v in saved.items()],
+            [os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+             for k, v in old_env.items()],
+        )
+        ns["FakeCipher"] = FakeCipher
+    except Exception:
+        ns["_restore"] = lambda: None
+        raise
+    return ns
+
+
+def test_a_row_written_under_the_key_file_is_read_after_the_env_var_took_over(tmp_path):
+    # Written when the file key was current…
+    writer = _crypto_ns(tmp_path, auth_secret_key="file-key", key_file="file-key")
+    stored = writer["_pj_encrypt"]("tsp1qexample")
+    writer["_restore"]()
+    # …then AUTH_SECRET_KEY was set, so settings now answers with another key.
+    reader = _crypto_ns(tmp_path, auth_secret_key="env-key", key_file="file-key")
+    try:
+        assert reader["_pj_decrypt"](stored) == "tsp1qexample"
+    finally:
+        reader["_restore"]()
+
+
+def test_a_row_written_under_the_env_key_is_read_after_it_was_removed(tmp_path):
+    writer = _crypto_ns(tmp_path, auth_secret_key="env-key", key_file="file-key")
+    stored = writer["_pj_encrypt"]("tsp1qexample")
+    writer["_restore"]()
+    reader = _crypto_ns(tmp_path, auth_secret_key="file-key", key_file="file-key",
+                        env={"AUTH_SECRET_KEY": "env-key"})
+    try:
+        assert reader["_pj_decrypt"](stored) == "tsp1qexample"
+    finally:
+        reader["_restore"]()
+
+
+def test_a_key_nobody_has_still_raises(tmp_path):
+    writer = _crypto_ns(tmp_path, auth_secret_key="gone-for-good")
+    stored = writer["_pj_encrypt"]("tsp1qexample")
+    writer["_restore"]()
+    reader = _crypto_ns(tmp_path, auth_secret_key="current", key_file="other")
+    try:
+        import pytest
+        with pytest.raises(Exception):
+            reader["_pj_decrypt"](stored)
+    finally:
+        reader["_restore"]()
+
+
+def test_the_current_key_is_tried_first_and_candidates_have_no_duplicates(tmp_path):
+    ns = _crypto_ns(tmp_path, auth_secret_key="k", key_file="k")
+    try:
+        cands = ns["_payjoin_enc_key_candidates"]()
+        assert cands[0] == ("current", "k")
+        assert len({k for _, k in cands}) == len(cands)
+    finally:
+        ns["_restore"]()
+
+
+def test_a_fingerprint_names_a_key_without_being_it():
+    src = (ROOT / "crud.py").read_text()
+    body = _fn("crud.py", "_key_fingerprint")
+    assert "[:8]" in body
+    assert "silnt-key-fp|" in body
+    # And the log lines carry the fingerprint, never the key.
+    log_lines = [l for l in src.splitlines() if "[crypto]" in l or "[contacts]" in l]
+    assert log_lines and not any("{primary}" in l or "{key}" in l for l in log_lines)

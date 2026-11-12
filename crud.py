@@ -2393,11 +2393,110 @@ def _strip_residual_padding(s: str) -> str:
     return s
 
 
+def _key_fingerprint(key: str) -> str:
+    """A label for a key that identifies it without disclosing it: eight hex
+    characters of a domain-separated hash. Enough to see in a log that two
+    restarts used the same key or different ones."""
+    import hashlib
+    return hashlib.sha256(("silnt-key-fp|" + key).encode()).hexdigest()[:8]
+
+
+def _payjoin_enc_key_candidates() -> list:
+    """Every secret this instance could plausibly have encrypted rows under,
+    as (source, key), the CURRENT key first and duplicates removed.
+
+    WHY MORE THAN ONE (2026-11-12, a contact list that read back as ciphertext
+    and "could not decrypt contact … ValueError" in the log). LNbits gets
+    `auth_secret_key` from the AUTH_SECRET_KEY environment variable and, when
+    that is empty, from `<data folder>/.lnbits_auth_key_v1` (generated once).
+    Setting the variable after rows were written, removing it, or recreating
+    the data folder all change which one answers — and every row written under
+    the other becomes unreadable with no error until somebody looks. The
+    other places are still on disk, so they are tried before a row is given up
+    on.
+    """
+    import os
+    from pathlib import Path
+
+    out: list = []
+
+    def add(source: str, key) -> None:
+        key = key if isinstance(key, str) else ""
+        if key and all(key != k for _, k in out):
+            out.append((source, key))
+
+    add("current", _payjoin_enc_key())
+    try:
+        from lnbits.settings import settings as _s
+    except Exception:
+        _s = None
+    if _s is not None:
+        for attr in ("auth_secret_key", "auth_secret", "secret", "secret_key",
+                     "lnbits_secret"):
+            v = getattr(_s, attr, None)
+            if v:
+                add(f"settings.{attr}", str(v))
+        folder = getattr(_s, "lnbits_data_folder", None)
+        if folder:
+            try:
+                path = Path(folder, ".lnbits_auth_key_v1")
+                if path.is_file():
+                    with open(path) as f:
+                        raw = f.readline()
+                    # LNbits uses the line exactly as written; a trailing
+                    # newline added by hand makes that a different key.
+                    add("data folder key file", raw)
+                    add("data folder key file (trimmed)", raw.strip())
+            except Exception:
+                pass
+    for env in ("AUTH_SECRET_KEY", "LNBITS_AUTH_SECRET", "AUTH_SECRET",
+                "LNBITS_SECRET_KEY", "SECRET_KEY"):
+        add(f"env {env}", os.environ.get(env, ""))
+    return out
+
+
+_ALT_KEY_LOGGED: set = set()
+
+
+def _plausible_plaintext(plain: str) -> bool:
+    """A wrong key decrypts to garbage that usually fails on padding or UTF-8,
+    but about one in 256 passes the padding check. Everything this module
+    encrypts is printable text (addresses, hex keys, descriptors), so a result
+    that is not is another wrong key, not an answer."""
+    return bool(plain) and all(c.isprintable() or c in "\r\n\t" for c in plain)
+
+
 def _pj_decrypt(ciphertext: str) -> str:
     from lnbits.utils.crypto import AESCipher
-    return _strip_residual_padding(
-        AESCipher(key=_payjoin_enc_key()).decrypt(ciphertext)
-    )
+
+    primary = _payjoin_enc_key()
+    try:
+        return _strip_residual_padding(
+            AESCipher(key=primary).decrypt(ciphertext)
+        )
+    except Exception as first:
+        for source, key in _payjoin_enc_key_candidates():
+            if key == primary:
+                continue
+            try:
+                plain = _strip_residual_padding(
+                    AESCipher(key=key).decrypt(ciphertext)
+                )
+            except Exception:
+                continue
+            if not _plausible_plaintext(plain):
+                continue
+            if source not in _ALT_KEY_LOGGED:
+                _ALT_KEY_LOGGED.add(source)
+                from loguru import logger as _logger
+                _logger.warning(
+                    f"[crypto] a stored value was written under a different key "
+                    f"({source}, fp={_key_fingerprint(key)}); the current key is "
+                    f"fp={_key_fingerprint(primary)}. Read with the older one — "
+                    "the instance's auth secret changed after it was written."
+                )
+            return plain
+        raise first
 
 def _xpub_fingerprint_hash(xpub: str) -> str:
     """Deterministic, non-reversible tag for dedup/equality lookups without
@@ -3005,8 +3104,8 @@ def _decrypt_sp_contact_row(row: dict) -> dict:
             from loguru import logger as _logger
             _logger.warning(
                 f"[contacts] could not decrypt contact {out.get('id')}: "
-                f"{type(e).__name__} — the instance's encryption key may differ "
-                "from the one this row was written with"
+                f"{type(e).__name__}: {e} — no key this instance knows opens "
+                f"it (current key fp={_key_fingerprint(_payjoin_enc_key())})"
             )
             out["value"] = ""
             out["unreadable"] = True
