@@ -2972,13 +2972,50 @@ def _classify_recipient(value: str) -> str:
     """'bitmail' if it's a name@domain, else 'sp' (raw SP address)."""
     return "bitmail" if "@" in (value or "") else "sp"
 
+# base64("Salted__"): what AESCipher output starts with, and the only reason a
+# stored contact value can ever be mistaken for an address.
+_CIPHERTEXT_PREFIX = "U2FsdGVk"
+
+
 def _decrypt_sp_contact_row(row: dict) -> dict:
+    """A contact row with its recipient readable, or marked unreadable.
+
+    THIS USED TO `pass` ON ANY FAILURE, "for legacy/plaintext tolerance", and
+    that handed the client the raw ciphertext as if it were the address — so a
+    saved contact showed as `U2FsdGVkX1…` on the Send screen, could be picked
+    as a recipient, and could be re-saved, which encrypts the ciphertext again.
+    (2026-11-12, reported from the phone's Send screen.)
+
+    Plaintext is still tolerated, but by LOOKING at the value rather than by
+    swallowing the error: a recipient is `sp1…`, `tsp1…` or `name@domain`, and
+    none of them starts with the cipher's header. What does start with it is
+    peeled — a value encrypted twice (the ciphertext re-submitted as an
+    address) decrypts to more ciphertext — and if it cannot be opened it is
+    returned EMPTY with `unreadable` set, which says what is true: this row is
+    there and its address is not recoverable with this instance's key.
+    """
     out = dict(row)
-    if out.get("value"):
+    value = out.get("value") or ""
+    if not value.startswith(_CIPHERTEXT_PREFIX):
+        return out  # legacy plaintext
+    for _ in range(3):
         try:
-            out["value"] = _pj_decrypt(out["value"])
-        except Exception:
-            pass  # legacy/plaintext tolerance
+            value = _pj_decrypt(value)
+        except Exception as e:
+            from loguru import logger as _logger
+            _logger.warning(
+                f"[contacts] could not decrypt contact {out.get('id')}: "
+                f"{type(e).__name__} — the instance's encryption key may differ "
+                "from the one this row was written with"
+            )
+            out["value"] = ""
+            out["unreadable"] = True
+            return out
+        if not value.startswith(_CIPHERTEXT_PREFIX):
+            out["value"] = value
+            return out
+    out["value"] = ""
+    out["unreadable"] = True
     return out
 
 async def create_sp_contact(

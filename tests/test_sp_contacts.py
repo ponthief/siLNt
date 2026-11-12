@@ -134,3 +134,78 @@ def test_the_update_model_takes_either_field():
         n.value is not None and isinstance(n.value, ast.Constant) and n.value.value is None
         for n in cls.body if isinstance(n, ast.AnnAssign)
     )
+
+
+# ── a contact that cannot be read says so, instead of handing out ciphertext ──
+#
+# Reported 2026-11-12 from the phone's Send screen: saved addresses shown as
+# `U2FsdGVk…`. `_decrypt_sp_contact_row` swallowed every decrypt failure and
+# returned the stored ciphertext as the address.
+
+def _row_fn(pj_decrypt):
+    """The real function, compiled out of crud.py, with a stand-in cipher."""
+    src = (ROOT / "crud.py").read_text()
+    at = src.index("_CIPHERTEXT_PREFIX = ")
+    end = src.index("\nasync def create_sp_contact(")
+    ns = {"_pj_decrypt": pj_decrypt}
+    exec(src[at:end], ns)
+    return ns["_decrypt_sp_contact_row"]
+
+
+def _fake_cipher(key="k"):
+    import base64
+
+    def enc(plain):
+        return "U2FsdGVk" + base64.b64encode((key + "|" + plain).encode()).decode()
+
+    def dec(cipher):
+        raw = base64.b64decode(cipher[len("U2FsdGVk"):]).decode()
+        k, _, plain = raw.partition("|")
+        if k != key:
+            raise ValueError("Padding is incorrect.")
+        return plain
+
+    return enc, dec
+
+
+def test_a_readable_contact_comes_back_as_its_address():
+    enc, dec = _fake_cipher()
+    out = _row_fn(dec)({"id": "c", "value": enc("tsp1qexample")})
+    assert out["value"] == "tsp1qexample"
+    assert not out.get("unreadable")
+
+
+def test_a_legacy_plaintext_value_is_left_alone():
+    enc, dec = _fake_cipher()
+    for v in ("tsp1qexample", "sp1qexample", "alice@example.com"):
+        out = _row_fn(dec)({"id": "c", "value": v})
+        assert out["value"] == v and not out.get("unreadable")
+
+
+def test_a_value_encrypted_twice_is_peeled():
+    """The ciphertext re-submitted as an address — which a client that was
+    shown ciphertext could do — decrypts to more ciphertext."""
+    enc, dec = _fake_cipher()
+    out = _row_fn(dec)({"id": "c", "value": enc(enc("tsp1qexample"))})
+    assert out["value"] == "tsp1qexample"
+
+
+def test_an_unopenable_value_is_empty_and_flagged_never_ciphertext():
+    enc, dec = _fake_cipher("another-instance")
+    stored = enc("tsp1qexample")
+    out = _row_fn(_fake_cipher("this-instance")[1])({"id": "c", "value": stored})
+    assert out["unreadable"] is True
+    assert out["value"] == ""
+    assert "U2FsdGVk" not in out["value"]
+
+
+def test_the_swallowing_except_is_gone():
+    body = _fn("crud.py", "_decrypt_sp_contact_row")
+    code = "\n".join(l for l in body.splitlines() if not l.strip().startswith("#"))
+    assert "pass  # legacy" not in code
+    assert "unreadable" in code
+
+
+def test_the_list_does_not_ask_whether_an_unreadable_one_is_a_wallet():
+    body = _fn("views_api.py", "api_sp_contacts_list")
+    assert "c.unreadable" in body

@@ -669,6 +669,9 @@ class SpContact(BaseModel):
     value_sha256: Optional[str] = None
     created_at: Optional[datetime] = None
     last_used_at: Optional[datetime] = None
+    # True when the stored recipient could not be decrypted: `value` is then
+    # empty rather than ciphertext, and a client must not offer it for sending.
+    unreadable: bool = False
 
 
 class CreateSpContactData(BaseModel):

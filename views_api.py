@@ -4877,7 +4877,8 @@ async def api_sp_contacts_list(
     for c in rows:
         d = c.dict()
         d["whispa"] = (
-            None if c.kind != "sp" else (c.value or "").strip().lower() in verified
+            None if c.kind != "sp" or c.unreadable
+            else (c.value or "").strip().lower() in verified
         )
         out.append(d)
     return {"contacts": out}
