@@ -2452,6 +2452,14 @@ def _payjoin_enc_key_candidates() -> list:
     for env in ("AUTH_SECRET_KEY", "LNBITS_AUTH_SECRET", "AUTH_SECRET",
                 "LNBITS_SECRET_KEY", "SECRET_KEY"):
         add(f"env {env}", os.environ.get(env, ""))
+    # KEYS AN OPERATOR HAS RECOVERED, comma-separated. When the instance's
+    # secret was rotated on purpose (LNbits' own incident guidance says to
+    # rotate the secrets in settings), the old one is gone from this host by
+    # design — but it may survive in a pre-upgrade snapshot, an old .env or a
+    # container's environment history. Naming it here makes every row written
+    # under it readable again without handing it to anything else.
+    for i, k in enumerate(os.environ.get("SILNT_LEGACY_AUTH_KEYS", "").split(",")):
+        add(f"SILNT_LEGACY_AUTH_KEYS #{i + 1}", k.strip())
     return out
 
 

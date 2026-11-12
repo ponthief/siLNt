@@ -339,3 +339,15 @@ def test_a_fingerprint_names_a_key_without_being_it():
     # And the log lines carry the fingerprint, never the key.
     log_lines = [l for l in src.splitlines() if "[crypto]" in l or "[contacts]" in l]
     assert log_lines and not any("{primary}" in l or "{key}" in l for l in log_lines)
+
+
+def test_a_recovered_old_key_named_in_the_environment_opens_old_rows(tmp_path):
+    writer = _crypto_ns(tmp_path, auth_secret_key="the-key-before-rotation")
+    stored = writer["_pj_encrypt"]("tsp1qexample")
+    writer["_restore"]()
+    reader = _crypto_ns(tmp_path, auth_secret_key="rotated-key",
+                        env={"SILNT_LEGACY_AUTH_KEYS": "something-else, the-key-before-rotation"})
+    try:
+        assert reader["_pj_decrypt"](stored) == "tsp1qexample"
+    finally:
+        reader["_restore"]()
