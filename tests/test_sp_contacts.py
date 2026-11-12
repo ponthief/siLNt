@@ -283,10 +283,16 @@ def _crypto_ns(tmp_path, *, auth_secret_key, env=None, key_file=None):
     return ns
 
 
+def _legacy(ns, plain):
+    """A row as the OLD scheme wrote it: under LNbits' secret, no prefix."""
+    return ns["FakeCipher"](ns["_payjoin_enc_key"]()).encrypt(plain.encode())
+
+
+
 def test_a_row_written_under_the_key_file_is_read_after_the_env_var_took_over(tmp_path):
     # Written when the file key was current…
     writer = _crypto_ns(tmp_path, auth_secret_key="file-key", key_file="file-key")
-    stored = writer["_pj_encrypt"]("tsp1qexample")
+    stored = _legacy(writer, "tsp1qexample")
     writer["_restore"]()
     # …then AUTH_SECRET_KEY was set, so settings now answers with another key.
     reader = _crypto_ns(tmp_path, auth_secret_key="env-key", key_file="file-key")
@@ -298,7 +304,7 @@ def test_a_row_written_under_the_key_file_is_read_after_the_env_var_took_over(tm
 
 def test_a_row_written_under_the_env_key_is_read_after_it_was_removed(tmp_path):
     writer = _crypto_ns(tmp_path, auth_secret_key="env-key", key_file="file-key")
-    stored = writer["_pj_encrypt"]("tsp1qexample")
+    stored = _legacy(writer, "tsp1qexample")
     writer["_restore"]()
     reader = _crypto_ns(tmp_path, auth_secret_key="file-key", key_file="file-key",
                         env={"AUTH_SECRET_KEY": "env-key"})
@@ -310,7 +316,7 @@ def test_a_row_written_under_the_env_key_is_read_after_it_was_removed(tmp_path):
 
 def test_a_key_nobody_has_still_raises(tmp_path):
     writer = _crypto_ns(tmp_path, auth_secret_key="gone-for-good")
-    stored = writer["_pj_encrypt"]("tsp1qexample")
+    stored = _legacy(writer, "tsp1qexample")
     writer["_restore"]()
     reader = _crypto_ns(tmp_path, auth_secret_key="current", key_file="other")
     try:
@@ -343,7 +349,7 @@ def test_a_fingerprint_names_a_key_without_being_it():
 
 def test_a_recovered_old_key_named_in_the_environment_opens_old_rows(tmp_path):
     writer = _crypto_ns(tmp_path, auth_secret_key="the-key-before-rotation")
-    stored = writer["_pj_encrypt"]("tsp1qexample")
+    stored = _legacy(writer, "tsp1qexample")
     writer["_restore"]()
     reader = _crypto_ns(tmp_path, auth_secret_key="rotated-key",
                         env={"SILNT_LEGACY_AUTH_KEYS": "something-else, the-key-before-rotation"})
@@ -351,3 +357,133 @@ def test_a_recovered_old_key_named_in_the_environment_opens_old_rows(tmp_path):
         assert reader["_pj_decrypt"](stored) == "tsp1qexample"
     finally:
         reader["_restore"]()
+
+
+# ── the extension's OWN key, which LNbits cannot rotate ───────────────────────
+
+def test_new_rows_are_v2_and_survive_the_lnbits_secret_being_rotated(tmp_path):
+    before = _crypto_ns(tmp_path, auth_secret_key="lnbits-secret-1")
+    try:
+        stored = before["_pj_encrypt"]("tsp1qexample")
+        assert stored.startswith("v2:")
+        key_file = tmp_path / ".silnt_enc_key_v1"
+        assert key_file.is_file()
+        assert len(key_file.read_text().strip()) == 64
+        assert oct(key_file.stat().st_mode & 0o777) == oct(0o600)
+    finally:
+        before["_restore"]()
+    # LNbits' secret is rotated — and the data folder keeps the extension's key.
+    after = _crypto_ns(tmp_path, auth_secret_key="lnbits-secret-2-after-incident")
+    try:
+        assert after["_pj_decrypt"](stored) == "tsp1qexample"
+    finally:
+        after["_restore"]()
+
+
+def test_the_env_key_wins_over_the_file_and_must_be_long_enough(tmp_path):
+    long_key = "k" * 40
+    ns = _crypto_ns(tmp_path, auth_secret_key="x", env={"SILNT_ENC_KEY": long_key})
+    try:
+        assert ns["_silnt_enc_key"]() == long_key
+        assert not (tmp_path / ".silnt_enc_key_v1").exists()
+    finally:
+        ns["_restore"]()
+    short = _crypto_ns(tmp_path, auth_secret_key="x", env={"SILNT_ENC_KEY": "short"})
+    try:
+        import pytest
+        with pytest.raises(RuntimeError):
+            short["_silnt_enc_key"]()
+        # …and saving still works, under the legacy scheme, rather than failing.
+        assert not short["_pj_encrypt"]("tsp1qexample").startswith("v2:")
+    finally:
+        short["_restore"]()
+
+
+def test_a_v2_row_is_not_tried_against_lnbits_keys(tmp_path):
+    a = _crypto_ns(tmp_path / "a" if (tmp_path / "a").mkdir() is None else tmp_path,
+                   auth_secret_key="s")
+    stored = a["_pj_encrypt"]("tsp1qexample")
+    a["_restore"]()
+    other = tmp_path / "b"
+    other.mkdir()
+    b = _crypto_ns(other, auth_secret_key="s")  # a DIFFERENT extension key
+    try:
+        import pytest
+        with pytest.raises(Exception):
+            b["_pj_decrypt"](stored)
+    finally:
+        b["_restore"]()
+
+
+def test_a_v2_value_is_recognised_as_ciphertext_by_the_contact_reader():
+    enc, dec = _fake_cipher()
+    row = _row_fn(lambda v: dec(v[len("v2:"):]) if v.startswith("v2:") else dec(v))
+    out = row({"id": "c", "value": "v2:" + enc("tsp1qexample")})
+    assert out["value"] == "tsp1qexample"
+    unreadable = _row_fn(lambda v: (_ for _ in ()).throw(ValueError("x")))(
+        {"id": "c", "value": "v2:whatever"})
+    assert unreadable["unreadable"] is True and unreadable["value"] == ""
+
+
+class _FakeDb:
+    def __init__(self, rows):
+        self.rows = rows            # (table, col) -> list of dict rows
+        self.updates = []
+
+    async def fetchall(self, sql, params):
+        for (table, col), rows in self.rows.items():
+            if f"FROM {table} " in sql and f"{col} AS _v" in sql:
+                return [dict(r) for r in rows if not r["_v"].startswith("v2:")]
+        return []
+
+    async def execute(self, sql, params):
+        self.updates.append((sql, params))
+
+
+def test_the_migration_rewrites_readable_rows_and_leaves_the_rest(tmp_path):
+    import asyncio
+    import sys
+
+    ns = _crypto_ns(tmp_path, auth_secret_key="current")
+    try:
+        legacy = ns["FakeCipher"]("current").encrypt(b"tsp1qreadable")
+        lost = ns["FakeCipher"]("gone").encrypt(b"tsp1qlost")
+        twice = ns["FakeCipher"]("current").encrypt(legacy.encode())
+        db = _FakeDb({
+            ("silnt.sp_contacts", "value"): [
+                {"id": "a", "_v": legacy},
+                {"id": "b", "_v": lost},
+                {"id": "c", "_v": "alice@example.com"},     # legacy plaintext
+                {"id": "d", "_v": twice},                    # encrypted twice
+                {"id": "e", "_v": "v2:already"},             # already migrated
+            ],
+        })
+        src = (ROOT / "crud.py").read_text()
+        block = src[src.index("_REENCRYPT_TARGETS = ("):src.index(
+            "# ── SP send contacts (per-user private address book)")]
+        ns2 = dict(ns)
+        ns2.update({"db": db, "_CIPHERTEXT_PREFIX": "U2FsdGVk"})
+        exec(block, ns2)
+        result = asyncio.run(ns2["reencrypt_legacy_rows"]())
+
+        assert result["done"] == 1, result
+        assert result["unreadable"] == 1, result
+        assert len(db.updates) == 1
+        sql, params = db.updates[0]
+        assert "silnt.sp_contacts" in sql and "AND value = :old" in sql
+        assert params["p0"] == "a" and params["old"] == legacy
+        assert params["new"].startswith("v2:")
+        # What was written reads back to the same address.
+        assert ns2["_pj_decrypt"](params["new"]) == "tsp1qreadable"
+    finally:
+        ns["_restore"]()
+
+
+def test_the_migration_never_writes_without_a_round_trip_and_names_its_tables():
+    body = (ROOT / "crud.py").read_text()
+    at = body.index("async def reencrypt_legacy_rows")
+    fn = body[at:body.index("# ── SP send contacts (per-user private address book)")]
+    assert "_pj_decrypt(new) != plain" in fn          # verified before writing
+    assert "AND {col} = :old" in fn                    # conditional on what was read
+    for col in ("scan_secret", "ln_address", '"address"', "descriptor", "xpub"):
+        assert col in body[body.index("_REENCRYPT_TARGETS = ("):at]

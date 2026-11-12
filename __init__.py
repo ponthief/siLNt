@@ -142,6 +142,22 @@ async def _tango_sweep_loop():
         await asyncio.sleep(300)   # every 5 min
 
 
+async def _reencrypt_loop():
+    """Move legacy-scheme rows onto the extension's own key (crud.reencrypt_legacy_rows).
+
+    First pass shortly after start, once migrations have run; then hourly,
+    because it is idempotent and cheap and a row written by an older build is
+    caught on the next pass. It rewrites only rows that decrypt."""
+    from .crud import reencrypt_legacy_rows
+    await asyncio.sleep(30)
+    while True:
+        try:
+            await reencrypt_legacy_rows()
+        except Exception as exc:
+            logger.error(f"[silnt] re-encrypt pass error: {exc_text(exc)}")
+        await asyncio.sleep(3600)
+
+
 # in async def silnt_start() / wherever the ext starts its tasks:
 def siLNt_start():
     # PAUSED 2026-09-29 — _refund_loop is not started.
@@ -171,6 +187,8 @@ def siLNt_start():
     # changed.
     # task = create_permanent_unique_task("ext_silnt", _refund_loop)
     # scheduled_tasks.append(task)
+    reenc_task = create_permanent_unique_task("ext_silnt_reencrypt", _reencrypt_loop)
+    scheduled_tasks.append(reenc_task)
     tamper_task = create_permanent_unique_task("ext_silnt_tamper", _tamper_sweep_loop)
     scheduled_tasks.append(tamper_task)
     health_task = create_permanent_unique_task("ext_silnt_health", _health_monitor_loop)

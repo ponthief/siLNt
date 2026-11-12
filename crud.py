@@ -2374,9 +2374,103 @@ def _payjoin_enc_key() -> str:
     seed = seed or os.environ.get("LNBITS_DATA_FOLDER", "") or "silnt-static-fallback"
     return hashlib.sha256(("silnt-pj-enc|" + seed).encode()).hexdigest()
 
+# ── The extension's OWN at-rest key ───────────────────────────────────────────
+#
+# Everything above resolves LNbits' `auth_secret_key`, which is LNbits' to
+# rotate — and was, in the 1.7.0 incident response (2026-11-12: contacts,
+# PayJoin descriptors and Tango addresses all stopped decrypting, with the old
+# secret gone by design). Data this extension encrypts must not depend on a
+# secret somebody else is told to rotate, so new rows are written under a key
+# that belongs here:
+#
+#   1. SILNT_ENC_KEY in the environment (at least 32 characters) — the
+#      operator's own, kept wherever the deployment keeps secrets; or
+#   2. `<lnbits data folder>/.silnt_enc_key_v1`, generated once, mode 0600.
+#
+# Rows written this way carry a `v2:` prefix, which is how a reader knows which
+# key to use without trying them all. Rows without it are the legacy scheme and
+# stay readable through `_payjoin_enc_key_candidates`.
+_V2_PREFIX = "v2:"
+_SILNT_KEY_FILE = ".silnt_enc_key_v1"
+_silnt_key_cache: dict = {}
+
+
+def _silnt_enc_key() -> str:
+    """The extension's own key. Raises RuntimeError rather than inventing one
+    that cannot be kept: a key generated and then lost makes every row written
+    under it unreadable, which is the failure this exists to end."""
+    import os
+
+    if "key" in _silnt_key_cache:
+        return _silnt_key_cache["key"]
+
+    env = os.environ.get("SILNT_ENC_KEY", "").strip()
+    if env:
+        if len(env) < 32:
+            raise RuntimeError(
+                "SILNT_ENC_KEY is set but shorter than 32 characters; "
+                "use `openssl rand -hex 32`."
+            )
+        _silnt_key_cache["key"] = env
+        _silnt_key_cache["source"] = "env SILNT_ENC_KEY"
+        return env
+
+    from pathlib import Path
+    try:
+        from lnbits.settings import settings as _s
+        folder = getattr(_s, "lnbits_data_folder", None)
+    except Exception:
+        folder = None
+    if not folder:
+        raise RuntimeError("no data folder to keep the extension key in")
+    path = Path(folder, _SILNT_KEY_FILE)
+    try:
+        if path.is_file():
+            key = path.read_text().strip()
+            if len(key) < 32:
+                raise RuntimeError(f"{path} exists but holds no usable key")
+            _silnt_key_cache["key"] = key
+            _silnt_key_cache["source"] = "key file"
+            return key
+        import secrets
+        key = secrets.token_hex(32)
+        # O_EXCL so two workers starting together cannot each write their own.
+        try:
+            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            key = path.read_text().strip()
+            _silnt_key_cache["key"] = key
+            _silnt_key_cache["source"] = "key file"
+            return key
+        with os.fdopen(fd, "w") as f:
+            f.write(key)
+        _silnt_key_cache["key"] = key
+        _silnt_key_cache["source"] = "key file (generated just now)"
+        _silnt_key_cache["generated"] = True
+        return key
+    except OSError as e:
+        raise RuntimeError(f"cannot keep the extension key in {path}: {e}")
+
+
 def _pj_encrypt(plaintext: str) -> str:
+    """Encrypt under the extension's own key, `v2:`-prefixed.
+
+    If that key cannot be had (no env, unwritable data folder) this falls back
+    to the legacy scheme rather than refusing to save somebody's data, and says
+    so — a loud degradation, not a silent one."""
     from lnbits.utils.crypto import AESCipher
-    return AESCipher(key=_payjoin_enc_key()).encrypt(plaintext.encode())
+
+    try:
+        return _V2_PREFIX + AESCipher(key=_silnt_enc_key()).encrypt(plaintext.encode())
+    except RuntimeError as e:
+        if "warned" not in _silnt_key_cache:
+            _silnt_key_cache["warned"] = True
+            from loguru import logger as _logger
+            _logger.error(
+                f"[crypto] writing under LNbits' auth secret, which LNbits can "
+                f"rotate: {e}. Set SILNT_ENC_KEY (openssl rand -hex 32)."
+            )
+        return AESCipher(key=_payjoin_enc_key()).encrypt(plaintext.encode())
 
 def _strip_residual_padding(s: str) -> str:
     """AESCipher can leave a residual PKCS7 padding block on the decrypted string
@@ -2476,6 +2570,13 @@ def _plausible_plaintext(plain: str) -> bool:
 
 def _pj_decrypt(ciphertext: str) -> str:
     from lnbits.utils.crypto import AESCipher
+
+    # A `v2:` row is under the extension's own key and nothing else's: trying
+    # LNbits' secrets on it would be asking the wrong keys.
+    if (ciphertext or "").startswith(_V2_PREFIX):
+        return _strip_residual_padding(
+            AESCipher(key=_silnt_enc_key()).decrypt(ciphertext[len(_V2_PREFIX):])
+        )
 
     primary = _payjoin_enc_key()
     try:
@@ -3070,6 +3171,94 @@ async def list_expired_payjoin_requests(now_ts: Optional[int] = None) -> list[Pa
     )
     return [PayjoinRequest(**r) for r in rows]
 
+# ── Moving legacy rows onto the extension's own key ──────────────────────────
+#
+# (table, primary key columns, encrypted column). Names are constants, never
+# input, which is what makes interpolating them into SQL below safe.
+_REENCRYPT_TARGETS = (
+    ("silnt.background_scan", ("wallet_id",), "scan_secret"),
+    ("silnt.tango_ln_addresses", ("user_id", "network"), "address"),
+    ("silnt.tango_change_payouts", ("txid", "vout"), "ln_address"),
+    ("silnt.sp_contacts", ("id",), "value"),
+    ("silnt.payjoin_descriptors", ("id",), "descriptor"),
+    ("silnt.payjoin_descriptors", ("id",), "xpub"),
+)
+
+
+async def reencrypt_legacy_rows() -> dict:
+    """Rewrite every readable legacy-scheme row under the extension's own key.
+
+    Idempotent and cheap once done, so it runs on a timer as well as at start:
+    a row written by an older build, or while the key could not be had, is
+    caught on the next pass. Four rules, each a way to lose data:
+
+    - A row is rewritten only if it DECRYPTS. An unreadable one is counted and
+      left exactly as it is — it may yet open if somebody finds the old key
+      and names it in SILNT_LEGACY_AUTH_KEYS.
+    - The new value is READ BACK and compared before anything is written.
+    - The UPDATE is conditional on the column still holding the value that was
+      read, so a row changed in between is skipped rather than overwritten.
+    - Plaintext legacy rows and doubly-encrypted ones are left alone: neither
+      is something this should be guessing about.
+    """
+    from loguru import logger as _logger
+
+    done = unreadable = skipped = 0
+    for table, pks, col in _REENCRYPT_TARGETS:
+        try:
+            rows = await db.fetchall(
+                f"SELECT {', '.join(pks)}, {col} AS _v FROM {table} "
+                f"WHERE {col} IS NOT NULL AND {col} <> '' "
+                f"AND {col} NOT LIKE 'v2:%'",
+                {},
+            )
+        except Exception as e:  # a table an older schema does not have
+            _logger.warning(f"[crypto] re-encrypt skipped {table}.{col}: {e}")
+            continue
+        for r in rows:
+            old = r["_v"]
+            if not old.startswith(_CIPHERTEXT_PREFIX):
+                skipped += 1  # legacy plaintext
+                continue
+            try:
+                plain = _pj_decrypt(old)
+            except Exception:
+                unreadable += 1
+                continue
+            if not plain or plain.startswith(_CIPHERTEXT_PREFIX):
+                skipped += 1  # empty, or encrypted twice
+                continue
+            try:
+                new = _pj_encrypt(plain)
+                if not new.startswith("v2:") or _pj_decrypt(new) != plain:
+                    skipped += 1  # own key unavailable, or it did not round-trip
+                    continue
+            except Exception:
+                skipped += 1
+                continue
+            where = " AND ".join(f"{k} = :p{i}" for i, k in enumerate(pks))
+            params = {f"p{i}": r[k] for i, k in enumerate(pks)}
+            params.update({"new": new, "old": old})
+            await db.execute(
+                f"UPDATE {table} SET {col} = :new WHERE {where} AND {col} = :old",
+                params,
+            )
+            done += 1
+    if done or unreadable:
+        _logger.info(
+            f"[crypto] re-encrypted {done} row(s) under the extension key; "
+            f"{unreadable} could not be read with any key this instance knows"
+        )
+    if _silnt_key_cache.get("generated"):
+        _logger.warning(
+            "[crypto] the extension key was generated on this start. If rows "
+            "starting 'v2:' already exist, the old key file was lost and they "
+            "cannot be read — restore .silnt_enc_key_v1 or set SILNT_ENC_KEY."
+        )
+        _silnt_key_cache["generated"] = False
+    return {"done": done, "unreadable": unreadable, "skipped": skipped}
+
+
 # ── SP send contacts (per-user private address book) ──────────────────────────
 def _spc_hash(value: str) -> str:
     import hashlib
@@ -3082,6 +3271,12 @@ def _classify_recipient(value: str) -> str:
 # base64("Salted__"): what AESCipher output starts with, and the only reason a
 # stored contact value can ever be mistaken for an address.
 _CIPHERTEXT_PREFIX = "U2FsdGVk"
+
+
+def _is_ciphertext(value: str) -> bool:
+    """Legacy ciphertext starts with the cipher's header; the extension's own
+    scheme puts `v2:` in front of it. No recipient starts with either."""
+    return value.startswith(_CIPHERTEXT_PREFIX) or value.startswith("v2:")
 
 
 def _decrypt_sp_contact_row(row: dict) -> dict:
@@ -3103,7 +3298,7 @@ def _decrypt_sp_contact_row(row: dict) -> dict:
     """
     out = dict(row)
     value = out.get("value") or ""
-    if not value.startswith(_CIPHERTEXT_PREFIX):
+    if not _is_ciphertext(value):
         return out  # legacy plaintext
     for _ in range(3):
         try:
@@ -3118,7 +3313,7 @@ def _decrypt_sp_contact_row(row: dict) -> dict:
             out["value"] = ""
             out["unreadable"] = True
             return out
-        if not value.startswith(_CIPHERTEXT_PREFIX):
+        if not _is_ciphertext(value):
             out["value"] = value
             return out
     out["value"] = ""
