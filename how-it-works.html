@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>How WhiSPa Wallet works — registration and the layers underneath</title>
-<meta name="description" content="How to sign up to WhiSPa Wallet with an anonymous alias, and the open components it is built on.">
+<meta name="description" content="No KYC — just an email address to sign up. How to use an anonymous alias, and the open components WhiSPa is built on.">
 <link rel="icon" type="image/png" href="whispa-mark.png">
 <link rel="apple-touch-icon" href="whispa-icon-180.png">
 <meta property="og:title" content="How WhiSPa Wallet works — registration and the layers underneath">
@@ -54,35 +54,27 @@
 
 <div class="wrap page-head">
   <h1>How WhiSPa works</h1>
-  <p class="lead">How to register without giving your name, and the open components doing the work underneath — none of which ever see the key that spends your bitcoin.</p>
+  <p class="lead"><strong>No KYC.</strong> Just an email address is all that is required.</p>
 </div>
 
 <section class="wrap" id="registration">
   <div class="sec-head">
     <div class="sec-tag">Registration</div>
-    <p class="sec-sub" style="margin-top:0">One contact email is the only personal detail you are ever asked for.</p>
+    <div class="sec-title">Sign up</div>
   </div>
-  <div class="pills">
-    <div class="pill">
-      <div class="name">Proving the address works <span class="b">sign-up</span></div>
-      <div class="role">No account is created until you click the link we send. On a server anyone can reach, that is what stops the instance filling with automated sign-ups.</div>
+  <div class="stack">
+    <div class="step">
+      <div class="layer">Step 01</div>
+      <h4>Enter a username, password and email</h4>
     </div>
-    <div class="pill">
-      <div class="name">Getting back in <span class="b">password reset</span></div>
-      <div class="role">Forget your password and the reset link goes to that address. There is no other route back into the account.</div>
+    <div class="step">
+      <div class="layer">Step 02</div>
+      <h4>Click the link in the email, or type its six-digit code</h4>
     </div>
-    <div class="pill">
-      <div class="name">Confirming a new device <span class="b">login</span></div>
-      <div class="role">A login from a device the server has not seen before has to be confirmed by email first, so a stolen password on its own isn't enough to get in.</div>
+    <div class="step">
+      <div class="layer">Step 03</div>
+      <h4>Confirm each new device by email the first time you sign in</h4>
     </div>
-    <div class="pill">
-      <div class="name">Nothing else <span class="b">no marketing</span></div>
-      <div class="role">No newsletter, no analytics, no sharing with anyone. Those three messages are every email WhiSPa will ever send you.</div>
-    </div>
-  </div>
-
-  <div class="panel-note" style="margin-top:22px">
-    <p><strong>The email has nothing to do with your bitcoin.</strong> Your spend key is derived and kept on your device and never reaches the server, so no one holding your email — us, your mail provider, or somebody who takes the account over — can move your coins. The other half of that matters just as much: <strong>the email cannot recover your bitcoin either.</strong> A reset link gets you back into the account; only your seed backup gets you back to your funds.</p>
   </div>
 </section>
 
