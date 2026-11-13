@@ -4,11 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>How WhiSPa Wallet works — registration and the layers underneath</title>
-<meta name="description" content="Why WhiSPa Wallet asks for an email at registration, how to sign up with an anonymous alias, and the open components it is built on.">
+<meta name="description" content="How to sign up to WhiSPa Wallet with an anonymous alias, and the open components it is built on.">
 <link rel="icon" type="image/png" href="whispa-mark.png">
 <link rel="apple-touch-icon" href="whispa-icon-180.png">
 <meta property="og:title" content="How WhiSPa Wallet works — registration and the layers underneath">
-<meta property="og:description" content="Why WhiSPa Wallet asks for an email at registration, how to sign up with an anonymous alias, and the open components it is built on.">
+<meta property="og:description" content="How to sign up to WhiSPa Wallet with an anonymous alias, and the open components it is built on.">
 <meta property="og:image" content="whispa-og.png">
 <meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -54,14 +54,13 @@
 
 <div class="wrap page-head">
   <h1>How WhiSPa works</h1>
-  <p class="lead">Why registering asks for an email, how to give one without giving your name, and the open components doing the work underneath — none of which ever see the key that spends your bitcoin.</p>
+  <p class="lead">How to register without giving your name, and the open components doing the work underneath — none of which ever see the key that spends your bitcoin.</p>
 </div>
 
 <section class="wrap" id="registration">
   <div class="sec-head">
     <div class="sec-tag">Registration</div>
-    <div class="sec-title">Why WhiSPa asks for an email</div>
-    <p class="sec-sub">WhiSPa ships as an LNbits extension, so the wallet has a server-side account behind it. That account needs one contact address, and it is the only personal detail you are ever asked for.</p>
+    <p class="sec-sub" style="margin-top:0">One contact email is the only personal detail you are ever asked for.</p>
   </div>
   <div class="pills">
     <div class="pill">
@@ -130,12 +129,7 @@
       <p>Derives keys and signs on your device. The server only broadcasts what you already signed.</p>
     </div>
     <div class="step">
-      <div class="layer">Layer 02 · Backend</div>
-      <h4>LNbits — accounts &amp; orchestration</h4>
-      <p>WhiSPa ships as an LNbits extension, inheriting multi-user accounts, auth, and device confirmation.</p>
-    </div>
-    <div class="step">
-      <div class="layer">Layer 03 · Indexing</div>
+      <div class="layer">Layer 02 · Indexing</div>
       <h4>BlindBit &amp; Fulcrum — indexing the chain</h4>
       <p>BlindBit precomputes tweak and UTXO data so scanning is quick; Fulcrum serves lookups. Neither sees your spend key.</p>
     </div>
@@ -147,13 +141,9 @@
   <div class="sec-head">
     <div class="sec-tag">Built on</div>
     <div class="sec-title">Open foundations</div>
-    <p class="sec-sub">Every piece is open source and self-hostable — run your own and nothing sits between you and the chain.</p>
+    <p class="sec-sub">WhiSPa is open source under the <strong>MIT licence</strong>, and so is everything it runs on — run your own and nothing sits between you and the chain.</p>
   </div>
   <div class="pills">
-    <div class="pill">
-      <div class="name">LNbits <span class="b">accounts + API</span></div>
-      <div class="role">Multi-user, self-hosted Bitcoin backend. WhiSPa is an extension on top.</div>
-    </div>
     <div class="pill">
       <div class="name">BlindBit <span class="b">SP oracle</span></div>
       <div class="role">Silent Payments indexer — precomputed tweak and UTXO data for fast scanning.</div>
@@ -163,6 +153,7 @@
       <div class="role">Address and transaction lookups without a third-party explorer.</div>
     </div>
   </div>
+  <p class="also"><a href="https://github.com/ponthief/thrilla/blob/master/LICENSE" target="_blank" rel="noopener noreferrer">Read the MIT licence →</a></p>
 </section>
 
 <div class="wrap">
