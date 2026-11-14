@@ -3338,6 +3338,7 @@ async def reencrypt_legacy_rows() -> dict:
     from loguru import logger as _logger
 
     done = unreadable = skipped = rekeyed = 0
+    v2_total = v2_stuck = 0
     for table, pks, col in _REENCRYPT_TARGETS:
         try:
             rows = await db.fetchall(
@@ -3403,6 +3404,7 @@ async def reencrypt_legacy_rows() -> dict:
                 continue
             for r in rows:
                 old = r["_v"]
+                v2_total += 1
                 try:  # already under the active key: nothing to do
                     AESCipher(key=active_key).decrypt(old[len("v2:"):])
                     continue
@@ -3412,18 +3414,22 @@ async def reencrypt_legacy_rows() -> dict:
                     plain = _pj_decrypt(old)  # opens via the other key, or raises
                 except Exception:
                     unreadable += 1
+                    v2_stuck += 1
                     continue
                 if not plain:
                     skipped += 1
+                    v2_stuck += 1
                     continue
                 try:
                     new = _pj_encrypt(plain)
                     back = AESCipher(key=active_key).decrypt(new[len("v2:"):])
                     if not new.startswith("v2:") or _strip_residual_padding(back) != plain:
                         skipped += 1
+                        v2_stuck += 1
                         continue
                 except Exception:
                     skipped += 1
+                    v2_stuck += 1
                     continue
                 where = " AND ".join(f"{k} = :p{i}" for i, k in enumerate(pks))
                 params = {f"p{i}": r[k] for i, k in enumerate(pks)}
@@ -3445,6 +3451,25 @@ async def reencrypt_legacy_rows() -> dict:
             )
         if rekeyed:
             _logger.info(f"[crypto] moved {rekeyed} row(s) under the active extension key")
+        # SAY WHAT IS LEFT, once per change. The pass used to log only when it
+        # moved something, so after the last row went the log said nothing, and
+        # silence could not be told from a pass that was not running. Reported
+        # 2026-11-14: "there were 5 rows moved… no update on what is left".
+        status = ("clean", v2_total) if not v2_stuck else ("stuck", v2_stuck)
+        if _silnt_key_cache.get("v2_status") != status:
+            _silnt_key_cache["v2_status"] = status
+            if v2_stuck:
+                _logger.warning(
+                    f"[crypto] {v2_stuck} v2 row(s) open under neither extension "
+                    "key (or could not be rewritten) and were left untouched; "
+                    "keep both keys"
+                )
+            else:
+                _logger.info(
+                    f"[crypto] all {v2_total} v2 row(s) now open under the active "
+                    "extension key; the other key is no longer needed by any row "
+                    "(copy it aside before deleting it)"
+                )
     if done or unreadable:
         _logger.info(
             f"[crypto] re-encrypted {done} row(s) under the extension key; "
@@ -3458,7 +3483,7 @@ async def reencrypt_legacy_rows() -> dict:
         )
         _silnt_key_cache["generated"] = False
     return {"done": done, "unreadable": unreadable, "skipped": skipped,
-            "rekeyed": rekeyed}
+            "rekeyed": rekeyed, "v2_left": v2_stuck}
 
 
 # ── SP send contacts (per-user private address book) ──────────────────────────

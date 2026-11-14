@@ -630,6 +630,7 @@ def test_the_migration_moves_file_key_rows_under_the_env_key(tmp_path):
 
         assert result["rekeyed"] == 1, result
         assert result["unreadable"] == 1, result          # the one nobody has a key for
+        assert result["v2_left"] == 1, result             # and it is reported as left
         assert len(db.updates) == 1
         sql, params = db.updates[0]
         assert params["p0"] == "f" and params["old"] == under_file
@@ -641,5 +642,31 @@ def test_the_migration_moves_file_key_rows_under_the_env_key(tmp_path):
         db.rows[("silnt.sp_contacts", "value")][0]["_v"] = params["new"]
         again = asyncio.run(ns2["reencrypt_legacy_rows"]())
         assert again["rekeyed"] == 0 and not db.updates, again
+    finally:
+        ns["_restore"]()
+
+
+def test_the_pass_says_when_nothing_is_left_under_the_other_key(tmp_path):
+    import asyncio
+
+    ns = _crypto_ns(tmp_path, auth_secret_key="x", dotenv=f"SILNT_ENC_KEY={KEY_A}\n")
+    try:
+        (tmp_path / ".silnt_enc_key_v1").write_text(KEY_B)
+        Cipher = ns["FakeCipher"]
+        db = _FakeDb({
+            ("silnt.sp_contacts", "value"): [
+                {"id": "f", "_v": "v2:" + Cipher(KEY_B).encrypt(b"tsp1qfromfile")},
+                {"id": "e", "_v": "v2:" + Cipher(KEY_A).encrypt(b"tsp1qfromenv")},
+            ],
+        })
+        src = (ROOT / "crud.py").read_text()
+        block = src[src.index("_REENCRYPT_TARGETS = ("):src.index(
+            "# ── SP send contacts (per-user private address book)")]
+        ns2 = dict(ns)
+        ns2.update({"db": db, "_CIPHERTEXT_PREFIX": "U2FsdGVk"})
+        exec(block, ns2)
+        first = asyncio.run(ns2["reencrypt_legacy_rows"]())
+        assert first["rekeyed"] == 1 and first["v2_left"] == 0, first
+        assert ns2["_silnt_key_cache"]["v2_status"] == ("clean", 2)
     finally:
         ns["_restore"]()
