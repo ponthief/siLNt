@@ -1,6 +1,6 @@
 from typing import Optional, List
 from fastapi import Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 import re
 
@@ -139,12 +139,34 @@ class CreateWallet(BaseModel):
     network: str = "mainnet"
     passphrase: Optional[str] = ""
     hr_address: Optional[str] = None
-    last_height: str = None
+    last_height: Optional[str] = None
     balance: Optional[int] = None
     # Client-derived Silent Payments address. When present, the client generated
     # the seed and derived keys on-device (server never sees the mnemonic), so the
     # server stores this address as-is and skips server-side generation/derivation.
     sp_address: Optional[str] = None
+
+    @field_validator("last_height", mode="before")
+    @classmethod
+    def _birth_height_as_text(cls, v):
+        """Accept a block height as a number or as digits.
+
+        Both clients send a JSON number; the field is text because the legacy
+        server-derive path uses str(height) as the mnemonic's encryption key.
+        Pydantic v1 coerced int to str silently and v2 refuses, which turned
+        every wallet import and restore into "Input should be valid string".
+        A bool is an int in Python and is not a height; anything that is not
+        plain digits is refused here rather than as a ValueError later.
+        """
+        if v is None or v == "":
+            return None
+        if isinstance(v, bool):
+            raise ValueError("last_height must be a block height")
+        if isinstance(v, int):
+            v = str(v)
+        if isinstance(v, str) and v.strip().isascii() and v.strip().isdigit():
+            return str(int(v.strip()))
+        raise ValueError("last_height must be a non-negative whole number")
 
 
 class WalletAccount(BaseModel):
