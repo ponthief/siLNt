@@ -20,6 +20,7 @@ from ..crud import (
     update_balance,
     ensure_labeled_address_row
 )
+from . import rust_matcher
 from .appenv import silnt_env
 from .dust_check import evaluate_dust_for_wallet
 from .wallet import generate_labeled_sp_address, get_spend_pub_from_secret
@@ -636,6 +637,7 @@ async def aclose_http() -> None:
     if _mempool_http is not None and not _mempool_http.is_closed:
         await _mempool_http.aclose()
     _mempool_http = None
+    await rust_matcher.aclose()
 
 
 @dataclass
@@ -671,6 +673,12 @@ class OracleStats:
     # If both are large, they are running in sequence and something broke the
     # pipeline.
     match_batch_seconds: float = 0.0
+    # The optional out-of-process matcher (helpers/rust_matcher.py). All zero
+    # unless SILNT_RUST_MATCHER_NETWORKS names this wallet's network.
+    rust_blocks: int = 0          # blocks the service answered
+    rust_seconds: float = 0.0     # wall time of those requests
+    rust_fallbacks: int = 0       # blocks the service could not answer (Python did)
+    rust_mismatches: int = 0      # shadow mode: blocks where the answers differed
 
     def as_dict(self) -> dict:
         return {
@@ -688,6 +696,10 @@ class OracleStats:
             "match_batch_seconds": round(self.match_batch_seconds, 2),
             "spent_seconds": round(self.spent_seconds, 2),
             "persist_seconds": round(self.persist_seconds, 2),
+            "rust_blocks": self.rust_blocks,
+            "rust_seconds": round(self.rust_seconds, 2),
+            "rust_fallbacks": self.rust_fallbacks,
+            "rust_mismatches": self.rust_mismatches,
             "unaccounted_seconds": round(
                 self.wall_seconds
                 - self.fetch_seconds - self.match_batch_seconds
@@ -708,6 +720,13 @@ class OracleStats:
             f"{self.request_seconds:.1f}s summed across concurrent requests | "
             f"{self.match_seconds:.1f}s matching | "
             f"{self.tweaks} tweaks ({tw:.0f}/block), {self.utxos} utxos"
+            + (
+                f" | rust matcher: {self.rust_blocks} blocks in "
+                f"{self.rust_seconds:.1f}s, {self.rust_fallbacks} fell back, "
+                f"{self.rust_mismatches} MISMATCHED"
+                if (self.rust_blocks or self.rust_fallbacks or self.rust_mismatches)
+                else ""
+            )
         )
 
     def phases(self) -> str:
@@ -906,6 +925,171 @@ async def _match_in_thread(client, fn, *args):
         client.stats.match_seconds += time.perf_counter() - started
 
 
+def _fingerprint(owned) -> list:
+    """Everything that must agree between two matchers, as a comparable list.
+
+    Timestamps are compared as the UTXO supplied them, which is why this runs
+    BEFORE _resolve_timestamps fills in the ones the oracle left at zero.
+    """
+    return sorted(
+        (
+            o.txid.hex(), int(o.vout), int(o.amount), o.pub_key.hex(),
+            o.priv_key_tweak.hex(), o.label.m if o.label else None,
+            int(o.timestamp or 0),
+        )
+        for o in owned
+    )
+
+
+def _owned_from_service(height: int, matches, label_by_m: dict) -> list:
+    """The service's matches as OwnedUTXO. Raises KeyError for a label index we
+    did not ask about, which the caller treats as "no usable answer"."""
+    return [
+        OwnedUTXO(
+            txid=m.txid,
+            vout=m.vout,
+            amount=m.amount,
+            priv_key_tweak=m.priv_key_tweak,
+            pub_key=m.pub_key,
+            utxo_state="unspent",
+            timestamp=m.timestamp,
+            label=None if m.label_m is None else label_by_m[m.label_m],
+        )
+        for m in matches
+    ]
+
+
+async def _service_match(cfg, client, jobs, scan_secret_bytes, spend_pub_bytes, labels) -> dict:
+    """Ask the service. Returns {height: [OwnedUTXO]} for blocks it answered.
+
+    NEVER raises (bar cancellation) and never returns a block it did not answer
+    cleanly: a transport failure, a bad response, a block it reported an error
+    for, or a label we did not ask about all leave that height OUT of the
+    result, and the caller matches it in Python. The one thing this must not do
+    is turn "I could not tell" into "there is nothing here".
+    """
+    label_by_m = {l.m: l for l in labels}
+    started = time.perf_counter()
+    try:
+        raw = await rust_matcher.match_blocks(
+            cfg,
+            scan_secret=scan_secret_bytes,
+            spend_pub=spend_pub_bytes,
+            label_indices=[l.m for l in labels],
+            jobs=[
+                (h, "reverse" if fn is sync_block_reverse else "forward", entries, utxos)
+                for h, fn, entries, utxos in jobs
+            ],
+        )
+    except rust_matcher.MatcherUnavailable as e:
+        client.stats.rust_fallbacks += len(jobs)
+        rust_matcher._warn_every(
+            "unavailable", 60,
+            "rust matcher gave no answer ({}); matching {} block(s) in-process",
+            e, len(jobs),
+        )
+        return {}
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # a bug here must not stop a scan
+        client.stats.rust_fallbacks += len(jobs)
+        rust_matcher._warn_every(
+            "unexpected", 60,
+            "rust matcher failed unexpectedly ({}: {}); matching in-process",
+            type(e).__name__, e,
+        )
+        return {}
+    finally:
+        client.stats.rust_seconds += time.perf_counter() - started
+
+    out: dict = {}
+    for h, _fn, _entries, _utxos in jobs:
+        res = raw.get(h)
+        if res is None or isinstance(res, str):
+            client.stats.rust_fallbacks += 1
+            if isinstance(res, str):
+                rust_matcher._warn_every(
+                    f"block-error:{res}", 60,
+                    "rust matcher could not process block {}: {}; matching it "
+                    "in-process", h, res,
+                )
+            continue
+        try:
+            out[h] = _owned_from_service(h, res, label_by_m)
+        except KeyError:
+            client.stats.rust_fallbacks += 1
+            logger.warning(
+                f"rust matcher returned a label index this wallet does not scan "
+                f"for block {h}; matching it in-process"
+            )
+            continue
+        client.stats.rust_blocks += 1
+    return out
+
+
+def _report_shadow(client, height, python_owned, service_owned) -> None:
+    """Shadow mode: say loudly if the two matchers disagree about a block."""
+    py, rs = _fingerprint(python_owned), _fingerprint(service_owned)
+    if py == rs:
+        return
+    client.stats.rust_mismatches += 1
+    only_py = [x for x in py if x not in rs]
+    only_rs = [x for x in rs if x not in py]
+    # Identify, never reproduce: txid, vout and chain are enough to find the
+    # output; the key tweaks stay out of the log.
+    short = lambda rows: [(r[0][:16], r[1], r[5]) for r in rows[:5]]  # noqa: E731
+    logger.error(
+        f"RUST MATCHER MISMATCH at block {height}: python found {len(py)}, "
+        f"service found {len(rs)}. Only python: {short(only_py)}. "
+        f"Only service: {short(only_rs)}. Python's result is used."
+    )
+
+
+async def _match_jobs(client, jobs, scan_secret_bytes, spend_pub_bytes, labels, network) -> dict:
+    """Match blocks. `jobs` are (height, matcher, entries, utxos), where matcher
+    is sync_block (entries = tweaks) or sync_block_reverse (entries = the
+    compute index). Returns {height: [OwnedUTXO] | Exception}.
+
+    In-process Python unless SILNT_RUST_MATCHER_NETWORKS names this network; see
+    helpers/rust_matcher.py for the two modes. In shadow mode the answer is
+    always Python's. In active mode it is the service's, with Python for any
+    block the service could not answer cleanly.
+    """
+    async def python_one(job):
+        height, fn, entries, utxos = job
+        try:
+            return await _match_in_thread(
+                client, fn, entries, utxos, scan_secret_bytes, spend_pub_bytes, labels
+            )
+        except Exception as e:
+            return e
+
+    cfg = rust_matcher.config_for(network)
+    if cfg is None or not jobs:
+        return {job[0]: await python_one(job) for job in jobs}
+
+    service = asyncio.ensure_future(
+        _service_match(cfg, client, jobs, scan_secret_bytes, spend_pub_bytes, labels)
+    )
+    try:
+        if cfg.mode == rust_matcher.MODE_ACTIVE:
+            answered = await service
+            return {
+                job[0]: answered[job[0]] if job[0] in answered else await python_one(job)
+                for job in jobs
+            }
+        # shadow: Python decides; the service is checked against it.
+        results = {job[0]: await python_one(job) for job in jobs}
+        answered = await service
+        for height, owned in results.items():
+            if height in answered and not isinstance(owned, Exception):
+                _report_shadow(client, height, owned, answered[height])
+        return results
+    finally:
+        if not service.done():
+            service.cancel()
+
+
 async def scan_block(
     height, client, scan_secret_bytes, spend_pub_bytes, labels,
     network: str,
@@ -953,10 +1137,13 @@ async def _scan_block_legacy(
             return []
         # Offload the synchronous EC matching to a worker thread so it doesn't
         # block the event loop — keeps the API/UI responsive during a scan.
-        owned = await _match_in_thread(
-            client, sync_block,
-            tweaks, utxos, scan_secret_bytes, spend_pub_bytes, labels,
-        )
+        # (Or to the out-of-process matcher, when one is configured.)
+        owned = (await _match_jobs(
+            client, [(height, sync_block, tweaks, utxos)],
+            scan_secret_bytes, spend_pub_bytes, labels, network,
+        ))[height]
+        if isinstance(owned, Exception):
+            raise owned
         for o in owned:
             if not o.timestamp:
                 # One mempool round trip per detected output whose timestamp the
@@ -981,10 +1168,13 @@ async def _scan_block_legacy(
     client.stats.utxos += len(utxos)
     if not utxos:
         return []
-    return await _match_in_thread(
-        client, sync_block,
-        tweaks, utxos, scan_secret_bytes, spend_pub_bytes, labels,
-    )
+    owned = (await _match_jobs(
+        client, [(height, sync_block, tweaks, utxos)],
+        scan_secret_bytes, spend_pub_bytes, labels, network,
+    ))[height]
+    if isinstance(owned, Exception):
+        raise owned
+    return owned
 
 
 async def _resolve_timestamps(owned, client, network):
@@ -1131,6 +1321,22 @@ async def match_range_batch(
     index = data.compute_index if use_reverse else data.tweaks
     matcher = sync_block_reverse if use_reverse else sync_block
 
+    # Decide, per height, whether there is anything to match. The blocks that
+    # have are matched TOGETHER — one call, so that when the out-of-process
+    # matcher is configured the whole batch is one request and its blocks run on
+    # separate cores. In-process they run one after another, as they always did.
+    jobs = []
+    for height in data.heights:
+        if index is None or height not in index:
+            continue
+        entries = index[height]
+        utxos = data.utxos.get(height) or []
+        if entries and utxos:
+            jobs.append((height, matcher, entries, utxos))
+    matched = await _match_jobs(
+        client, jobs, scan_secret_bytes, spend_pub_bytes, labels, network
+    )
+
     results: list = []
     for height in data.heights:
         if index is None or height not in index:
@@ -1138,17 +1344,14 @@ async def match_range_batch(
             results.append(BlockNotIndexedError(height))
             continue
 
-        entries = index[height]
-        utxos = data.utxos.get(height) or []
-        if not entries or not utxos:
+        if height not in matched:
             results.append([])
             continue
 
         try:
-            owned = await _match_in_thread(
-                client, matcher,
-                entries, utxos, scan_secret_bytes, spend_pub_bytes, labels,
-            )
+            owned = matched[height]
+            if isinstance(owned, Exception):
+                raise owned
             await _resolve_timestamps(owned, client, network)
             results.append(owned)
         except Exception as e:

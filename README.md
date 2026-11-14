@@ -482,7 +482,55 @@ restart is needed for a change to take effect; they are read once at import.
 | `SILNT_SCAN_BATCH_SIZE` | `24` | Blocks scanned concurrently on the per-block path. Lower it if the oracle starts returning timeouts or 429s; the ceiling is the HTTP pool's `max_connections` (64). |
 | `SILNT_SCAN_RANGE_BATCH` | `25` | Blocks per request when the oracle supports range endpoints. This is the pipeline depth, not just a request size — raising it makes batches fewer and larger, which hides *less* of the network behind the matching, not more. Capped by the oracle's own `max_range_blocks`. |
 | `SILNT_SCAN_COMPUTE_INDEX` | **retired** | Selected a per-block `compute-index` scan path that lost about half of every labeled payment, change included. The path is deleted. The variable is still *read*, and only so that a leftover value logs an error instead of silently doing nothing. Remove it from your `.env`. |
+| `SILNT_RUST_MATCHER_NETWORKS` | *(empty = off)* | Networks whose matching goes to the out-of-process matcher: `signet`, `signet,mainnet`, or `all`. **Off unless set**, and a network not named is untouched. See [Matching out of process](#matching-out-of-process-optional). **Unlike the rows above, the `SILNT_RUST_MATCHER_*` settings are re-read every 30 seconds, so changing them takes effect on the next scan with no restart.** |
+| `SILNT_RUST_MATCHER_URL` / `_TOKEN` | — | Where the service is and its `MATCHER_TOKEN` (16+ characters). Both are required; with either missing it stays in-process and logs why. Plain `http` is refused unless the host is loopback or a private address (or `SILNT_RUST_MATCHER_ALLOW_REMOTE_HTTP=1`), because the scan secret is in every request. |
+| `SILNT_RUST_MATCHER_MODE` | `shadow` | `shadow`: Python decides, the service is compared against it. `active`: the service decides, Python is the fallback. |
+| `SILNT_RUST_MATCHER_TIMEOUT` | `120` | Seconds per request to the service. |
 | `SILNT_ORACLE_VERIFY_TLS` | off | Verify the oracle's TLS certificate. Off because a self-hosted BlindBit typically has no certificate to verify. What protects you instead is the network path: **run the oracle on the same host and address it over loopback**, where there is nobody in the middle. If the oracle is ever reachable off-box, this stops being a trade-off and becomes a hole — see the note below. |
+
+### Matching out of process (optional)
+
+The scan's CPU cost is the curve arithmetic that decides which of a block's
+outputs are ours. It can be handed to **whispa-matcher**, a separate Rust
+service, for two reasons: it uses every core (the in-process pool is one thread,
+and widening it makes matching *slower* — GIL contention, measured ~4× on four
+threads), and it takes that load out of the LNbits process. It is off unless
+`SILNT_RUST_MATCHER_NETWORKS` names a network.
+
+What it is allowed to do is deliberately narrow. It is **one more place a result
+can come from, never the only one.** Anything but a clean answer — service down,
+non-200, a response that does not line up with the request, an error on one
+block, a label index we did not ask about — means **that block is matched in
+Python**. The failure to keep out is "I could not tell" becoming "nothing here":
+a block reported empty is a payment that stays invisible and a resume point
+that moves past it. `tests/test_rust_matcher.py` breaks each of those on purpose.
+
+**Trying it on signet.**
+
+1. Run the service next to LNbits and keep it on loopback:
+   `MATCHER_TOKEN=$(openssl rand -hex 32) whispa-matcher` (see its README).
+2. In the LNbits `.env`:
+   ```
+   SILNT_RUST_MATCHER_NETWORKS=signet
+   SILNT_RUST_MATCHER_URL=http://127.0.0.1:8787
+   SILNT_RUST_MATCHER_TOKEN=<the same token>
+   ```
+   Mode defaults to **shadow**: Python's result is what the scan stores, and the
+   service is asked the same question and compared. Nothing it says can change a
+   balance. Mainnet is untouched.
+3. Scan, and read the log. Each scan's `Scan timing` line gains
+   `rust matcher: N blocks in Xs, F fell back, M MISMATCHED`. **`M` must stay 0.**
+   A mismatch is an `ERROR` line, `RUST MATCHER MISMATCH at block H`, naming the
+   txid/vout/label each side found that the other did not (never key material).
+   `F` counts blocks the service could not answer; those were matched in Python,
+   so a nonzero `F` costs speed, not correctness.
+4. Rescan a range that contains your own payments and change (every label chain
+   has been exercised by the parity tests, but a real wallet is the real test).
+   Only after a clean run, set `SILNT_RUST_MATCHER_MODE=active`. Set it back to
+   `shadow`, or unset `NETWORKS`, to stop; either takes effect within 30 seconds.
+
+In active mode a whole range batch is **one request**, so its blocks are matched
+in parallel; per-block fallbacks send one block at a time and gain less.
 
 ### What a scan verifies, and what it takes on trust
 
