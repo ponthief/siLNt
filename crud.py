@@ -2395,6 +2395,109 @@ _SILNT_KEY_FILE = ".silnt_enc_key_v1"
 _silnt_key_cache: dict = {}
 
 
+def _dotenv_value(name: str) -> str:
+    """One value out of `.env` in the working directory, or "".
+
+    LNbits reads `.env` through its settings model, which keeps only the fields
+    it declares and does NOT export the rest to the process environment — so a
+    `SILNT_ENC_KEY=` line in that file is invisible to `os.environ`. Reported
+    2026-11-14: the key was set in `.env`, the extension never saw it, generated
+    `.silnt_enc_key_v1` instead, and wrote rows under that. Reading the file
+    here is what makes "set it in .env" mean what everybody reads it to mean.
+    A real environment variable still wins, as it does everywhere else.
+    """
+    import os
+    from pathlib import Path
+
+    try:
+        text = Path(os.getcwd(), ".env").read_text()
+    except OSError:
+        return ""
+    found = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, sep, val = line.partition("=")
+        if not sep or key.strip() != name:
+            continue
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        else:
+            val = val.split(" #")[0].strip()
+        found = val.strip()           # the last assignment wins, as in dotenv
+    return found
+
+
+def _silnt_env_key() -> tuple:
+    """(value, where it came from), or ("", "")."""
+    import os
+
+    v = os.environ.get("SILNT_ENC_KEY", "").strip()
+    if v:
+        return v, "env SILNT_ENC_KEY"
+    v = _dotenv_value("SILNT_ENC_KEY")
+    if v:
+        return v, ".env SILNT_ENC_KEY"
+    return "", ""
+
+
+def _silnt_file_key() -> str:
+    """The key in `.silnt_enc_key_v1` if there is one. Never creates it."""
+    from pathlib import Path
+    try:
+        from lnbits.settings import settings as _s
+        folder = getattr(_s, "lnbits_data_folder", None)
+    except Exception:
+        folder = None
+    if not folder:
+        return ""
+    try:
+        key = Path(folder, _SILNT_KEY_FILE).read_text().strip()
+    except OSError:
+        return ""
+    return key if len(key) >= 32 else ""
+
+
+def _silnt_key_alternates() -> list:
+    """The extension's OTHER own keys: [(source, key), ...], never the active one.
+
+    Two can exist at once. The file key is generated whenever a start cannot
+    see SILNT_ENC_KEY, so every row written until the variable became visible
+    is under it, and from then on the env key is the active one. Without this a
+    `v2:` row written under the file key would stop decrypting the moment the
+    env key took over — exactly the loss the extension's own key exists to end.
+
+    These are the extension's keys and nobody else's: a `v2:` row is still never
+    tried against LNbits' secrets.
+    """
+    active = _silnt_enc_key()
+    env, env_source = _silnt_env_key()
+    out: list = []
+    for source, key in (("key file", _silnt_file_key()), (env_source, env)):
+        if key and len(key) >= 32 and key != active and all(key != k for _, k in out):
+            out.append((source, key))
+    return out
+
+
+def _note_active_key(source: str, key: str) -> None:
+    """Say once which key is active. The answer to "is my SILNT_ENC_KEY being
+    used?" should be a line in the log, not a trip into the data folder."""
+    if _silnt_key_cache.get("noted"):
+        return
+    _silnt_key_cache["noted"] = True
+    try:
+        from loguru import logger as _logger
+        _logger.info(
+            f"[crypto] extension key: {source} (key {_key_fingerprint(key)})"
+        )
+    except Exception:
+        pass
+
+
 def _silnt_enc_key() -> str:
     """The extension's own key. Raises RuntimeError rather than inventing one
     that cannot be kept: a key generated and then lost makes every row written
@@ -2404,7 +2507,7 @@ def _silnt_enc_key() -> str:
     if "key" in _silnt_key_cache:
         return _silnt_key_cache["key"]
 
-    env = os.environ.get("SILNT_ENC_KEY", "").strip()
+    env, env_source = _silnt_env_key()
     if env:
         if len(env) < 32:
             raise RuntimeError(
@@ -2412,7 +2515,8 @@ def _silnt_enc_key() -> str:
                 "use `openssl rand -hex 32`."
             )
         _silnt_key_cache["key"] = env
-        _silnt_key_cache["source"] = "env SILNT_ENC_KEY"
+        _silnt_key_cache["source"] = env_source
+        _note_active_key(env_source, env)
         return env
 
     from pathlib import Path
@@ -2431,6 +2535,7 @@ def _silnt_enc_key() -> str:
                 raise RuntimeError(f"{path} exists but holds no usable key")
             _silnt_key_cache["key"] = key
             _silnt_key_cache["source"] = "key file"
+            _note_active_key("key file", key)
             return key
         import secrets
         key = secrets.token_hex(32)
@@ -2447,6 +2552,7 @@ def _silnt_enc_key() -> str:
         _silnt_key_cache["key"] = key
         _silnt_key_cache["source"] = "key file (generated just now)"
         _silnt_key_cache["generated"] = True
+        _note_active_key("key file (generated just now)", key)
         return key
     except OSError as e:
         raise RuntimeError(f"cannot keep the extension key in {path}: {e}")
@@ -2574,9 +2680,37 @@ def _pj_decrypt(ciphertext: str) -> str:
     # A `v2:` row is under the extension's own key and nothing else's: trying
     # LNbits' secrets on it would be asking the wrong keys.
     if (ciphertext or "").startswith(_V2_PREFIX):
-        return _strip_residual_padding(
-            AESCipher(key=_silnt_enc_key()).decrypt(ciphertext[len(_V2_PREFIX):])
-        )
+        body = ciphertext[len(_V2_PREFIX):]
+        try:
+            return _strip_residual_padding(
+                AESCipher(key=_silnt_enc_key()).decrypt(body)
+            )
+        except Exception as first:
+            # A row written under the extension's OTHER key (see
+            # _silnt_key_alternates). Only accepted if what comes out is text:
+            # about one wrong key in 256 passes the padding check.
+            try:
+                others = _silnt_key_alternates()
+            except Exception:
+                raise first
+            for source, key in others:
+                try:
+                    plain = _strip_residual_padding(AESCipher(key=key).decrypt(body))
+                except Exception:
+                    continue
+                if not _plausible_plaintext(plain):
+                    continue
+                if f"v2:{source}" not in _ALT_KEY_LOGGED:
+                    _ALT_KEY_LOGGED.add(f"v2:{source}")
+                    from loguru import logger as _logger
+                    _logger.warning(
+                        f"[crypto] a v2 row opened with the {source} "
+                        f"(key {_key_fingerprint(key)}), not the active key "
+                        f"(key {_key_fingerprint(_silnt_enc_key())}); the hourly "
+                        "pass moves it under the active one"
+                    )
+                return plain
+            raise first
 
     primary = _payjoin_enc_key()
     try:
@@ -3203,7 +3337,7 @@ async def reencrypt_legacy_rows() -> dict:
     """
     from loguru import logger as _logger
 
-    done = unreadable = skipped = 0
+    done = unreadable = skipped = rekeyed = 0
     for table, pks, col in _REENCRYPT_TARGETS:
         try:
             rows = await db.fetchall(
@@ -3244,6 +3378,73 @@ async def reencrypt_legacy_rows() -> dict:
                 params,
             )
             done += 1
+
+    # ── v2 rows written under the extension's OTHER key ──
+    # The file key is generated whenever a start cannot see SILNT_ENC_KEY, so
+    # rows written in that window are v2 and under it; once the env key is the
+    # active one they open only through the alternate. Move them across, with
+    # the same three rules as above (decrypts, reads back, conditional write).
+    try:
+        others = _silnt_key_alternates()
+        active_key = _silnt_enc_key()
+    except Exception:
+        others, active_key = [], None
+    if others and active_key:
+        from lnbits.utils.crypto import AESCipher
+        for table, pks, col in _REENCRYPT_TARGETS:
+            try:
+                rows = await db.fetchall(
+                    f"SELECT {', '.join(pks)}, {col} AS _v FROM {table} "
+                    f"WHERE {col} LIKE 'v2:%'",
+                    {},
+                )
+            except Exception as e:
+                _logger.warning(f"[crypto] re-key skipped {table}.{col}: {e}")
+                continue
+            for r in rows:
+                old = r["_v"]
+                try:  # already under the active key: nothing to do
+                    AESCipher(key=active_key).decrypt(old[len("v2:"):])
+                    continue
+                except Exception:
+                    pass
+                try:
+                    plain = _pj_decrypt(old)  # opens via the other key, or raises
+                except Exception:
+                    unreadable += 1
+                    continue
+                if not plain:
+                    skipped += 1
+                    continue
+                try:
+                    new = _pj_encrypt(plain)
+                    back = AESCipher(key=active_key).decrypt(new[len("v2:"):])
+                    if not new.startswith("v2:") or _strip_residual_padding(back) != plain:
+                        skipped += 1
+                        continue
+                except Exception:
+                    skipped += 1
+                    continue
+                where = " AND ".join(f"{k} = :p{i}" for i, k in enumerate(pks))
+                params = {f"p{i}": r[k] for i, k in enumerate(pks)}
+                params.update({"new": new, "old": old})
+                await db.execute(
+                    f"UPDATE {table} SET {col} = :new WHERE {where} AND {col} = :old",
+                    params,
+                )
+                rekeyed += 1
+        if "two_keys" not in _silnt_key_cache:
+            _silnt_key_cache["two_keys"] = True
+            _logger.warning(
+                "[crypto] two extension keys exist: active is "
+                f"{_silnt_key_cache.get('source', '?')} "
+                f"(key {_key_fingerprint(active_key)}); the other is "
+                + ", ".join(f"the {src} (key {_key_fingerprint(k)})" for src, k in others)
+                + ". Rows under the other key stay readable and are moved to the "
+                "active one. Keep both until a pass reports nothing left to move."
+            )
+        if rekeyed:
+            _logger.info(f"[crypto] moved {rekeyed} row(s) under the active extension key")
     if done or unreadable:
         _logger.info(
             f"[crypto] re-encrypted {done} row(s) under the extension key; "
@@ -3256,7 +3457,8 @@ async def reencrypt_legacy_rows() -> dict:
             "cannot be read — restore .silnt_enc_key_v1 or set SILNT_ENC_KEY."
         )
         _silnt_key_cache["generated"] = False
-    return {"done": done, "unreadable": unreadable, "skipped": skipped}
+    return {"done": done, "unreadable": unreadable, "skipped": skipped,
+            "rekeyed": rekeyed}
 
 
 # ── SP send contacts (per-user private address book) ──────────────────────────

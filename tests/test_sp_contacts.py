@@ -220,7 +220,7 @@ def test_the_list_does_not_ask_whether_an_unreadable_one_is_a_wallet():
 # under the other stops decrypting. Reported 2026-11-12 as
 # "could not decrypt contact … ValueError".
 
-def _crypto_ns(tmp_path, *, auth_secret_key, env=None, key_file=None):
+def _crypto_ns(tmp_path, *, auth_secret_key, env=None, key_file=None, dotenv=None):
     """The real key + decrypt block from crud.py, with LNbits stubbed."""
     import base64
     import hashlib
@@ -229,6 +229,13 @@ def _crypto_ns(tmp_path, *, auth_secret_key, env=None, key_file=None):
 
     if key_file is not None:
         (tmp_path / ".lnbits_auth_key_v1").write_text(key_file)
+    # `.env` is read from the working directory (as LNbits reads its own), so a
+    # test must stand in its own directory or it would read the developer's.
+    import os as _os
+    prev_cwd = _os.getcwd()
+    _os.chdir(tmp_path)
+    if dotenv is not None:
+        (tmp_path / ".env").write_text(dotenv)
 
     class FakeCipher:
         """Keyed, authenticated, text-only: wrong key raises ValueError, as the
@@ -275,9 +282,11 @@ def _crypto_ns(tmp_path, *, auth_secret_key, env=None, key_file=None):
              for k, v in saved.items()],
             [os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
              for k, v in old_env.items()],
+            _os.chdir(prev_cwd),
         )
         ns["FakeCipher"] = FakeCipher
     except Exception:
+        _os.chdir(prev_cwd)
         ns["_restore"] = lambda: None
         raise
     return ns
@@ -433,7 +442,9 @@ class _FakeDb:
     async def fetchall(self, sql, params):
         for (table, col), rows in self.rows.items():
             if f"FROM {table} " in sql and f"{col} AS _v" in sql:
-                return [dict(r) for r in rows if not r["_v"].startswith("v2:")]
+                if "NOT LIKE 'v2:%'" in sql:
+                    return [dict(r) for r in rows if not r["_v"].startswith("v2:")]
+                return [dict(r) for r in rows if r["_v"].startswith("v2:")]
         return []
 
     async def execute(self, sql, params):
@@ -487,3 +498,148 @@ def test_the_migration_never_writes_without_a_round_trip_and_names_its_tables():
     assert "AND {col} = :old" in fn                    # conditional on what was read
     for col in ("scan_secret", "ln_address", '"address"', "descriptor", "xpub"):
         assert col in body[body.index("_REENCRYPT_TARGETS = ("):at]
+
+
+# ── SILNT_ENC_KEY set in `.env`, which the process environment never sees ─────
+#
+# Reported 2026-11-14: the key was put in `.env`, and a `.silnt_enc_key_v1` that
+# matched nothing appeared in the data folder. LNbits reads `.env` through its
+# settings model, which keeps declared fields only and does not export the rest
+# to os.environ — so os.environ.get("SILNT_ENC_KEY") was empty, the extension
+# generated its own key, and wrote rows under it.
+
+KEY_A = "a" * 40
+KEY_B = "b" * 40
+
+
+def test_a_key_set_only_in_dotenv_is_the_active_key(tmp_path):
+    ns = _crypto_ns(tmp_path, auth_secret_key="x", dotenv=f"SILNT_ENC_KEY={KEY_A}\n")
+    try:
+        assert ns["_silnt_enc_key"]() == KEY_A
+        assert ns["_silnt_key_cache"]["source"] == ".env SILNT_ENC_KEY"
+        assert not (tmp_path / ".silnt_enc_key_v1").exists()   # nothing generated
+    finally:
+        ns["_restore"]()
+
+
+def test_a_real_environment_variable_beats_dotenv(tmp_path):
+    ns = _crypto_ns(tmp_path, auth_secret_key="x", env={"SILNT_ENC_KEY": KEY_B},
+                    dotenv=f"SILNT_ENC_KEY={KEY_A}\n")
+    try:
+        assert ns["_silnt_enc_key"]() == KEY_B
+    finally:
+        ns["_restore"]()
+
+
+def test_dotenv_parsing_is_the_ordinary_kind(tmp_path):
+    cases = {
+        f'SILNT_ENC_KEY="{KEY_A}"\n': KEY_A,                       # quoted
+        f"SILNT_ENC_KEY='{KEY_A}'\n": KEY_A,
+        f"export SILNT_ENC_KEY={KEY_A}\n": KEY_A,                  # export
+        f"# SILNT_ENC_KEY={KEY_B}\nSILNT_ENC_KEY={KEY_A}\n": KEY_A,  # comment
+        f"SILNT_ENC_KEY={KEY_A} # mine\n": KEY_A,                  # inline comment
+        f"SILNT_ENC_KEY={KEY_B}\nSILNT_ENC_KEY={KEY_A}\n": KEY_A,   # last wins
+        f"OTHER_SILNT_ENC_KEY={KEY_B}\n": "",                       # not the name
+        "": "",
+    }
+    for text, want in cases.items():
+        d = tmp_path / str(abs(hash(text)))
+        d.mkdir()
+        ns = _crypto_ns(d, auth_secret_key="x", dotenv=text)
+        try:
+            assert ns["_dotenv_value"]("SILNT_ENC_KEY") == want, text
+        finally:
+            ns["_restore"]()
+
+
+def test_a_row_under_the_generated_file_key_is_still_read_once_the_env_key_takes_over(tmp_path):
+    # The window: the variable is invisible, so the file key is generated and
+    # a row is written under it.
+    before = _crypto_ns(tmp_path, auth_secret_key="x")
+    try:
+        stored = before["_pj_encrypt"]("tsp1qexample")
+        assert stored.startswith("v2:")
+    finally:
+        before["_restore"]()
+    # Then the env key becomes visible, and is the active one.
+    after = _crypto_ns(tmp_path, auth_secret_key="x", dotenv=f"SILNT_ENC_KEY={KEY_A}\n")
+    try:
+        assert after["_silnt_enc_key"]() == KEY_A
+        assert after["_pj_decrypt"](stored) == "tsp1qexample"
+        # …and what is written from now on is under the env key.
+        fresh = after["_pj_encrypt"]("tsp1qnew")
+        assert after["FakeCipher"](KEY_A).decrypt(fresh[3:]) == "tsp1qnew"
+    finally:
+        after["_restore"]()
+
+
+def test_a_v2_row_under_no_key_this_instance_has_still_raises(tmp_path):
+    stranger = tmp_path / "stranger"
+    stranger.mkdir()
+    a = _crypto_ns(stranger, auth_secret_key="x", dotenv=f"SILNT_ENC_KEY={KEY_B}\n")
+    try:
+        stored = a["_pj_encrypt"]("tsp1qexample")
+    finally:
+        a["_restore"]()
+    b = _crypto_ns(tmp_path, auth_secret_key="x", dotenv=f"SILNT_ENC_KEY={KEY_A}\n")
+    try:
+        import pytest
+        with pytest.raises(Exception):
+            b["_pj_decrypt"](stored)
+    finally:
+        b["_restore"]()
+
+
+def test_the_other_key_is_the_extensions_own_never_lnbits(tmp_path):
+    ns = _crypto_ns(tmp_path, auth_secret_key="lnbits-secret",
+                    dotenv=f"SILNT_ENC_KEY={KEY_A}\n")
+    try:
+        (tmp_path / ".silnt_enc_key_v1").write_text(KEY_B)
+        sources = [src for src, _ in ns["_silnt_key_alternates"]()]
+        assert sources == ["key file"]
+        keys = [k for _, k in ns["_silnt_key_alternates"]()]
+        assert "lnbits-secret" not in keys and KEY_A not in keys
+    finally:
+        ns["_restore"]()
+
+
+def test_the_migration_moves_file_key_rows_under_the_env_key(tmp_path):
+    import asyncio
+
+    ns = _crypto_ns(tmp_path, auth_secret_key="x", dotenv=f"SILNT_ENC_KEY={KEY_A}\n")
+    try:
+        (tmp_path / ".silnt_enc_key_v1").write_text(KEY_B)
+        Cipher = ns["FakeCipher"]
+        under_file = "v2:" + Cipher(KEY_B).encrypt(b"tsp1qfromfile")
+        under_env = "v2:" + Cipher(KEY_A).encrypt(b"tsp1qfromenv")
+        under_none = "v2:" + Cipher("c" * 40).encrypt(b"tsp1qlost")
+        db = _FakeDb({
+            ("silnt.sp_contacts", "value"): [
+                {"id": "f", "_v": under_file},
+                {"id": "e", "_v": under_env},
+                {"id": "n", "_v": under_none},
+            ],
+        })
+        src = (ROOT / "crud.py").read_text()
+        block = src[src.index("_REENCRYPT_TARGETS = ("):src.index(
+            "# ── SP send contacts (per-user private address book)")]
+        ns2 = dict(ns)
+        ns2.update({"db": db, "_CIPHERTEXT_PREFIX": "U2FsdGVk"})
+        exec(block, ns2)
+        result = asyncio.run(ns2["reencrypt_legacy_rows"]())
+
+        assert result["rekeyed"] == 1, result
+        assert result["unreadable"] == 1, result          # the one nobody has a key for
+        assert len(db.updates) == 1
+        sql, params = db.updates[0]
+        assert params["p0"] == "f" and params["old"] == under_file
+        assert "AND value = :old" in sql                   # conditional on what was read
+        # What was written is under the ACTIVE key, and reads back.
+        assert Cipher(KEY_A).decrypt(params["new"][3:]) == "tsp1qfromfile"
+        # A second pass finds nothing left to move.
+        db.updates.clear()
+        db.rows[("silnt.sp_contacts", "value")][0]["_v"] = params["new"]
+        again = asyncio.run(ns2["reencrypt_legacy_rows"]())
+        assert again["rekeyed"] == 0 and not db.updates, again
+    finally:
+        ns["_restore"]()
