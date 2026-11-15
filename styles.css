@@ -182,6 +182,7 @@ header.hero { padding: 56px 0 60px; border-bottom: 1px solid var(--border); }
   transition: transform .15s, border-color .15s;
 }
 .btn-sm { padding: 8px 14px; font-size: 13.5px; }
+.btn-lg { padding: 15px 26px; font-size: 16px; }
 .btn-primary { background: var(--orange-solid); color: var(--on-solid); box-shadow: var(--shadow); }
 .btn-primary:hover { transform: translateY(-1px); }
 .btn-ghost { border-color: var(--border-bright); color: var(--ink); background: var(--panel); }
@@ -285,13 +286,26 @@ header.hero { padding: 56px 0 60px; border-bottom: 1px solid var(--border); }
 .contact-card .ct-m { font-size: 12.5px; color: var(--faint); }
 
 /* ── steps ───────────────────────────────────────────────────────────────── */
-.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.steps { display: grid; grid-template-columns: 1fr 1fr 1.5fr; gap: 16px; }
 @media (max-width: 860px){ .steps { grid-template-columns: 1fr; } }
 .stp { display: flex; gap: 13px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); padding: 20px; box-shadow: var(--shadow); }
 .stp .n { flex-shrink: 0; width: 27px; height: 27px; border-radius: 50%; display: grid; place-items: center; font-family: var(--mono); font-size: 13px; color: var(--green); background: var(--green-dim); border: 1px solid var(--border-bright); }
 .stp h4 { font-size: 14.5px; font-weight: 600; margin-bottom: 5px; }
 .stp p { font-size: 13px; color: var(--dim); }
 .stp a, .mailref a { color: var(--green); }
+
+/* The faucet is the step people get stuck on, so its card is the loud one. */
+.stp.hot { border-color: var(--orange-solid); }
+.stp.hot { grid-column: span 1; }
+.stp.hot .btn { margin-top: 6px; color: var(--on-solid); white-space: nowrap; }
+.stp.hot .n { color: var(--orange); }
+
+/* A tick list, not a card grid: the section is a thing to work through. */
+.checklist { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+@media (max-width: 700px){ .checklist { grid-template-columns: 1fr; } }
+.checklist li { border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); box-shadow: var(--shadow); }
+.checklist label { display: flex; align-items: center; gap: 12px; padding: 15px 18px; cursor: pointer; font-size: 14.5px; color: var(--ink); }
+.checklist input { width: 18px; height: 18px; flex-shrink: 0; accent-color: var(--orange-solid); cursor: pointer; }
 
 /* ── in-use clips ────────────────────────────────────────────────────────── */
 /* Two portrait phone recordings side by side, capped so a 572x1280 clip does

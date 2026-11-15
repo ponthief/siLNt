@@ -3,12 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Try WhiSPa Wallet on Signet — no real money</title>
-<meta name="description" content="Try WhiSPa Wallet in your browser on Signet, Bitcoin's test network. Free coins, no real money at risk, and the same wallet you would run on mainnet.">
+<title>Try WhiSPa Wallet on Signet — nothing to lose</title>
+<meta name="description" content="Practise Tango, BitMail and Silent Payments on Signet, Bitcoin's test network, with the same features as Mainnet and free coins, before you use real money.">
 <link rel="icon" type="image/png" href="whispa-mark.png">
 <link rel="apple-touch-icon" href="whispa-icon-180.png">
-<meta property="og:title" content="Try WhiSPa Wallet — free, on Signet">
-<meta property="og:description" content="Try WhiSPa Wallet in your browser on Signet, Bitcoin's test network. Free coins, no real money at risk.">
+<meta property="og:title" content="Nothing to lose — try WhiSPa on Signet first">
+<meta property="og:description" content="Same features as Mainnet. Practise Tango, BitMail and Silent Payments on Signet with free coins.">
 <meta property="og:image" content="whispa-og.png">
 <meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -17,7 +17,7 @@
 <!-- ?v= is a cache buster: styles.css is served with max-age=14400 and cached at
      the CDN edge, so BUMP THIS NUMBER whenever styles.css changes or the new
      styles will not reach visitors for up to four hours. -->
-<link rel="stylesheet" href="styles.css?v=11">
+<link rel="stylesheet" href="styles.css?v=12">
 </head>
 <body>
 
@@ -52,8 +52,8 @@
   </div>
 </header>
 <div class="wrap page-head">
-  <h1>Try it, with nothing at stake</h1>
-  <p class="lead">WhiSPa runs on <strong>Signet</strong> — a Bitcoin test network that works exactly like the real one, except the coins are free and worth nothing. Same wallet, same Silent Payments, same everything you would do with real money. Get it wrong here instead of there.</p>
+  <h1>Nothing to lose — try it on Signet first</h1>
+  <p class="lead">Same features as on Mainnet. Practise your Tango, BitMail and Silent Payments skills as much as you want before going to Mainnet.</p>
 </div>
 
 <section class="wrap" id="start">
@@ -78,60 +78,49 @@
 <section class="wrap" id="steps">
   <div class="sec-head">
     <div class="sec-tag">Three steps</div>
-    <div class="sec-title">From nothing to your first Silent Payment</div>
-    <p class="sec-sub">About five minutes, most of it waiting for a confirmation.</p>
+    <div class="sec-title">Get started</div>
   </div>
   <div class="steps">
     <div class="stp">
       <div class="n">1</div>
       <div>
-        <h4>Create an account</h4>
-        <p>Each device is confirmed by an email link from <span class="mailref" data-user="admin" data-domain="whispawallet.com"></span> — check spam. The account gets you in; it is <em>not</em> what holds your coins, and a password alone can never reach them.</p>
+        <h4>Create a WhiSPa account</h4>
+        <p>No KYC. Just an email address.</p>
       </div>
     </div>
     <div class="stp">
       <div class="n">2</div>
       <div>
-        <h4>Make a wallet and back up the phrase</h4>
-        <p>Keys are derived on your device — write the twelve words down. On the Android app you can see them again later under <strong>Settings → Security</strong>, behind your PIN or fingerprint, so a mistyped word is fixable. That only helps while you still have the phone: lose or wipe it with no written copy and the coins are gone.</p>
+        <h4>Create a wallet</h4>
+        <p>Write down your seed phrase.</p>
       </div>
     </div>
-    <div class="stp">
+    <div class="stp hot">
       <div class="n">3</div>
       <div>
-        <h4>Get free coins and send some</h4>
-        <p>Take Signet coins from the <a href="https://silentpayments.dev/faucet/signet" target="_blank" rel="noopener noreferrer">faucet <span class="ext">↗</span></a>, then pay your own Silent Payment address and watch a brand-new output appear for it. That is the whole idea, in one transaction.</p>
+        <h4>Fund it from the faucet</h4>
+        <a class="btn btn-primary btn-lg" href="https://silentpayments.dev/faucet/signet" target="_blank" rel="noopener noreferrer">Get free Signet coins <span class="arrow">↗</span></a>
       </div>
     </div>
   </div>
 </section>
 
-<section class="wrap" id="what-carries-over">
+<section class="wrap" id="before-mainnet">
   <div class="sec-head">
-    <div class="sec-tag">Before mainnet</div>
-    <div class="sec-title">What carries over, and what doesn't</div>
+    <div class="sec-tag">Before Mainnet</div>
+    <div class="sec-title">Ready for real money? Check you have&hellip;</div>
   </div>
-  <div class="grid">
-    <div class="card">
-      <span class="icon">🧠</span>
-      <h3>What you learned</h3>
-      <p>Everything. The mainnet build is the same wallet against a different chain — nothing about sending, receiving, coin control or backups changes.</p>
-      <span class="tag">Same app</span>
-    </div>
-    <div class="card">
-      <span class="icon">🔑</span>
-      <h3>Not your keys</h3>
-      <p>Signet keys are Signet keys. Mainnet starts with a fresh wallet and a fresh seed phrase — back that one up properly, because it is guarding something.</p>
-      <span class="tag">Start again</span>
-    </div>
-    <div class="card">
-      <span class="icon">🪙</span>
-      <h3>Not the coins</h3>
-      <p>Signet coins cannot be moved to mainnet and are worth nothing. There is no exchange rate and nothing to lose — which is the point of practising here.</p>
-      <span class="tag">Worthless on purpose</span>
-    </div>
-  </div>
-  <div class="note"><span class="badge">Heads up</span> When you do move to mainnet, send yourself a small amount first and spend it back out. A test you can afford to lose beats a first transaction you can't.</div>
+  <ul class="checklist">
+    <li><label><input type="checkbox"> Written down your seed phrase and passphrase</label></li>
+    <li><label><input type="checkbox"> Claimed your own BitMail address</label></li>
+    <li><label><input type="checkbox"> Sent a payment to a BitMail address</label></li>
+    <li><label><input type="checkbox"> Received a Silent Payment and sent one on</label></li>
+    <li><label><input type="checkbox"> Run a Tango mini-coinjoin</label></li>
+    <li><label><input type="checkbox"> Sent and received on SegWit</label></li>
+    <li><label><input type="checkbox"> Saved a backup file and restored your wallet from it</label></li>
+    <li><label><input type="checkbox"> Labelled a transaction and found the label after restoring</label></li>
+  </ul>
+  <div class="note"><span class="badge">Heads up</span> Mainnet starts with a new wallet and a new seed phrase. Signet keys and coins do not carry over. Start Mainnet with a small amount.</div>
 </section>
 <div class="wrap">
   <footer>
