@@ -1,0 +1,38 @@
+# fail2ban jail for LNbits' request log. See deploy/fail2ban/README.md.
+#
+# Install: copy this to /etc/fail2ban/jail.d/lnbits.local and the filter to
+# /etc/fail2ban/filter.d/lnbits-probe.conf, set `logpath` to the real data
+# folder, then `fail2ban-client reload`.
+
+[lnbits-probe]
+enabled  = true
+filter   = lnbits-probe
+
+# CHANGE THIS to <your LNbits data folder>/logs/lnbits.log
+logpath  = /opt/lnbits/data/logs/lnbits.log
+
+# Debian and Ubuntu default every jail to the systemd journal, which ignores
+# `logpath` completely: the jail starts, reports healthy and reads nothing.
+backend  = auto
+
+# Both the proxy's ports. The scanner reaches LNbits through Caddy on 80/443,
+# so that is what has to be closed; LNbits itself listens on loopback.
+port     = http,https
+
+# A scanner that asks for /.env asks for twenty more in the same second, so
+# three is generous, and no real client ever matches one of these paths.
+maxretry = 3
+findtime = 1h
+
+# A day, doubling on each repeat up to a month (needs fail2ban 0.11+; older
+# versions ignore the two increment lines and use `bantime` alone).
+bantime            = 1d
+bantime.increment  = true
+bantime.factor     = 2
+bantime.maxtime    = 4w
+
+# The addresses that must never be banned. If LNbits is ever started without
+# trusting the proxy's forwarded address, EVERY request in the log comes from
+# the proxy (127.0.0.1 or a private address) and, without this line, the first
+# scanner would ban your own reverse proxy.
+ignoreip = 127.0.0.0/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 fc00::/7
