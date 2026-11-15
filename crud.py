@@ -4972,8 +4972,8 @@ async def requeue_failed_tango_payouts(network: str) -> int:
 
 async def get_twofa(user_id: str) -> Optional[dict]:
     row = await db.fetchone(
-        "SELECT user_id, totp_secret, totp_confirmed, enabled, last_counter "
-        "FROM silnt.twofa WHERE user_id = :uid",
+        "SELECT user_id, totp_secret, totp_confirmed, enabled, last_counter, "
+        "pending_secret FROM silnt.twofa WHERE user_id = :uid",
         {"uid": user_id},
     )
     if not row:
@@ -4984,6 +4984,7 @@ async def get_twofa(user_id: str) -> Optional[dict]:
         "totp_confirmed": bool(row["totp_confirmed"]),
         "enabled": bool(row["enabled"]),
         "last_counter": row["last_counter"],
+        "pending_secret": row["pending_secret"],
     }
 
 
@@ -5014,29 +5015,53 @@ async def start_twofa_totp(user_id: str, secret: str) -> None:
     existing = await get_twofa(user_id)
     if existing and existing["enabled"] and existing["totp_confirmed"]:
         raise ValueError("two-factor is already set up")
-    await db.execute(
-        """INSERT INTO silnt.twofa
-              (user_id, totp_secret, totp_confirmed, enabled, last_counter,
-               created_at)
-           VALUES (:uid, :sec, 0, 0, NULL, :now)
-           ON CONFLICT (user_id) DO UPDATE SET
-              totp_secret = :sec, totp_confirmed = 0, enabled = 0,
-              last_counter = NULL""",
-        {"uid": user_id, "sec": secret, "now": now},
-    )
+    if existing and existing["totp_confirmed"] and existing["totp_secret"]:
+        # A CONFIRMED AUTHENTICATOR EXISTS (2FA is off, and somebody is asking
+        # for a different app). The replacement is held beside it and only
+        # takes its place when a code from it is accepted — overwriting here
+        # killed the working app the moment the option was pressed, which is
+        # what left nobody a way back to it. See m046.
+        await db.execute(
+            "UPDATE silnt.twofa SET pending_secret = :sec WHERE user_id = :uid",
+            {"uid": user_id, "sec": secret},
+        )
+    else:
+        await db.execute(
+            """INSERT INTO silnt.twofa
+                  (user_id, totp_secret, totp_confirmed, enabled, last_counter,
+                   created_at, pending_secret)
+               VALUES (:uid, :sec, 0, 0, NULL, :now, NULL)
+               ON CONFLICT (user_id) DO UPDATE SET
+                  totp_secret = :sec, totp_confirmed = 0, enabled = 0,
+                  last_counter = NULL, pending_secret = NULL""",
+            {"uid": user_id, "sec": secret, "now": now},
+        )
 
 
-async def confirm_twofa_totp(user_id: str, counter: int) -> None:
+async def confirm_twofa_totp(user_id: str, counter: int, promote: bool = False) -> None:
     """A correct code proved the app holds the secret: switch it on.
 
     `last_counter` is set from the SAME code that confirmed it, so the code
     just typed cannot also be the one that opens the first session.
+
+    `promote` is the replacement case: the code matched `pending_secret`, which
+    now becomes THE secret. Without it the stored secret is the one that was
+    proved and any replacement that was started and abandoned is dropped, so a
+    stale QR cannot be confirmed later by accident.
     """
-    await db.execute(
-        "UPDATE silnt.twofa SET totp_confirmed = 1, enabled = 1, "
-        "last_counter = :c WHERE user_id = :uid",
-        {"uid": user_id, "c": int(counter)},
-    )
+    if promote:
+        await db.execute(
+            "UPDATE silnt.twofa SET totp_secret = pending_secret, "
+            "pending_secret = NULL, totp_confirmed = 1, enabled = 1, "
+            "last_counter = :c WHERE user_id = :uid AND pending_secret IS NOT NULL",
+            {"uid": user_id, "c": int(counter)},
+        )
+    else:
+        await db.execute(
+            "UPDATE silnt.twofa SET totp_confirmed = 1, enabled = 1, "
+            "pending_secret = NULL, last_counter = :c WHERE user_id = :uid",
+            {"uid": user_id, "c": int(counter)},
+        )
 
 
 async def note_twofa_counter(user_id: str, counter: int) -> None:

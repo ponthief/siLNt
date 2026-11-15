@@ -2943,14 +2943,26 @@ async def api_twofa_totp_confirm(
     if row["enabled"] and row["totp_confirmed"]:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
                             detail="Two-factor is already set up.")
+    # `replace` says WHICH app this code is from. Both can exist at once while
+    # 2FA is off: the confirmed one, and a replacement somebody started with
+    # "Use a different app". Guessing from the code would accept either, which
+    # is not the question the screen asked.
+    replace = bool((payload or {}).get("replace"))
+    if replace:
+        if not row["pending_secret"]:
+            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                                detail="Start the setup again — there is no pending app.")
+        secret, last = row["pending_secret"], None
+    else:
+        secret, last = row["totp_secret"], row["last_counter"]
     check_verify_allowed(user_id)
-    counter = totp_helper.verify(row["totp_secret"], code, last_counter=row["last_counter"])
+    counter = totp_helper.verify(secret, code, last_counter=last)
     if counter is None:
         record_verify_attempt(user_id)
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
                             detail="That code is not right. Check your authenticator app and try again.")
     clear_verify_attempts(user_id)
-    await confirm_twofa_totp(user_id, counter)
+    await confirm_twofa_totp(user_id, counter, promote=replace)
     # THE SESSION THAT TURNED IT ON IS VERIFIED, or enabling 2FA would lock the
     # user out of the very screen they are standing on until they signed out
     # and back in. The code they just typed is what verified it.
@@ -3739,7 +3751,7 @@ async def api_tx_confirmation(
 @silnt_api_router.get("/api/v1/admin/blindbit/health")
 async def api_blindbit_health(
     network: str = Query("signet"),
-    key_info: WalletTypeInfo = Depends(require_admin_key),
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
 ):
     """
     Health = BlindBit reachable AND in sync with the chain tip (mempool/esplora).
@@ -4777,7 +4789,7 @@ async def api_payjoin_cancel(
 @silnt_api_router.get("/api/v1/admin/fulcrum/health")
 async def api_fulcrum_health(
     network: str = Query("signet"),
-    key_info: WalletTypeInfo = Depends(require_admin_key),
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
 ):
     """
     Health = Fulcrum reachable AND in sync with the chain tip (mempool/esplora).

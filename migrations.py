@@ -1475,3 +1475,25 @@ async def m045_two_factor(db):
         );
         """
     )
+
+
+async def m046_twofa_pending_secret(db):
+    """A replacement authenticator waits here until a code proves it.
+
+    "Use a different app" used to overwrite `totp_secret` the moment it was
+    pressed, with `totp_confirmed` reset to 0. So the confirmed authenticator
+    stopped working the instant somebody LOOKED at the other option, and
+    backing out of it left them with an app whose codes the server no longer
+    accepted (reported 2026-11-15: after turning 2FA off and pressing "Use
+    another app" there was no way back to the screen for the existing app, and
+    there could not have been - nothing on the server still held it).
+
+    The replacement goes in its own column and only replaces `totp_secret` when
+    a code from it is accepted. Until then the old secret is untouched, so
+    cancelling costs nothing, which is the property the screen already assumed.
+    IF NOT EXISTS, like the other late columns here, so an instance that
+    arrives by any route reaches it.
+    """
+    await db.execute(
+        "ALTER TABLE silnt.twofa ADD COLUMN IF NOT EXISTS pending_secret TEXT"
+    )
