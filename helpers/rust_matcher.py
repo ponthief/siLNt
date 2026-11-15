@@ -15,6 +15,10 @@ OFF BY DEFAULT, and gated per network, so it can be tried on signet alone:
     SILNT_RUST_MATCHER_MODE       shadow (default) | active
     SILNT_RUST_MATCHER_TIMEOUT    seconds per request, default 120
 
+The same settings can be saved from the admin page (next to BlindBit and
+Fulcrum), and once they have been, THEY are the authority and the variables
+above are not read: see `refresh_from_db`. Until then the environment decides.
+
 Two modes, and `shadow` is the default because it is the one that earns trust:
 
 * **shadow** — Python matches exactly as before and its result is what the scan
@@ -119,6 +123,18 @@ def _host_is_private(host: str) -> bool:
 
 
 def _read_settings() -> tuple:
+    if _admin is not None:
+        # Saved from the admin page: that is the whole answer. `enabled` false
+        # means off even if the environment still names a network — otherwise
+        # the switch on the page would not be the switch.
+        return (
+            _admin["networks"] if _admin["enabled"] else "",
+            _admin["url"],
+            _admin["token"],
+            _admin["mode"],
+            str(_admin["timeout"]),
+            silnt_env("SILNT_RUST_MATCHER_ALLOW_REMOTE_HTTP"),
+        )
     return (
         silnt_env("SILNT_RUST_MATCHER_NETWORKS"),
         silnt_env("SILNT_RUST_MATCHER_URL"),
@@ -195,12 +211,174 @@ def config_for(network: str) -> Optional[MatcherConfig]:
     return built["cfg"]  # type: ignore[return-value]
 
 
+def active_networks() -> set:
+    """The networks matching is switched on for, from whichever source rules.
+    `{"all"}` when every network is on. Empty = off."""
+    raw = _read_settings()
+    nets = {n.strip().lower() for n in raw[0].split(",") if n.strip()}
+    return {"all"} if ("all" in nets or "*" in nets) else nets
+
+
+def any_config() -> Optional[MatcherConfig]:
+    """The service configuration regardless of network — for probing it, which
+    does not depend on which network a scan is for. None if it is unusable."""
+    nets = active_networks()
+    if not nets:
+        return None
+    return config_for("all" if "all" in nets else sorted(nets)[0])
+
+
 def reset() -> None:
     """Forget cached configuration and the connection. For tests and shutdown."""
     global _cache, _client, _client_key
     _cache = (0.0, (), {})
     _warned.clear()
     _client, _client_key = None, None
+
+
+
+# --- settings saved from the admin page ----------------------------------------
+
+# None = never saved there, so the environment decides. A dict = the page decides.
+_admin: Optional[dict] = None
+_admin_checked = 0.0
+_ADMIN_TTL = 30.0
+
+
+def set_admin_settings(settings: Optional[dict]) -> None:
+    """Install (or, with None, remove) the admin page's settings."""
+    global _admin
+    _admin = None if settings is None else {
+        "enabled": bool(settings.get("enabled")),
+        "networks": str(settings.get("networks") or ""),
+        "url": str(settings.get("url") or ""),
+        "token": str(settings.get("token") or ""),
+        "mode": str(settings.get("mode") or MODE_SHADOW),
+        "timeout": settings.get("timeout") or 120.0,
+    }
+    reset()
+
+
+async def refresh_from_db(force: bool = False) -> None:
+    """Re-read the saved settings, at most every 30 seconds unless forced.
+
+    `config_for` is synchronous and sits on the scan hot path, so it cannot ask
+    the database itself; the scan calls this once per batch beforehand, which is
+    a timestamp comparison almost every time. Never raises: a database hiccup
+    leaves whatever was last known in place rather than stopping a scan.
+    """
+    global _admin_checked
+    now = time.monotonic()
+    if not force and now - _admin_checked < _ADMIN_TTL:
+        return
+    _admin_checked = now
+    try:
+        from ..crud import get_rust_matcher_config
+        saved = await get_rust_matcher_config()
+    except Exception as e:  # noqa: BLE001
+        _warn_every("admin-read", 300, "could not read the rust matcher settings: {}", e)
+        return
+    new = None if saved is None else saved.dict()
+    if new != _admin:
+        set_admin_settings(new)
+
+
+def settings_source() -> str:
+    return "admin" if _admin is not None else "environment"
+
+
+def url_problem(url: str, allow_http: Optional[bool] = None) -> Optional[str]:
+    """Why this URL cannot be used, or None. The same rules `_build` applies, so
+    the admin page can refuse at SAVE rather than have a scan quietly ignore it."""
+    url = (url or "").strip()
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return "The URL must start with http:// or https://"
+    if allow_http is None:
+        allow_http = silnt_env("SILNT_RUST_MATCHER_ALLOW_REMOTE_HTTP").strip().lower() in ("1", "true", "yes")
+    if parts.scheme == "http" and not _host_is_private(parts.hostname) and not allow_http:
+        return (
+            "Plain http to a host that is not this machine or a private address is "
+            "refused, because the scan secret goes in every request. Use https or a "
+            "private address (or set SILNT_RUST_MATCHER_ALLOW_REMOTE_HTTP=1 if the "
+            "link is trusted)."
+        )
+    return None
+
+
+# --- what it has been doing (since this process started) -----------------------
+
+_stats: dict = {
+    "since": time.time(),
+    "blocks": 0, "seconds": 0.0, "fallbacks": 0, "mismatches": 0,
+    "last_ok": None, "last_error": "", "last_error_at": None,
+    "last_mismatch_at": None,
+}
+
+
+def note(*, blocks: int = 0, seconds: float = 0.0, fallbacks: int = 0,
+         mismatches: int = 0, error: str = "") -> None:
+    """Add to the running totals the admin page shows. In-memory only: a restart
+    zeroes them, and the page says since when."""
+    _stats["blocks"] += blocks
+    _stats["seconds"] += seconds
+    _stats["fallbacks"] += fallbacks
+    _stats["mismatches"] += mismatches
+    if blocks:
+        _stats["last_ok"] = time.time()
+    if mismatches:
+        _stats["last_mismatch_at"] = time.time()
+    if error:
+        _stats["last_error"] = error[:200]
+        _stats["last_error_at"] = time.time()
+
+
+def stats() -> dict:
+    out = dict(_stats)
+    out["seconds"] = round(out["seconds"], 2)
+    return out
+
+
+async def probe(cfg: MatcherConfig) -> dict:
+    """Is the service there, and does it accept our token? Sends no scan secret.
+
+    `/healthz` is unauthenticated, so on its own it says only that SOMETHING is
+    listening. The token is checked separately by posting an empty body to
+    `/v1/match`: authentication runs before the body is read, so a right token
+    gets a 4xx about the body and a wrong one gets a 401.
+    """
+    started = time.monotonic()
+    out: dict = {"ok": False, "reachable": False, "token_ok": None,
+                 "version": None, "latency_ms": None, "error": ""}
+    try:
+        async with httpx.AsyncClient(base_url=cfg.url, timeout=8.0) as c:
+            r = await c.get("/healthz")
+            out["latency_ms"] = int((time.monotonic() - started) * 1000)
+            if r.status_code != 200:
+                out["error"] = f"/healthz answered HTTP {r.status_code}"
+                return out
+            try:
+                body = r.json()
+            except ValueError:
+                out["error"] = "/healthz did not answer like whispa-matcher"
+                return out
+            if body.get("status") != "ok":
+                out["error"] = "/healthz did not answer like whispa-matcher"
+                return out
+            out["reachable"] = True
+            out["version"] = body.get("version")
+            a = await c.post("/v1/match", content=b"{}",
+                             headers={"Authorization": f"Bearer {cfg.token}",
+                                      "Content-Type": "application/json"})
+            out["token_ok"] = a.status_code != 401
+            if not out["token_ok"]:
+                out["error"] = "The service refused the token (HTTP 401)."
+                return out
+    except httpx.HTTPError as e:
+        out["error"] = f"{type(e).__name__}: {str(e)[:120]}"
+        return out
+    out["ok"] = True
+    return out
 
 
 # --- transport ----------------------------------------------------------------

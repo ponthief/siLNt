@@ -351,6 +351,29 @@ class NtfyConfig(BaseModel):
     priority: str = "default"             # ntfy priority: min|low|default|high|urgent
 
 
+class RustMatcherConfig(BaseModel):
+    """The whispa-matcher service, as the admin page configures it.
+
+    Once this has been SAVED it is the authority and the SILNT_RUST_MATCHER_*
+    environment variables are no longer read (`helpers/rust_matcher.py`): two
+    places that can each switch matching on, with nothing to say which one won,
+    is how a flag gets "turned off" and stays on. Until it is saved, the
+    environment decides exactly as it always did.
+
+    The TOKEN is write-only. It is the service's bearer credential, so it is
+    stored encrypted and never returned; the admin page learns `token_set` and
+    nothing else. Blank keeps the stored one, "-" clears it (the Turnstile
+    secret's rule, for the same reason).
+    """
+
+    enabled: bool = False
+    networks: str = "signet"   # comma list, or "all"
+    url: str = "http://127.0.0.1:8787"
+    token: str = ""
+    mode: str = "shadow"       # shadow | active
+    timeout: float = 120.0
+
+
 class TurnstileConfig(BaseModel):
     """Cloudflare Turnstile keys for the registration form.
 

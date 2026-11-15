@@ -339,6 +339,7 @@ from .models import (
     FcmTokenData,
     AdminDeleteAccountData,
     NtfyConfig,
+    RustMatcherConfig,
     TurnstileConfig,
     USERNAME_PATTERN,
     RESERVED_USERNAMES,
@@ -5989,6 +5990,132 @@ async def api_test_ntfy(
         )
     return result
 
+# ── whispa-matcher (out-of-process BIP-352 matching) ─────────────────────────
+#
+# Configured and watched from the admin page, next to BlindBit and Fulcrum. The
+# token is write-only: it is the service's bearer credential, so GET says
+# `token_set` and nothing more. See helpers/rust_matcher.py for what the modes
+# mean and why the service can only ever add an answer source, never remove one.
+
+def _matcher_view(cfg: Optional[RustMatcherConfig]) -> dict:
+    from .helpers import rust_matcher
+
+    base = cfg or RustMatcherConfig()
+    return {
+        "configured": cfg is not None,
+        "source": rust_matcher.settings_source(),
+        "enabled": base.enabled,
+        "networks": base.networks,
+        "url": base.url,
+        "token_set": bool(base.token),
+        "mode": base.mode,
+        "timeout": base.timeout,
+    }
+
+
+@silnt_api_router.get("/api/v1/admin/matcher/config")
+async def api_get_matcher_config(
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+) -> dict:
+    require_admin(key_info)
+    from .crud import get_rust_matcher_config
+
+    return _matcher_view(await get_rust_matcher_config())
+
+
+@silnt_api_router.put("/api/v1/admin/matcher/config")
+async def api_update_matcher_config(
+    data: RustMatcherConfig,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+) -> dict:
+    require_admin(key_info)
+    from .crud import get_rust_matcher_config, update_rust_matcher_config
+    from .helpers import rust_matcher
+
+    data.url = (data.url or "").strip().rstrip("/")
+    data.mode = (data.mode or "").strip().lower()
+    if data.mode not in (rust_matcher.MODE_SHADOW, rust_matcher.MODE_ACTIVE):
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                            detail="Mode must be shadow or active.")
+    nets = [n.strip().lower() for n in (data.networks or "").split(",") if n.strip()]
+    if data.enabled and not nets:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
+                            detail="Name at least one network (for example signet), or all.")
+    data.networks = ",".join(nets)
+    try:
+        data.timeout = max(1.0, min(600.0, float(data.timeout)))
+    except (TypeError, ValueError):
+        data.timeout = 120.0
+
+    # Refuse at SAVE what a scan would silently ignore: a form that says
+    # "enabled" over a configuration nothing uses is the failure to avoid.
+    if data.enabled:
+        problem = rust_matcher.url_problem(data.url)
+        if problem:
+            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=problem)
+        stored = await get_rust_matcher_config()
+        incoming = (data.token or "").strip()
+        will_have = (stored.token if stored else "") if not incoming else ("" if incoming == "-" else incoming)
+        if len(will_have) < 16:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail="Enter the service's token (at least 16 characters) before enabling it.",
+            )
+    saved = await update_rust_matcher_config(data)
+    await rust_matcher.refresh_from_db(force=True)
+    return _matcher_view(saved)
+
+
+@silnt_api_router.delete("/api/v1/admin/matcher/config")
+async def api_forget_matcher_config(
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+) -> dict:
+    """Forget what was saved and hand the decision back to the environment."""
+    require_admin(key_info)
+    from .crud import forget_rust_matcher_config
+    from .helpers import rust_matcher
+
+    await forget_rust_matcher_config()
+    await rust_matcher.refresh_from_db(force=True)
+    return _matcher_view(None)
+
+
+@silnt_api_router.get("/api/v1/admin/matcher/health")
+async def api_matcher_health(
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+) -> dict:
+    """Is the service up, does it take our token, and what has it been doing.
+
+    Probes on the page's own schedule; the state-change ntfy lives in the
+    background loop (`probe_matcher_health`) so a page left open and a page
+    closed behave alike. A matcher that is switched off is `enabled: false`, not
+    an outage.
+    """
+    require_admin(key_info)
+    from .helpers import rust_matcher
+
+    await rust_matcher.refresh_from_db(force=True)
+    nets = rust_matcher.active_networks()
+    out: dict = {
+        "enabled": bool(nets),
+        "networks": sorted(nets),
+        "mode": None,
+        "source": rust_matcher.settings_source(),
+        "stats": rust_matcher.stats(),
+        "ok": False, "reachable": False, "token_ok": None,
+        "version": None, "latency_ms": None, "error": "",
+    }
+    if not nets:
+        return out
+    cfg = rust_matcher.any_config()
+    if cfg is None:
+        out["error"] = "Enabled, but the URL or token is not usable; matching stays in-process."
+        return out
+    out["mode"] = cfg.mode
+    out.update(await rust_matcher.probe(cfg))
+    return out
+
+
 # ── Turnstile (the registration form's bot check) ────────────────────────────
 
 @silnt_api_router.get("/api/v1/auth/signup-config")
@@ -6283,10 +6410,33 @@ async def probe_fulcrum_health() -> None:
         logger.warning(f"probe_fulcrum_health error: {e}")
 
 
+async def probe_matcher_health() -> None:
+    """Reachability probe for whispa-matcher, from the background loop. Only
+    runs when matching on the service is switched on — a service nobody asked
+    for being down is not an outage. Best-effort; never raises."""
+    try:
+        from .helpers import rust_matcher
+
+        await rust_matcher.refresh_from_db()
+        if not rust_matcher.active_networks():
+            return
+        cfg = rust_matcher.any_config()
+        if cfg is None:
+            await notify_service_health_change(
+                "Rust matcher", False, "URL or token not usable.")
+            return
+        res = await rust_matcher.probe(cfg)
+        await notify_service_health_change(
+            "Rust matcher", bool(res["ok"]), res["error"] or "")
+    except Exception as e:
+        logger.warning(f"probe_matcher_health error: {e}")
+
+
 async def run_health_probes() -> None:
-    """Run both service probes once (for the background monitor loop)."""
+    """Run the service probes once (for the background monitor loop)."""
     await probe_blindbit_health()
     await probe_fulcrum_health()
+    await probe_matcher_health()
 
 
 # ── Silent Payments transaction helpers ──────────────────────────────────────

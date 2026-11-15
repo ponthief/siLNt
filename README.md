@@ -529,6 +529,39 @@ that moves past it. `tests/test_rust_matcher.py` breaks each of those on purpose
    Only after a clean run, set `SILNT_RUST_MATCHER_MODE=active`. Set it back to
    `shadow`, or unset `NETWORKS`, to stop; either takes effect within 30 seconds.
 
+**From the admin page instead.** The admin portal has a **Rust matcher** card
+beside BlindBit and Fulcrum: on/off, networks, URL, token, shadow/active, the
+request timeout, and a status line that probes the service every few seconds
+(version, latency, **whether it accepts the token**) with running totals since
+the last LNbits restart: blocks answered, fell back, **mismatched**, and the last
+error. Five things about it are each a bug if they go:
+
+- **Once saved there, the page is the authority and the `SILNT_RUST_MATCHER_*`
+  variables are no longer read** — including *off*: a card that says disabled
+  over an environment that still names a network would not be the switch. Never
+  saved, and the environment decides as it always did. *Use environment
+  settings* (`DELETE /api/v1/admin/matcher/config`) forgets what was saved and
+  hands the decision back. `SILNT_RUST_MATCHER_ALLOW_REMOTE_HTTP` stays
+  environment-only on purpose: it loosens a security rule, so it is not a form
+  field.
+- **The token is write-only.** Stored encrypted under the extension's own key
+  (`v2:`), never returned; the page learns `token_set`. Blank keeps it, `-`
+  clears it — the Turnstile secret's rule.
+- **A save refuses what a scan would ignore**: enabling with no usable token, a
+  URL that is not http(s), or plain http to a non-private host is a 400 with the
+  reason, rather than "enabled" over a configuration nothing uses.
+- **The probe checks the token without sending a scan secret.** `/healthz` is
+  unauthenticated, so it proves only that something is listening; the token is
+  checked by posting an empty body to `/v1/match`, where authentication runs
+  before the body is read (401 = wrong token, anything else = accepted).
+- **Down means down only when it is switched on.** The background loop probes
+  the matcher with BlindBit and Fulcrum and sends the same up/down ntfy on a
+  state change, but a service nobody enabled being absent is not an outage.
+
+The installer for the service itself is `deploy/install-service.sh` in the
+whispa-matcher repository (systemd unit, no-login user, token in a 0640 file);
+`install-service.sh show-token` prints the value to paste into the card.
+
 In active mode a whole range batch is **one request**, so its blocks are matched
 in parallel; per-block fallbacks send one block at a time and gain less.
 

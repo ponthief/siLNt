@@ -17,6 +17,7 @@ from .models import (
     WalletAddress,
     CloudflareConfig,
     NtfyConfig,
+    RustMatcherConfig,
     TurnstileConfig,
     UpdateUtxoLabel,
     TrustedDevice,
@@ -40,6 +41,7 @@ DEFAULT_CONFIG_NETWORK = "signet"
 CF_CONFIG_ID = "cloudflare_config"
 NTFY_CONFIG_ID = "ntfy_config"
 TURNSTILE_CONFIG_ID = "turnstile_config"
+RUST_MATCHER_CONFIG_ID = "rust_matcher_config"
 BIP352_CHANGE_LABEL_INDEX = 1
 
 async def create_silnt_wallet(wallet: WalletAccount) -> WalletAccount:
@@ -785,6 +787,69 @@ async def update_ntfy_config(config: NtfyConfig) -> NtfyConfig:
             {"id": NTFY_CONFIG_ID, "json_data": json_data},
         )
     return config
+
+
+async def get_rust_matcher_config() -> Optional[RustMatcherConfig]:
+    """The saved matcher settings with the token DECRYPTED, or None if the admin
+    page has never saved any (in which case the environment decides)."""
+    row = await db.fetchone(
+        "SELECT json_data FROM silnt.backend_config WHERE id = :id",
+        {"id": RUST_MATCHER_CONFIG_ID},
+    )
+    if not row:
+        return None
+    cfg = RustMatcherConfig(**json.loads(row["json_data"]))
+    if cfg.token:
+        try:
+            cfg.token = _pj_decrypt(cfg.token)
+        except Exception:
+            # Written under a key that is gone. An unreadable token is no token:
+            # the page says "not set" and the operator enters it again.
+            from loguru import logger as _logger
+            _logger.warning("rust matcher token could not be decrypted; treating as unset")
+            cfg.token = ""
+    return cfg
+
+
+async def update_rust_matcher_config(config: RustMatcherConfig) -> RustMatcherConfig:
+    """Store the matcher settings. A blank token keeps the stored one and "-"
+    clears it (see RustMatcherConfig). The token is encrypted at rest; the
+    returned object carries it in the clear for the caller's own use only."""
+    stored = await get_rust_matcher_config()
+    incoming = (config.token or "").strip()
+    if incoming == "-":
+        config.token = ""
+    elif not incoming:
+        config.token = stored.token if stored else ""
+    else:
+        config.token = incoming
+
+    to_store = config.copy()
+    to_store.token = _pj_encrypt(config.token) if config.token else ""
+    json_data = to_store.json()
+    existing = await db.fetchone(
+        "SELECT id FROM silnt.backend_config WHERE id = :id",
+        {"id": RUST_MATCHER_CONFIG_ID},
+    )
+    if existing:
+        await db.execute(
+            "UPDATE silnt.backend_config SET json_data = :json_data WHERE id = :id",
+            {"json_data": json_data, "id": RUST_MATCHER_CONFIG_ID},
+        )
+    else:
+        await db.execute(
+            "INSERT INTO silnt.backend_config (id, json_data) VALUES (:id, :json_data)",
+            {"id": RUST_MATCHER_CONFIG_ID, "json_data": json_data},
+        )
+    return config
+
+
+async def forget_rust_matcher_config() -> None:
+    """Drop the saved settings, handing the decision back to the environment."""
+    await db.execute(
+        "DELETE FROM silnt.backend_config WHERE id = :id",
+        {"id": RUST_MATCHER_CONFIG_ID},
+    )
 
 
 async def get_turnstile_config() -> TurnstileConfig:

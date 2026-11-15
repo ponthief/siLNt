@@ -983,6 +983,7 @@ async def _service_match(cfg, client, jobs, scan_secret_bytes, spend_pub_bytes, 
         )
     except rust_matcher.MatcherUnavailable as e:
         client.stats.rust_fallbacks += len(jobs)
+        rust_matcher.note(fallbacks=len(jobs), error=str(e))
         rust_matcher._warn_every(
             "unavailable", 60,
             "rust matcher gave no answer ({}); matching {} block(s) in-process",
@@ -993,6 +994,7 @@ async def _service_match(cfg, client, jobs, scan_secret_bytes, spend_pub_bytes, 
         raise
     except Exception as e:  # a bug here must not stop a scan
         client.stats.rust_fallbacks += len(jobs)
+        rust_matcher.note(fallbacks=len(jobs), error=f"{type(e).__name__}: {e}")
         rust_matcher._warn_every(
             "unexpected", 60,
             "rust matcher failed unexpectedly ({}: {}); matching in-process",
@@ -1000,13 +1002,16 @@ async def _service_match(cfg, client, jobs, scan_secret_bytes, spend_pub_bytes, 
         )
         return {}
     finally:
-        client.stats.rust_seconds += time.perf_counter() - started
+        _elapsed = time.perf_counter() - started
+        client.stats.rust_seconds += _elapsed
+        rust_matcher.note(seconds=_elapsed)
 
     out: dict = {}
     for h, _fn, _entries, _utxos in jobs:
         res = raw.get(h)
         if res is None or isinstance(res, str):
             client.stats.rust_fallbacks += 1
+            rust_matcher.note(fallbacks=1, error=res if isinstance(res, str) else "")
             if isinstance(res, str):
                 rust_matcher._warn_every(
                     f"block-error:{res}", 60,
@@ -1018,12 +1023,14 @@ async def _service_match(cfg, client, jobs, scan_secret_bytes, spend_pub_bytes, 
             out[h] = _owned_from_service(h, res, label_by_m)
         except KeyError:
             client.stats.rust_fallbacks += 1
+            rust_matcher.note(fallbacks=1, error="label index not requested")
             logger.warning(
                 f"rust matcher returned a label index this wallet does not scan "
                 f"for block {h}; matching it in-process"
             )
             continue
         client.stats.rust_blocks += 1
+        rust_matcher.note(blocks=1)
     return out
 
 
@@ -1033,6 +1040,7 @@ def _report_shadow(client, height, python_owned, service_owned) -> None:
     if py == rs:
         return
     client.stats.rust_mismatches += 1
+    rust_matcher.note(mismatches=1)
     only_py = [x for x in py if x not in rs]
     only_rs = [x for x in rs if x not in py]
     # Identify, never reproduce: txid, vout and chain are enough to find the
@@ -1064,6 +1072,7 @@ async def _match_jobs(client, jobs, scan_secret_bytes, spend_pub_bytes, labels, 
         except Exception as e:
             return e
 
+    await rust_matcher.refresh_from_db()
     cfg = rust_matcher.config_for(network)
     if cfg is None or not jobs:
         return {job[0]: await python_one(job) for job in jobs}
