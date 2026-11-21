@@ -58,3 +58,30 @@ def sp_from_uri(uri: str) -> str:
     found = [v for v in found if v.lower().startswith(("sp1", "tsp1"))]
     # More than one is ambiguous; BIP-353 refuses ambiguous records and so do we.
     return found[0] if len(found) == 1 else ""
+
+
+def client_resolve_shape(resolved: dict) -> dict:
+    """What ``GET /bip353/resolve`` hands the WhiSPa apps.
+
+    Builds that predate ``tsp=`` read ``result`` with ``str.replace('sp=', '')``.
+    Handed ``bitcoin:?tsp=tsp1…`` they compute ``bitcoin:?ttsp1…``, which is not
+    the wallet's address, and the wallet screen reports **"Tampering detected"**
+    against a record that is perfectly correct. So ``result`` stays in the shape
+    those builds can read, and the truth about the record travels beside it:
+
+    * ``result``     - ``bitcoin:?sp=<address>`` (legacy shape, parseable by every build)
+    * ``uri``        - the record exactly as published in DNS
+    * ``sp_address`` - the bare address
+
+    Current builds parse either; nothing is lost. A record carrying no Silent
+    Payments address is returned untouched, so it still fails every comparison.
+    """
+    sp = sp_from_uri((resolved or {}).get("result", ""))
+    if not sp:
+        return resolved
+    return {
+        **resolved,
+        "uri": resolved["result"],
+        "sp_address": sp,
+        "result": f"bitcoin:?sp={sp}",
+    }

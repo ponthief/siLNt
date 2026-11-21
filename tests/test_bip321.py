@@ -101,3 +101,35 @@ def test_the_tamper_sweep_keeps_a_non_sp_record_visible():
     i = text.index("tamper sweep: purged stale BitMail records")
     section = text[i : i + 4000]
     assert "sp_from_uri(raw) or raw" in section
+
+
+def _old_client_parse(result: str) -> str:
+    """The parser every build before this change ships."""
+    return result.replace("bitcoin:?sp=", "").replace("sp=", "").strip()
+
+
+def test_an_older_app_is_never_handed_a_tsp_record_to_misread():
+    """Rewriting a record to tsp= must not make old phones cry tamper."""
+    raw = {"address": "a@b.c", "result": f"bitcoin:?tsp={SIGNET}", "dnssec": True}
+    out = b.client_resolve_shape(raw)
+    assert _old_client_parse(out["result"]) == SIGNET          # old build sees the address
+    assert out["sp_address"] == SIGNET and out["uri"] == raw["result"]
+    # and without the shim it would not have:
+    assert _old_client_parse(raw["result"]) != SIGNET
+
+
+def test_a_legacy_record_and_a_mainnet_one_pass_through_the_shim_unchanged_in_meaning():
+    for uri, addr in ((f"bitcoin:?sp={SIGNET}", SIGNET), (f"bitcoin:?sp={MAIN}", MAIN)):
+        out = b.client_resolve_shape({"result": uri})
+        assert _old_client_parse(out["result"]) == addr
+
+
+def test_a_record_without_an_sp_address_is_returned_untouched():
+    raw = {"result": "bitcoin:?lno=lno1bogusoffer"}
+    assert b.client_resolve_shape(raw) is raw
+
+
+def test_the_resolve_endpoint_goes_through_the_shim():
+    text = (ROOT / "views_api.py").read_text()
+    i = text.index('"/api/v1/bip353/resolve"')
+    assert "client_resolve_shape(bip353_resolve(" in text[i : i + 800]

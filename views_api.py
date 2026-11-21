@@ -23,7 +23,7 @@ from .helpers.scan import (
     BIP352_LABELED_ADDRESS_INDICES,
 )
 from .helpers.address_resolver import bip353_resolve
-from .helpers.bip321 import sp_from_uri, sp_uri
+from .helpers.bip321 import client_resolve_shape, sp_from_uri, sp_uri
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, Cookie
 from lnbits.core.models import WalletTypeInfo
 from lnbits.decorators import require_admin_key, require_invoice_key
@@ -1725,7 +1725,9 @@ async def api_resolve_bip353(
     ),
     key_info: WalletTypeInfo = Depends(require_trusted_device),
 ) -> dict:
-    return bip353_resolve(address.strip())
+    # Legacy-shaped `result` so builds that predate tsp= do not call a correct
+    # record tampering; see helpers/bip321.py::client_resolve_shape.
+    return client_resolve_shape(bip353_resolve(address.strip()))
 
 
 @silnt_api_router.get("/api/v1/bip353/available")
