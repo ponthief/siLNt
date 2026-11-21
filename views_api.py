@@ -23,6 +23,7 @@ from .helpers.scan import (
     BIP352_LABELED_ADDRESS_INDICES,
 )
 from .helpers.address_resolver import bip353_resolve
+from .helpers.bip321 import sp_from_uri, sp_uri
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, Cookie
 from lnbits.core.models import WalletTypeInfo
 from lnbits.decorators import require_admin_key, require_invoice_key
@@ -539,7 +540,7 @@ async def api_wallet_create(
             try:
                 resolved = bip353_resolve(data.hr_address)
                 result = resolved.get("result", "")
-                result = result.replace("bitcoin:?sp=", "").replace("sp=", "").strip()
+                result = sp_from_uri(result)
                 if result.lower() != sp_address.lower():
                     raise HTTPException(
                         status_code=HTTPStatus.BAD_REQUEST,
@@ -596,7 +597,7 @@ async def api_wallet_update(
             try:
                 resolved = bip353_resolve(data.hr_address)
                 result = resolved.get("result", "")
-                result = result.replace("bitcoin:?sp=", "").replace("sp=", "").strip()
+                result = sp_from_uri(result)
                 if result.lower() != wallet.sp_address.lower():
                     raise HTTPException(
                         status_code=HTTPStatus.BAD_REQUEST,
@@ -3379,6 +3380,55 @@ async def api_admin_list_requests(
             "requester_email":    account.email    if account else None,
         })
     return {"requests": enriched}
+
+
+@silnt_api_router.post("/api/v1/bip353/admin/republish")
+async def api_admin_republish_bip353(
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """Rewrite issued BitMail records so they use the BIP-321 key for their network.
+
+    Records written before 2026-11-21 carry ``bitcoin:?sp=tsp1…`` on signet, which
+    Sparrow does not read (it looks for ``tsp=``). Only the KEY changes: a record is
+    rewritten solely when it already resolves to the address siLNt issued it for.
+    One that points anywhere else is somebody else's change - or a tamper - and is
+    reported, never overwritten here. Idempotent: a record already canonical is
+    left alone.
+    """
+    require_admin(key_info)
+    cf = await get_cloudflare_config()
+    if not cf.api_token or not cf.zone_id or not cf.domain:
+        raise HTTPException(
+            status_code=HTTPStatus.PRECONDITION_FAILED,
+            detail="Cloudflare integration is not configured.",
+        )
+    out = {"rewritten": [], "already_current": 0, "skipped": []}
+    for row in await list_approved_bitmails():
+        name = (row.get("final_username") or "").strip().lower()
+        sp = (row.get("sp_address") or "").strip()
+        if not name or not sp:
+            continue
+        want = sp_uri(sp)
+        try:
+            current = (bip353_resolve(f"{name}@{cf.domain}").get("result") or "").strip()
+        except Exception as e:
+            out["skipped"].append({"name": name, "reason": f"not resolvable: {getattr(e, 'detail', e)}"})
+            continue
+        if current == want:
+            out["already_current"] += 1
+            continue
+        if sp_from_uri(current).lower() != sp.lower():
+            out["skipped"].append({"name": name, "reason": "record points at a different address; left alone"})
+            continue
+        try:
+            await create_bip353_record(
+                api_token=cf.api_token, zone_id=cf.zone_id, domain=cf.domain,
+                username=name, sp_address=sp,
+            )
+            out["rewritten"].append(name)
+        except Exception as e:
+            out["skipped"].append({"name": name, "reason": f"write failed: {e}"})
+    return out
 
 
 @silnt_api_router.post("/api/v1/bip353/admin/requests/{req_id}/approve")
@@ -6307,7 +6357,12 @@ async def _run_bitmail_tamper_sweep_inner() -> dict:
         checked += 1
         try:
             resolved = bip353_resolve(bitmail)
-            result = (resolved.get("result", "") or "").replace("bitcoin:?sp=", "").replace("sp=", "").strip()
+            raw = (resolved.get("result", "") or "").strip()
+            # An instruction that carries no Silent Payments address is NOT "nothing
+            # to compare": a record repointed to something else is the tamper this
+            # sweep exists to catch, so the raw text stands in and fails the
+            # comparison below.
+            result = sp_from_uri(raw) or raw
         except Exception:
             # A resolution failure is not proof of tampering (DNS hiccup, record
             # removed by the owner, etc.) — don't alert on it here.

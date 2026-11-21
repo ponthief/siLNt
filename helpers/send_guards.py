@@ -27,6 +27,7 @@ from ..crud import (
     send_ntfy_notification,
 )
 from .address_resolver import bip353_resolve
+from .bip321 import sp_from_uri
 from .chains import recipient_chain_mismatch
 
 
@@ -116,7 +117,7 @@ async def resolve_recipient(recipient: str, network: str) -> str:
         return recipient
 
     resolved = bip353_resolve(recipient)
-    result = resolved["result"].replace("bitcoin:?sp=", "")
+    result = sp_from_uri(resolved["result"])
     if not result.startswith("sp1") and not result.startswith("tsp1"):
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,

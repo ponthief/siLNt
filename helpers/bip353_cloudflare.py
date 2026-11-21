@@ -1,12 +1,16 @@
 """
 BIP-353 DNS record management via Cloudflare API.
 Creates/updates TXT records of the form:
-  {username}.user._bitcoin-payment.{domain}  →  "bitcoin:?sp={sp_address}"
+  {username}.user._bitcoin-payment.{domain}  →  "bitcoin:?sp={sp_address}"      (mainnet)
+                                                 "bitcoin:?tsp={sp_address}"     (signet / testnet)
+
+The key is the address's own HRP, per BIP-321 — see helpers/bip321.py.
 """
 
 import httpx
 from loguru import logger
 from ..crud import get_cloudflare_config
+from .bip321 import sp_uri
 
 CF_API = "https://api.cloudflare.com/client/v4"
 
@@ -29,7 +33,7 @@ def bip353_record_name(username: str, domain: str) -> str:
 
 def bip353_record_content(sp_address: str) -> str:
     """TXT record content per BIP-353 spec."""
-    return f"bitcoin:?sp={sp_address}"
+    return sp_uri(sp_address)
 
 
 async def get_zone_domain(api_token: str, zone_id: str) -> str:
