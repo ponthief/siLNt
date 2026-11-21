@@ -98,6 +98,7 @@ from .helpers.scan import BlindBitOracleClient
 from .helpers.fee_rates_backend import  get_recommended_fees, get_btc_usd_rate
 from .helpers.send_guards import (
     require_recipient_network,
+    bitmail_chain_mismatch,
     resolve_recipient,
     validate_spendable_utxos,
 )
@@ -227,6 +228,7 @@ from .crud import (
     list_sp_contacts,
     sp_addresses_in_use,
     update_sp_contact_value,
+    get_sp_contact_network,
     update_sp_contact_label,
     delete_sp_contact,
     get_tango_ln_address,
@@ -4751,6 +4753,12 @@ async def api_sp_contacts_create(
     # one on the wrong chain is a send that cannot succeed, saved under a name
     # that says it can. Same rule and same wording as the send itself.
     require_recipient_network(value, network)
+    # A BitMail carries no chain, so the line above let it through. Resolve it
+    # once: one that points at the other chain is refused here, not on the day
+    # somebody pays it. A lookup that cannot answer does not refuse.
+    problem = await bitmail_chain_mismatch(value, network)
+    if problem:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=problem)
     try:
         c = await create_sp_contact(key_info.wallet.user, data.label, value, network)
     except ValueError as e:
@@ -4781,6 +4789,11 @@ async def api_sp_contacts_update(
                     "Recipient must be a BitMail name (name@domain) or an SP "
                     "address (sp1…/tsp1…)."
                 )
+            if "@" in value:
+                net = await get_sp_contact_network(cid, key_info.wallet.user)
+                problem = await bitmail_chain_mismatch(value, net) if net else None
+                if problem:
+                    raise ValueError(problem)
             await update_sp_contact_value(cid, key_info.wallet.user, value)
         if data.label is not None:
             await update_sp_contact_label(cid, key_info.wallet.user, data.label)

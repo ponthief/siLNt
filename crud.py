@@ -3702,6 +3702,15 @@ async def update_sp_contact_value(cid: str, user_id: str, value: str) -> None:
     )
 
 
+async def get_sp_contact_network(cid: str, user_id: str) -> str | None:
+    """The network a contact is saved under, or None when it is not this user's."""
+    row = await db.fetchone(
+        "SELECT network FROM silnt.sp_contacts WHERE id = :id AND user_id = :uid",
+        {"id": cid, "uid": user_id},
+    )
+    return row["network"] if row else None
+
+
 async def sp_addresses_in_use(addresses: set, network: str) -> set:
     """Which of these SP addresses a WhiSPa wallet on this network holds RIGHT
     NOW, lowercased.

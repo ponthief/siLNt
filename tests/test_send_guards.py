@@ -251,3 +251,85 @@ async def test_a_bitmail_on_another_domain_is_not_second_guessed():
     g.get_cloudflare_config = cf
     g.get_issued_bitmail_sp_address = issued
     assert await g.resolve_recipient("bob@someoneelse.net", "mainnet") == "sp1qqelsewhere"
+
+
+# ── saving a BitMail contact on the wrong chain ─────────────────────────────
+# recipient_chain_mismatch returns None for any name@domain (a name carries no
+# chain), so a mainnet BitMail could be saved from a signet app and fail only
+# when somebody tried to pay it. bitmail_chain_mismatch resolves it once at save
+# time. A lookup that cannot answer is not a verdict.
+
+MAIN_SP = "sp1" + "q" * 40
+SIGNET_SP = "tsp1" + "q" * 40
+
+
+def _resolves_to(monkeypatch, address):
+    monkeypatch.setattr(
+        g, "bip353_resolve", lambda name: {"result": f"bitcoin:?sp={address}"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_mainnet_bitmail_is_refused_on_signet(monkeypatch):
+    _resolves_to(monkeypatch, MAIN_SP)
+    problem = await g.bitmail_chain_mismatch("alice@example.com", "signet")
+    assert problem and "mainnet" in problem and "signet" in problem
+
+
+@pytest.mark.asyncio
+async def test_a_signet_bitmail_is_refused_on_mainnet(monkeypatch):
+    _resolves_to(monkeypatch, SIGNET_SP)
+    assert await g.bitmail_chain_mismatch("alice@example.com", "mainnet")
+
+
+@pytest.mark.asyncio
+async def test_a_bitmail_on_the_same_chain_is_fine(monkeypatch):
+    _resolves_to(monkeypatch, SIGNET_SP)
+    assert await g.bitmail_chain_mismatch("alice@example.com", "signet") is None
+    _resolves_to(monkeypatch, MAIN_SP)
+    assert await g.bitmail_chain_mismatch("alice@example.com", "mainnet") is None
+
+
+@pytest.mark.asyncio
+async def test_the_wording_is_the_address_wording(monkeypatch):
+    """Two apps that agree to refuse and disagree about why is still a drift:
+    a BitMail gets exactly the sentence an address does."""
+    _resolves_to(monkeypatch, MAIN_SP)
+    assert await g.bitmail_chain_mismatch("a@example.com", "signet") == \
+        g.recipient_chain_mismatch(MAIN_SP, "signet")
+
+
+@pytest.mark.asyncio
+async def test_a_lookup_that_cannot_answer_does_not_refuse(monkeypatch):
+    """DNS down, a name not published yet, a DNSSEC failure: the resolver's
+    trouble is not a verdict on the contact. The send resolves it again."""
+    def boom(name):
+        raise RuntimeError("no such record")
+
+    monkeypatch.setattr(g, "bip353_resolve", boom)
+    assert await g.bitmail_chain_mismatch("alice@example.com", "signet") is None
+
+    monkeypatch.setattr(g, "bip353_resolve", lambda name: {"result": "garbage"})
+    assert await g.bitmail_chain_mismatch("alice@example.com", "signet") is None
+
+
+@pytest.mark.asyncio
+async def test_an_address_is_not_this_functions_business(monkeypatch):
+    """Addresses are judged by recipient_chain_mismatch without a lookup; this
+    must not resolve anything for one."""
+    def never(name):
+        raise AssertionError("resolved an address")
+
+    monkeypatch.setattr(g, "bip353_resolve", never)
+    assert await g.bitmail_chain_mismatch(MAIN_SP, "signet") is None
+    assert await g.bitmail_chain_mismatch("", "signet") is None
+
+
+def test_both_contact_endpoints_use_it():
+    """Create AND repoint. Repointing is how a contact is fixed, so leaving it
+    out would make the edit the way round the check create enforces."""
+    src = (ROOT / "views_api.py").read_text()
+    for fn in ("api_sp_contacts_create", "api_sp_contacts_update"):
+        start = src.index(f"async def {fn}")
+        body = src[start: src.index("@silnt_api_router", start)]
+        assert "bitmail_chain_mismatch(" in body, fn

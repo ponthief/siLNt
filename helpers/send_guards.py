@@ -13,6 +13,7 @@ Neither function takes or returns key material.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from http import HTTPStatus
 
@@ -41,6 +42,33 @@ def require_recipient_network(recipient: str, network: str) -> None:
     problem = recipient_chain_mismatch(recipient, network)
     if problem:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=problem)
+
+
+async def bitmail_chain_mismatch(recipient: str, network: str) -> str | None:
+    """For SAVING a BitMail contact: the refusal text if the name resolves to the
+    other chain, else None.
+
+    recipient_chain_mismatch returns None for any name@domain, because a name
+    carries no chain and is judged once resolved. A send resolves it and refuses
+    (resolve_recipient), but saving a contact never did, so a mainnet BitMail
+    could be saved from a signet app and fail only when somebody tried to pay it
+    — a contact on the wrong chain is a send that cannot succeed, saved under a
+    name that says it can.
+
+    A lookup that cannot answer is NOT a verdict: DNS down, a name not published
+    yet, a DNSSEC failure all return None here, so a contact is never refused
+    for the resolver's trouble. The send will resolve it again and decide then.
+    Same wording as the address case, on purpose; see helpers/chains.py.
+    """
+    recipient = (recipient or "").strip()
+    if "@" not in recipient:
+        return None
+    try:
+        resolved = await asyncio.to_thread(bip353_resolve, recipient)
+        result = sp_from_uri(resolved["result"])
+    except Exception:
+        return None
+    return recipient_chain_mismatch(result, network)
 
 
 async def validate_spendable_utxos(
