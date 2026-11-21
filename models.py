@@ -1,6 +1,6 @@
 from typing import Optional, List
 from fastapi import Query
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from datetime import datetime
 import re
 
@@ -17,8 +17,6 @@ class CreateWallet(BaseModel):
     title:       str
     network:     str = "mainnet"
     hr_address:  Optional[str] = None    
-    mnemonic:    Optional[str] = None    
-    passphrase:  Optional[str] = None    
     last_height: Optional[int] = None
 
 class BackendConfig(BaseModel):
@@ -134,26 +132,41 @@ class BackendConfig(BaseModel):
         ).rstrip("/")
 
 class CreateWallet(BaseModel):
-    mnemonic: str = None
     title: str = None
     network: str = "mainnet"
-    passphrase: Optional[str] = ""
     hr_address: Optional[str] = None
     last_height: Optional[str] = None
     balance: Optional[int] = None
-    # Client-derived Silent Payments address. When present, the client generated
-    # the seed and derived keys on-device (server never sees the mnemonic), so the
-    # server stores this address as-is and skips server-side generation/derivation.
+    # The Silent Payments address the client derived on its own device. Required
+    # to create a wallet: the server stores it as given and never holds the seed
+    # or any key. There is no seed phrase or passphrase field, and one sent is
+    # refused (below) rather than quietly dropped, so a secret cannot cross the
+    # wire unnoticed. The server-side derive-and-return path was removed
+    # 2026-11-21.
     sp_address: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_key_material(cls, data):
+        """A seed phrase or passphrase in the body is a client that has not
+        moved on-device. Silently ignoring one would still have carried it here;
+        refusing says so, and the person using that build sees why."""
+        if isinstance(data, dict):
+            sent = [k for k in ("mnemonic", "passphrase") if data.get(k) not in (None, "")]
+            if sent:
+                raise ValueError(
+                    "This server does not accept a seed phrase or passphrase. "
+                    "Update the app: wallet keys are derived on your device."
+                )
+        return data
 
     @field_validator("last_height", mode="before")
     @classmethod
     def _birth_height_as_text(cls, v):
         """Accept a block height as a number or as digits.
 
-        Both clients send a JSON number; the field is text because the legacy
-        server-derive path uses str(height) as the mnemonic's encryption key.
-        Pydantic v1 coerced int to str silently and v2 refuses, which turned
+        Both clients send a JSON number; the field is text because it was once the
+        key for an encrypted mnemonic. Pydantic v1 coerced int to str silently and v2 refuses, which turned
         every wallet import and restore into "Input should be valid string".
         A bool is an int in Python and is not a height; anything that is not
         plain digits is refused here rather than as a ValueError later.

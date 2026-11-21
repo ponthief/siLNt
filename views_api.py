@@ -11,7 +11,6 @@ import time as _time
 from embit import script
 from .helpers.wallet import (
     generate_silent_wallet_address,
-    decrypt_mnemonic,
     generate_labeled_sp_address,
     get_spend_pub_from_secret,
     _compute_amounts,
@@ -436,11 +435,6 @@ async def api_wallet_create(
                 )
             last_height = min_height
 
-        # ★ 2. Generate or import + ★ 3. checksum validation
-        #    data.mnemonic is encrypted (as before) when importing. Decrypt first,
-        #    then validate/generate. If no mnemonic supplied → generate fresh.
-        passphrase = (data.passphrase or "").strip()
-
         new_wallet = WalletAccount(
             id=wallet_id,
             user=key_info.wallet.user,
@@ -454,54 +448,24 @@ async def api_wallet_create(
             scan_secret="",
         )
 
-        if data.sp_address:
-            # Client-side derivation: the app generated the seed and derived the
-            # keys on-device, so the server never sees the mnemonic or the private
-            # keys. Trust the supplied address (self-custody) and skip derivation.
-            sp_address = data.sp_address.strip()
-            expected_prefix = "sp1" if data.network == "mainnet" else "tsp1"
-            if not sp_address.startswith(expected_prefix):
-                raise HTTPException(
-                    status_code=HTTPStatus.BAD_REQUEST,
-                    detail=f"sp_address must start with '{expected_prefix}' for {data.network}.",
-                )
-            # Never known to the server; the client stores its own keys/mnemonic.
-            scan_secret_hex = ""
-            spend_key_hex = ""
-            mnemonic_plain = None
-            was_generated = False
-        else:
-            # Legacy path: server generates (or imports) the seed and derives keys.
-            # Kept for older clients and the web app until they move on-device too.
-            mn = Mnemonic("english")
-            if data.mnemonic:                      # ← only decrypt when present
-                mnemonic_plain = decrypt_mnemonic(data.mnemonic, str(last_height))
-                words = mnemonic_plain.strip().lower().split()
-                if len(words) != 12:
-                    raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
-                        detail=f"Mnemonic must be exactly 12 words (got {len(words)}).")
-                mnemonic_plain = " ".join(words)
-                if not mn.check(mnemonic_plain):
-                    raise HTTPException(status_code=HTTPStatus.BAD_REQUEST,
-                        detail="Invalid mnemonic — the checksum (last word) is incorrect.")
-                was_generated = False
-            else:
-                mnemonic_plain = mn.generate(strength=128)   # fresh 12 words
-                was_generated = True
-
-            (
-                sp_address,
-                scan_secret_hex,
-                spend_key_hex,
-            ) = await generate_silent_wallet_address(
-                mnemonic_plain,
-                passphrase=passphrase,
-                network=data.network,
+        # The client derives its keys on its own device and sends only the
+        # address. There is no server-side derivation: nothing here ever holds a
+        # seed phrase, a passphrase or a key (removed 2026-11-21).
+        if not (data.sp_address or "").strip():
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail=(
+                    "sp_address is required. Update the app: wallet keys are "
+                    "derived on your device and only the address is sent."
+                ),
             )
-            if not all([sp_address, scan_secret_hex, spend_key_hex]):
-                raise ValueError(
-                    f"Wallet '{data.title}' cannot be created with given mnemonic!"
-                )
+        sp_address = data.sp_address.strip()
+        expected_prefix = "sp1" if data.network == "mainnet" else "tsp1"
+        if not sp_address.startswith(expected_prefix):
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail=f"sp_address must start with '{expected_prefix}' for {data.network}.",
+            )
 
         _stable_seed = f"{data.network}:{sp_address}".encode()
         wallet_id = "sp" + hashlib.sha256(_stable_seed).hexdigest()[:20]
@@ -561,14 +525,8 @@ async def api_wallet_create(
     return {
         "wallet_id":   wallet_id,
         "sp_address":  sp_address,
-        "scan_secret": scan_secret_hex,   # client must store securely
-        "spend_key":   spend_key_hex,     # client must store securely
-        # ★ Return the mnemonic so the client can show it once (esp. on generate)
-        "mnemonic":    mnemonic_plain,
-        "passphrase":  passphrase if passphrase else None,
         "last_height": last_height,
         "network":     data.network,
-        "generated":   was_generated,
     }
 
 
