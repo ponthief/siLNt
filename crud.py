@@ -3930,7 +3930,7 @@ async def list_approved_bitmails() -> list[dict]:
     recorded, and the owning user_id/wallet_id. Used by the tamper sweep to
     resolve each via DNS and compare against the recorded SP."""
     rows = await db.fetchall(
-        """SELECT final_username, sp_address, user_id, wallet_id
+        """SELECT final_username, sp_address, user_id, wallet_id, address_id
            FROM silnt.bip353_requests
            WHERE status = 'approved' AND final_username IS NOT NULL""",
     )

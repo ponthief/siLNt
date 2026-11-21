@@ -6347,7 +6347,8 @@ async def _run_bitmail_tamper_sweep_inner() -> dict:
         # dead wallet must not keep generating tamper checks/alerts. This also
         # self-heals orphans created before delete-time cleanup existed.
         wid = (row.get("wallet_id") or "").strip()
-        if wid and not await get_silnt_wallet(wid):
+        owner = await get_silnt_wallet(wid) if wid else None
+        if wid and not owner:
             try:
                 await delete_bip353_requests_for_wallet(wid)
                 await delete_admin_alerts_for_wallet(wid)
@@ -6356,6 +6357,24 @@ async def _run_bitmail_tamper_sweep_inner() -> dict:
                 logger.warning(f"tamper sweep: could not purge stale records for {wid}: {e}")
             continue
         bitmail = f"{uname}@{our_domain}"
+        # A BitMail the owner has REMOVED is not one to watch. Removing it deletes
+        # the DNS record on purpose but leaves the approved request row (it keeps
+        # the wallet's lifetime BitMail cap and reserves the username), so without
+        # this the sweep resolved every removed name on every pass, found nothing
+        # published, and logged it each time. Live = the wallet (or the labeled
+        # address the request was for) still carries this exact BitMail.
+        if owner is not None:
+            aid = (row.get("address_id") or "").strip()
+            try:
+                if aid:
+                    addr = await get_wallet_address(aid)
+                    carried = (getattr(addr, "hr_address", "") or "") if addr else ""
+                else:
+                    carried = getattr(owner, "hr_address", "") or ""
+            except Exception:
+                carried = bitmail          # cannot tell: keep checking, never skip on doubt
+            if carried.strip().lower() != bitmail.lower():
+                continue
         checked += 1
         try:
             resolved = bip353_resolve(bitmail)
