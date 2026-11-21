@@ -210,27 +210,8 @@ class ScanWalletRequest(BaseModel):
     spend_key: Optional[str] = None
 
 
-class UtxoForTx(BaseModel):
-    txid: str
-    vout: int = 0
-    amount: int
-    priv_key_tweak: str
-    pub_key: str
-    label: Optional[str] = None
-
-class BuildTxRequest(BaseModel):
-    wallet_id: str
-    recipient: str
-    amount: int
-    fee_rate: float = 1
-    memo: str = ""
-    utxos: list[dict]
-    spend_key: str
-    scan_secret:  str
-
-
 class PrepareTxRequest(BaseModel):
-    """Everything /tx/build takes EXCEPT the keys.
+    """What a send needs from the server: outpoints, never keys.
 
     The client signs locally (src/services/spSign.ts) and posts the finished
     tx_hex to /tx/broadcast, so the spend key stops crossing the network. The
@@ -250,32 +231,9 @@ class PrepareTxRequest(BaseModel):
     utxos: list[dict]
 
 
-class SpendPlainRequest(BaseModel):
-    """
-    Pay out of the plain BIP-84 chain. The coins go straight from there to the
-    destination without entering the Silent Payments wallet — one transaction
-    rather than two, and nothing ties them to the rest of the balance.
-
-    `keys` are the raw hex private keys for the m/84'/coin'/0'/0/i addresses
-    being spent, sent transiently for signing and never stored. `amount` is in
-    sats; omit it to send everything on those addresses. `change_address` is
-    required when sending a specific amount and must be on the same chain — the
-    server refuses anything else, so a malformed request cannot route the
-    remainder elsewhere.
-    """
-    wallet_id: str
-    keys: list[str]
-    destination: str
-    amount: Optional[int] = None
-    change_address: Optional[str] = None
-    fee_rate: float = 1
-
-
 class PreparePlainRequest(BaseModel):
     """
-    Everything /plain/spend needs except the keys.
-
-    The same request with `addresses` in place of `keys`: the server still finds
+    The SegWit chain's spend request, by address: the server finds
     the coins, checks the destination and does every piece of the arithmetic,
     but it has nothing that can move them. The client derives the addresses from
     its own xprv, so it can match each returned coin back to the key that signs
@@ -300,11 +258,6 @@ class BroadcastPlainRequest(BaseModel):
     incoming_amount: Optional[int] = None
 
 
-class RecoverKeysRequest(BaseModel):
-    mnemonic:    str          # encrypted (AES-encrypted with last_height as key)
-    last_height: int          # encryption key + birth height
-    passphrase:  Optional[str] = None   # NEW: BIP-39 passphrase (plaintext)
-    
 class Config(BaseModel):
     sats_denominated: bool = True
     network: str = "mainnet"

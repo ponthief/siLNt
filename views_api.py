@@ -12,7 +12,6 @@ from embit import script
 from .helpers.wallet import (
     generate_silent_wallet_address,
     decrypt_mnemonic,
-    build_transaction,
     generate_labeled_sp_address,
     get_spend_pub_from_secret,
     _compute_amounts,
@@ -108,12 +107,10 @@ from .helpers.payjoin_merge import build_merged_payjoin
 from .helpers.psbt_combine import combine_and_finalize
 from .helpers.electrum_client import ElectrumClient
 from .helpers.plain import (
-    build_plain_transaction,
     plan_plain_spend,
     hrp_for as plain_hrp_for,
     is_p2wpkh_for_network,
     scan_addresses,
-    plain_address_for_key,
 )
 from .crud import (
     get_silnt_wallets,
@@ -292,19 +289,16 @@ from .models import (
     BackendConfig,
     CreateWallet,
     WalletAccount,
-    BuildTxRequest,
     PrepareTxRequest,
     BroadcastTxRequest,
     BroadcastPlainRequest,
     PreparePlainRequest,
-    SpendPlainRequest,
     Config,
     ScanWalletRequest,
     SaveAddressRequest,
     PreviewAddressRequest,
     CloudflareConfig,
     SetupBip353Request,
-    RecoverKeysRequest,
     ForgotPasswordRequest,
     DeviceVerifyCodeRequest,
     UpdateUtxoLabel,
@@ -1852,65 +1846,6 @@ async def api_prepare_transaction(
     }
 
 
-@silnt_api_router.post("/api/v1/tx/build", dependencies=[Depends(require_trusted_device_admin)])
-async def api_build_transaction(
-    data: BuildTxRequest, key_info: WalletTypeInfo = Depends(require_trusted_device_admin)
-):
-    try:
-        wallet = await get_silnt_wallet(data.wallet_id)
-        if not wallet:
-            raise HTTPException(
-                status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist."
-            )
-        if wallet.user != key_info.wallet.user:
-            raise HTTPException(
-                status_code=HTTPStatus.FORBIDDEN, detail="Access denied."
-            )
-
-        if not data.spend_key:
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST, detail="spend_key is required."
-            )
-        if not data.scan_secret:
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST,
-                detail="scan_secret is required (used to derive change address).",
-            )
-        # Both guards now live in helpers/send_guards.py so that /tx/prepare
-        # runs the same code rather than a second copy. See that module for why.
-        await validate_spendable_utxos(
-            data.wallet_id,
-            data.utxos,
-            bool(get_scan_progress(data.wallet_id).get("active")),
-        )
-        await _refuse_tango_reserved(key_info.wallet.user, data.utxos)
-        data.recipient = await resolve_recipient(data.recipient, wallet.network)
-
-        result = build_transaction(
-            spend_key_hex=data.spend_key,
-            scan_secret_hex = data.scan_secret,
-            recipient=data.recipient,
-            amount=data.amount,
-            fee_rate=data.fee_rate,
-            utxos=data.utxos,
-            network=wallet.network,
-        )
-        # touch_sp_contact used to fire here. It runs on broadcast now:
-        # building is not paying, and with /tx/prepare a client can build,
-        # change its mind and never send — which would have left a contact for
-        # someone who was never paid. Broadcast also sees the pre-resolution
-        # name, which is the one a contact should remember.
-        return result
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error(f"Transaction build failed: {exc}")
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST,
-            detail=f"Failed to build transaction: {str(exc)}",
-        ) from exc
-
-
 @silnt_api_router.post(
     "/api/v1/tx/broadcast", dependencies=[Depends(require_trusted_device_admin)]
 )
@@ -2004,56 +1939,6 @@ async def api_broadcast_transaction(
             detail=f"Could not connect to {base}",
         )
 
-
-@silnt_api_router.post("/api/v1/wallet/{wallet_id}/recover-keys")
-async def api_recover_wallet_keys(
-    wallet_id: str,
-    data: RecoverKeysRequest,
-    key_info: WalletTypeInfo = Depends(require_trusted_device),
-):
-    """
-    Re-derive scan_secret and spend_key from mnemonic for an existing wallet.
-    Verifies the derived sp_address matches the stored one — protects against
-    re-importing the wrong mnemonic.
-    Keys are NEVER stored on the server, only returned transiently.
-    """
-    wallet = await get_silnt_wallet(wallet_id)
-    if not wallet:
-        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="Wallet does not exist.")
-    if wallet.user != key_info.wallet.user:
-        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Access denied.")
-
-    passphrase = (data.passphrase or "").strip()
-    try:
-        mnemonic_plain = decrypt_mnemonic(data.mnemonic, str(data.last_height))
-        sp_address, scan_secret_hex, spend_key_hex = await generate_silent_wallet_address(
-            mnemonic_plain,
-            passphrase=passphrase, 
-            network=wallet.network,
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST,
-            detail=f"Could not derive keys from mnemonic: {str(e)}",
-        )
-
-    # Verify derived address matches the stored one — wrong mnemonic = rejection
-    if sp_address.lower() != wallet.sp_address.lower():
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST,
-            detail=(
-                "The mnemonic you entered does not match this wallet. "
-                "If this wallet was created with a passphrase, make sure you enter "
-                "the exact same passphrase."
-            ),
-        )
-
-    # Return keys transiently — they are not stored anywhere on the server
-    return {
-        "wallet_id":   wallet_id,
-        "scan_secret": scan_secret_hex,
-        "spend_key":   spend_key_hex,
-    }
 
 @silnt_api_router.get("/api/v1/config")
 async def api_get_config(
@@ -4084,74 +3969,6 @@ async def api_plain_prepare(
 
     plan["unconfirmed_sats"] = found["unconfirmed_sats"]
     return plan
-
-
-@silnt_api_router.post(
-    "/api/v1/plain/spend", dependencies=[Depends(require_trusted_device_admin)]
-)
-async def api_plain_spend(
-    data: SpendPlainRequest,
-    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
-):
-    """
-    Pay someone straight out of the plain BIP-84 chain.
-
-    The coins go straight from the plain chain to wherever they are going,
-    without passing through the Silent Payments wallet. Paying the user's own SP
-    address is allowed and is simply how coins move into that wallet — it is a
-    destination like any other, not a separate mode.
-    """
-    wallet = await _plain_wallet_or_403(data.wallet_id, key_info)
-    if not data.keys:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST, detail="keys is required."
-        )
-    if len(data.keys) > MAX_PLAIN_ADDRESSES:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST,
-            detail=f"At most {MAX_PLAIN_ADDRESSES} keys per spend.",
-        )
-    if not (data.destination or "").strip():
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST, detail="A destination is required."
-        )
-
-    try:
-        addresses = [plain_address_for_key(k, wallet.network) for k in data.keys]
-    except Exception:
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail="Invalid key.")
-
-    host, port, tls, _ = await _fulcrum_cfg(wallet.network)
-    try:
-        found = await asyncio.to_thread(scan_addresses, addresses, host, port, tls)
-    except Exception as e:
-        logger.warning(f"pool spend utxo fetch failed ({len(addresses)} addresses): {e}")
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_GATEWAY,
-            detail=f"Could not reach the chain index: {e}",
-        )
-
-    try:
-        built = build_plain_transaction(
-            keys=data.keys,
-            destination=data.destination.strip(),
-            utxos=found["utxos"],
-            fee_rate=data.fee_rate,
-            network=wallet.network,
-            amount=data.amount,
-            change_address=data.change_address,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
-    except Exception as e:
-        logger.error(f"pool spend build failed: {e}")
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST, detail=f"Could not build: {e}"
-        )
-
-    built["unconfirmed_sats"] = found["unconfirmed_sats"]
-    built["destination"] = data.destination.strip()
-    return built
 
 
 @silnt_api_router.post(

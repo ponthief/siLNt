@@ -1018,11 +1018,12 @@ def test_a_round_whose_coins_are_gone_says_so_in_words():
 def test_the_send_paths_refuse_a_coin_a_round_is_holding():
     """There is no database here to prove it on, so this reads the endpoints.
 
-    Both of them: /tx/prepare quotes the fee and /tx/build still signs for the
-    older clients, and a guard on only one of them is a guard with a way round.
+    /tx/prepare is the only one: /tx/build, which signed for older clients, was
+    removed 2026-11-21 with the spend key it took. A second send endpoint would
+    need the same guard, and test_no_key_endpoints refuses one that takes keys.
     """
     src = (ROOT / "views_api.py").read_text()
-    for marker in ('"/api/v1/tx/prepare"', '"/api/v1/tx/build"'):
+    for marker in ('"/api/v1/tx/prepare"',):
         start = src.index(marker)
         body = src[start : src.index("@silnt_api_router", start + len(marker))]
         assert "_refuse_tango_reserved(" in body, marker

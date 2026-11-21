@@ -147,11 +147,12 @@ def test_the_send_path_checks_the_address_and_the_resolved_bitmail():
     assert body.count("require_recipient_network(") == 2, body
 
 
-def test_both_send_endpoints_pass_the_wallet_s_network():
-    """/tx/build and /tx/prepare share resolve_recipient precisely so they
-    cannot drift; a default network would have undone that."""
+def test_the_send_endpoint_passes_the_wallet_s_network():
+    """/tx/prepare is the one send endpoint now (/tx/build, which took the spend
+    key, was removed 2026-11-21). A default network would be a recipient checked
+    against the wrong chain at exactly the call site that mattered."""
     src = (ROOT / "views_api.py").read_text()
-    assert src.count("resolve_recipient(data.recipient, wallet.network)") == 2
+    assert src.count("resolve_recipient(data.recipient, wallet.network)") == 1
     assert "resolve_recipient(data.recipient)" not in src
 
 
