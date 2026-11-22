@@ -132,4 +132,11 @@ def test_a_record_without_an_sp_address_is_returned_untouched():
 def test_the_resolve_endpoint_goes_through_the_shim():
     text = (ROOT / "views_api.py").read_text()
     i = text.index('"/api/v1/bip353/resolve"')
-    assert "client_resolve_shape(bip353_resolve(" in text[i : i + 800]
+    # The shim must wrap the resolve. It may run the lookup in a thread (a cold
+    # lookup is several DNS round trips since the chain is verified locally) —
+    # that changes how it is called, not whether the answer goes through the shim.
+    import re
+    assert re.search(
+        r"client_resolve_shape\(\s*(?:await asyncio\.to_thread\(\s*)?bip353_resolve",
+        text[i : i + 800],
+    )

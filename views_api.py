@@ -1681,7 +1681,7 @@ async def api_resolve_bip353(
 ) -> dict:
     # Legacy-shaped `result` so builds that predate tsp= do not call a correct
     # record tampering; see helpers/bip321.py::client_resolve_shape.
-    return client_resolve_shape(bip353_resolve(address.strip()))
+    return client_resolve_shape(await asyncio.to_thread(bip353_resolve, address.strip()))
 
 
 @silnt_api_router.get("/api/v1/bip353/available")

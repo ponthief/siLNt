@@ -144,7 +144,9 @@ async def resolve_recipient(recipient: str, network: str) -> str:
     if not user or not domain:
         return recipient
 
-    resolved = bip353_resolve(recipient)
+    # Off the event loop: a cold lookup is several DNS round trips now that the
+    # DNSSEC chain is verified here rather than taken on a resolver's word.
+    resolved = await asyncio.to_thread(bip353_resolve, recipient)
     result = sp_from_uri(resolved["result"])
     if not result.startswith("sp1") and not result.startswith("tsp1"):
         raise HTTPException(
