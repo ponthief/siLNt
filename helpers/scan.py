@@ -1850,18 +1850,47 @@ async def _scan_wallet(
             range(start + batch_start, min(start + batch_start + BATCH_SIZE, end + 1))
         )
 
-    # The in-flight fetch for the NEXT batch, started before matching this one.
+    # The in-flight fetches for the batches AHEAD of the one being matched.
     #
     # Without this the scan alternates between two idle resources: the network
     # waits while a batch matches, then the CPU waits while the next batch
     # downloads, and the wall clock is their sum. Overlapping them makes it
     # roughly their maximum instead.
-    prefetch_task: asyncio.Task | None = None
-    prefetch_heights: list[int] | None = None
+    #
+    # One batch ahead was enough while matching was the slow side. With the Rust
+    # matcher on several workers it is not: 1,400 mainnet blocks spent 13s of a
+    # 36s scan waiting on a fetch that took ~0.58s per batch against 0.35s of
+    # matching, and one batch of lookahead cannot hide a fetch longer than the
+    # match it overlaps. A window of several keeps the oracle busy across the
+    # match. Tunable for the reason BATCH_SIZE is: it is somebody else's server,
+    # and N batches is N times the concurrent requests (each batch is three).
+    # 1 is the old behaviour.
+    PREFETCH_DEPTH = _env_int("SILNT_SCAN_PREFETCH_DEPTH", 3, 1, 8)
+    # batch_start -> (heights, task)
+    prefetch: dict[int, tuple[list[int], asyncio.Task]] = {}
 
     def cancel_prefetch():
-        if prefetch_task is not None and not prefetch_task.done():
-            prefetch_task.cancel()
+        for _heights, task in prefetch.values():
+            if not task.done():
+                task.cancel()
+        prefetch.clear()
+
+    def top_up_prefetch(current_start: int):
+        """Keep the next PREFETCH_DEPTH batches downloading."""
+        if should_stop(wallet_id):
+            return
+        for ahead in range(1, PREFETCH_DEPTH + 1):
+            next_start = current_start + ahead * BATCH_SIZE
+            if next_start >= total_blocks:
+                break
+            if next_start in prefetch:
+                continue
+            next_batch = batch_at(next_start)
+            if next_batch:
+                prefetch[next_start] = (
+                    next_batch,
+                    asyncio.create_task(fetch_range_batch(next_batch, oracle)),
+                )
 
     for batch_start in range(0, total_blocks, BATCH_SIZE):
         if should_stop(wallet_id):
@@ -1885,13 +1914,14 @@ async def _scan_wallet(
             # Take the prefetched data if it is for this batch, otherwise fetch
             # now (first batch, or the prefetch was skipped).
             _t = time.perf_counter()
-            if prefetch_task is not None and prefetch_heights == batch:
-                data = await prefetch_task
+            ready = prefetch.pop(batch_start, None)
+            if ready is not None and ready[0] == batch:
+                data = await ready[1]
             else:
+                if ready is not None:
+                    ready[1].cancel()
                 cancel_prefetch()
                 data = await fetch_range_batch(batch, oracle)
-            prefetch_task = None
-            prefetch_heights = None
             oracle.stats.fetch_seconds += time.perf_counter() - _t
 
             if data.error is not None:
@@ -1904,16 +1934,10 @@ async def _scan_wallet(
                     f"({data.error}); falling back to per-block scanning"
                 )
                 use_range = False
+                cancel_prefetch()
             else:
-                # Start the NEXT batch downloading before matching this one.
-                next_start = batch_start + BATCH_SIZE
-                if next_start < total_blocks and not should_stop(wallet_id):
-                    next_batch = batch_at(next_start)
-                    if next_batch:
-                        prefetch_heights = next_batch
-                        prefetch_task = asyncio.create_task(
-                            fetch_range_batch(next_batch, oracle)
-                        )
+                # Start the NEXT batches downloading before matching this one.
+                top_up_prefetch(batch_start)
 
                 batch_spent = data.spent
                 _t = time.perf_counter()
