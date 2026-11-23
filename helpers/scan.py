@@ -679,6 +679,19 @@ class OracleStats:
     rust_seconds: float = 0.0     # wall time of those requests
     rust_fallbacks: int = 0       # blocks the service could not answer (Python did)
     rust_mismatches: int = 0      # shadow mode: blocks where the answers differed
+    # Where the matcher calls' time went (rust_seconds is their wall time).
+    # build and convert are sequential; encode, round trip, parse and the
+    # service's own figure are summed across concurrent requests.
+    rust_build_seconds: float = 0.0     # Python building each block's wire dicts
+    rust_encode_seconds: float = 0.0    # json-encoding the request bodies
+    rust_roundtrip_seconds: float = 0.0 # upload + service + download
+    rust_parse_seconds: float = 0.0     # decoding the response JSON
+    rust_convert_seconds: float = 0.0   # response rows to OwnedUTXO inputs
+    rust_service_seconds: float = 0.0   # what the service says it spent
+    rust_service_reported: bool = False # whether it said anything at all
+    rust_requests: int = 0
+    rust_sent_bytes: int = 0
+    rust_received_bytes: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -700,6 +713,17 @@ class OracleStats:
             "rust_seconds": round(self.rust_seconds, 2),
             "rust_fallbacks": self.rust_fallbacks,
             "rust_mismatches": self.rust_mismatches,
+            "rust_build_seconds": round(self.rust_build_seconds, 2),
+            "rust_encode_seconds": round(self.rust_encode_seconds, 2),
+            "rust_roundtrip_seconds": round(self.rust_roundtrip_seconds, 2),
+            "rust_parse_seconds": round(self.rust_parse_seconds, 2),
+            "rust_convert_seconds": round(self.rust_convert_seconds, 2),
+            "rust_service_seconds": (
+                round(self.rust_service_seconds, 2) if self.rust_service_reported else None
+            ),
+            "rust_requests": self.rust_requests,
+            "rust_sent_bytes": self.rust_sent_bytes,
+            "rust_received_bytes": self.rust_received_bytes,
             "unaccounted_seconds": round(
                 self.wall_seconds
                 - self.fetch_seconds - self.match_batch_seconds
@@ -750,6 +774,31 @@ class OracleStats:
             f"persist {self.persist_seconds:.1f}s | "
             f"other {other:.1f}s"
         )
+
+    def rust_line(self) -> str:
+        """Where the out-of-process matcher's time went, as its OWN log line.
+
+        `match` in the phases line is the whole matcher call; this splits it.
+        Only the sequential parts (build, convert) are wall time. The others are
+        summed over the requests that ran at once, so they can exceed the call's
+        wall clock, exactly as the oracle's request seconds can. The service's
+        own figure is whatever it reported, and is "n/a" if it reported none.
+        """
+        mb = 1024 * 1024
+        service = (
+            f"{self.rust_service_seconds:.1f}s" if self.rust_service_reported else "n/a"
+        )
+        return (
+            f"matcher call {self.rust_seconds:.1f}s wall | "
+            f"build {self.rust_build_seconds:.1f}s | "
+            f"encode {self.rust_encode_seconds:.1f}s | "
+            f"round-trip {self.rust_roundtrip_seconds:.1f}s "
+            f"(service says {service}; {self.rust_sent_bytes / mb:.1f} MB out, "
+            f"{self.rust_received_bytes / mb:.1f} MB back, {self.rust_requests} requests, "
+            f"summed) | parse {self.rust_parse_seconds:.1f}s | "
+            f"convert {self.rust_convert_seconds:.1f}s"
+        )
+
 
 
 class BlockNotIndexedError(Exception):
@@ -970,6 +1019,7 @@ async def _service_match(cfg, client, jobs, scan_secret_bytes, spend_pub_bytes, 
     """
     label_by_m = {l.m: l for l in labels}
     started = time.perf_counter()
+    timing: dict = {}
     try:
         raw = await rust_matcher.match_blocks(
             cfg,
@@ -980,6 +1030,7 @@ async def _service_match(cfg, client, jobs, scan_secret_bytes, spend_pub_bytes, 
                 (h, "reverse" if fn is sync_block_reverse else "forward", entries, utxos)
                 for h, fn, entries, utxos in jobs
             ],
+            timing=timing,
         )
     except rust_matcher.MatcherUnavailable as e:
         client.stats.rust_fallbacks += len(jobs)
@@ -1005,6 +1056,19 @@ async def _service_match(cfg, client, jobs, scan_secret_bytes, spend_pub_bytes, 
         _elapsed = time.perf_counter() - started
         client.stats.rust_seconds += _elapsed
         rust_matcher.note(seconds=_elapsed)
+        # Kept even when the call failed: the time was still spent.
+        st = client.stats
+        st.rust_build_seconds += timing.get("build_seconds", 0.0)
+        st.rust_encode_seconds += timing.get("encode_seconds", 0.0)
+        st.rust_roundtrip_seconds += timing.get("roundtrip_seconds", 0.0)
+        st.rust_parse_seconds += timing.get("parse_seconds", 0.0)
+        st.rust_convert_seconds += timing.get("convert_seconds", 0.0)
+        st.rust_requests += timing.get("requests", 0)
+        st.rust_sent_bytes += timing.get("sent_bytes", 0)
+        st.rust_received_bytes += timing.get("received_bytes", 0)
+        if "service_seconds" in timing:
+            st.rust_service_seconds += timing["service_seconds"]
+            st.rust_service_reported = True
 
     out: dict = {}
     for h, _fn, _entries, _utxos in jobs:
@@ -2057,6 +2121,8 @@ async def _scan_wallet(
     oracle.stats.wall_seconds = time.perf_counter() - scan_started
     logger.info(f"Scan timing: {oracle.stats.summary()}")
     logger.info(f"Scan phases: {oracle.stats.phases()}")
+    if oracle.stats.rust_requests:
+        logger.info(f"Scan rust: {oracle.stats.rust_line()}")
     set_scan_progress(
         wallet_id, blocks_scanned, total_blocks, total_found,
         active=False, amount=total_found_amount, gap=scan_gap_height,

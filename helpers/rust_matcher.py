@@ -443,11 +443,32 @@ def _match_from_json(m: dict) -> Match:
     )
 
 
-async def _send(cfg: MatcherConfig, header: dict, blocks: list[dict]) -> list:
+async def _send(
+    cfg: MatcherConfig, header: dict, blocks: list[dict], timing: Optional[dict] = None
+) -> list:
+    """POST one chunk. `timing`, if given, is added to (never replaced): the
+    encode, the round trip, the parse, the bytes each way and the service's own
+    reported time. It exists to say where the time of a matcher call goes —
+    see `Scan rust:` in helpers/scan.py — and changes nothing about the request.
+    """
+    client = _http(cfg)
     try:
-        r = await _http(cfg).post("/v1/match", json={**header, "blocks": blocks})
+        t0 = time.perf_counter()
+        # post() is build_request() then send(); done in two steps so the body
+        # encoding (json.dumps of every tweak and output) is timed apart from
+        # the wire. The request is the same one post() would have sent.
+        request = client.build_request("POST", "/v1/match", json={**header, "blocks": blocks})
+        t1 = time.perf_counter()
+        r = await client.send(request)
+        t2 = time.perf_counter()
     except httpx.HTTPError as e:
         raise MatcherUnavailable(f"service unreachable: {type(e).__name__}") from e
+    if timing is not None:
+        timing["requests"] = timing.get("requests", 0) + 1
+        timing["encode_seconds"] = timing.get("encode_seconds", 0.0) + (t1 - t0)
+        timing["roundtrip_seconds"] = timing.get("roundtrip_seconds", 0.0) + (t2 - t1)
+        timing["sent_bytes"] = timing.get("sent_bytes", 0) + len(request.content or b"")
+        timing["received_bytes"] = timing.get("received_bytes", 0) + len(r.content or b"")
     if r.status_code != 200:
         try:
             detail = str(r.json().get("error", ""))[:200]
@@ -455,7 +476,18 @@ async def _send(cfg: MatcherConfig, header: dict, blocks: list[dict]) -> list:
             detail = ""
         raise MatcherUnavailable(f"service answered {r.status_code} {detail}".strip())
     try:
-        results = r.json()["results"]
+        t3 = time.perf_counter()
+        payload = r.json()
+        results = payload["results"]
+        if timing is not None:
+            timing["parse_seconds"] = timing.get("parse_seconds", 0.0) + (
+                time.perf_counter() - t3
+            )
+            # What the service says it spent. Optional and unverified: a service
+            # that does not send it leaves the key absent, and the log says so.
+            ms = payload.get("elapsed_ms") if isinstance(payload, dict) else None
+            if isinstance(ms, (int, float)) and not isinstance(ms, bool) and ms >= 0:
+                timing["service_seconds"] = timing.get("service_seconds", 0.0) + ms / 1000.0
     except (ValueError, KeyError, TypeError) as e:
         raise MatcherUnavailable("service sent an unreadable response") from e
     # One result per block, in order, for the heights that were sent. Anything
@@ -474,28 +506,39 @@ async def match_blocks(
     spend_pub: bytes,
     label_indices: Sequence[int],
     jobs: Sequence[tuple],
+    timing: Optional[dict] = None,
 ) -> dict[int, "list[Match] | str"]:
     """Match blocks on the service.
 
     `jobs` are `(height, "forward" | "reverse", entries, utxos)`. Returns, per
     height, the matches or — if the service could not process that block — an
     error string. Raises MatcherUnavailable if there is no usable answer at all.
+
+    `timing`, if a dict, is filled with where the call's time went (see _send);
+    build_seconds and convert_seconds are sequential wall time, the rest are
+    summed across the chunks sent concurrently.
     """
     header = {
         "scan_secret": scan_secret.hex(),
         "spend_pubkey": spend_pub.hex(),
         "labels": list(label_indices),
     }
+    t_build = time.perf_counter()
     blocks = [_wire_block(h, mode, entries, utxos) for h, mode, entries, utxos in jobs]
+    if timing is not None:
+        timing["build_seconds"] = timing.get("build_seconds", 0.0) + (
+            time.perf_counter() - t_build
+        )
     chunks = [blocks[i : i + _CHUNK_BLOCKS] for i in range(0, len(blocks), _CHUNK_BLOCKS)]
     gate = asyncio.Semaphore(_MAX_IN_FLIGHT)
 
     async def one(chunk: list[dict]) -> list:
         async with gate:
-            return await _send(cfg, header, chunk)
+            return await _send(cfg, header, chunk, timing)
 
     parts = await asyncio.gather(*(one(c) for c in chunks))
     out: dict[int, "list[Match] | str"] = {}
+    t_convert = time.perf_counter()
     try:
         for part in parts:
             for res in part:
@@ -505,4 +548,9 @@ async def match_blocks(
                     out[res["height"]] = [_match_from_json(m) for m in res["matches"]]
     except (KeyError, TypeError, ValueError) as e:
         raise MatcherUnavailable("service sent a malformed match") from e
+    finally:
+        if timing is not None:
+            timing["convert_seconds"] = timing.get("convert_seconds", 0.0) + (
+                time.perf_counter() - t_convert
+            )
     return out

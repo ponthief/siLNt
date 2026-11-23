@@ -511,3 +511,96 @@ def test_the_scan_timing_line_says_when_the_service_was_involved_and_when_not():
     line = used.summary()
     assert "rust matcher: 9 blocks" in line and "1 fell back" in line and "2 MISMATCHED" in line
     assert used.as_dict()["rust_mismatches"] == 2
+
+
+# --- where a matcher call's time goes ----------------------------------------
+#
+# Added 2026-11-23 after a mainnet log showed the matcher call at 71% of a big
+# catch-up with no way to tell the curve work from the wire. These pin that the
+# split is filled in from what really happened, and that asking for it changes
+# nothing about what is sent or answered.
+
+
+@pytest.mark.asyncio
+async def test_a_matcher_call_reports_where_its_time_went(monkeypatch):
+    svc = FakeService(monkeypatch)
+    enable(monkeypatch, mode="active")
+    data = make_data()
+    c, results = await run(data)
+    st = c.stats
+    assert st.rust_requests >= 1
+    assert st.rust_sent_bytes == sum(len(b) for b in svc.bodies), "bytes out are the real body"
+    assert st.rust_received_bytes > 0
+    assert st.rust_encode_seconds > 0 and st.rust_roundtrip_seconds > 0
+    assert st.rust_build_seconds > 0 and st.rust_parse_seconds > 0 and st.rust_convert_seconds > 0
+    # The fake sends elapsed_ms: 1 on each response, and the stats say so.
+    assert st.rust_service_reported and st.rust_service_seconds == pytest.approx(0.001 * st.rust_requests)
+    assert [fp(r) for r in results] == [fp(python_only(data)[h]) for h in data.heights]
+    await rm.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_service_that_reports_no_time_is_not_credited_with_zero(monkeypatch):
+    svc = FakeService(monkeypatch)
+    handle = svc._handle
+
+    def without_elapsed(request):
+        import json
+        r = handle(request)
+        body = json.loads(r.content)
+        body.pop("elapsed_ms", None)
+        return httpx.Response(200, json=body)
+
+    svc._handle = without_elapsed
+    enable(monkeypatch, mode="active")
+    c, _ = await run(make_data())
+    assert c.stats.rust_service_reported is False
+    assert "service says n/a" in c.stats.rust_line(), "a missing figure must read as missing, not 0.0s"
+    assert c.stats.as_dict()["rust_service_seconds"] is None
+    await rm.aclose()
+
+
+@pytest.mark.asyncio
+async def test_timing_is_kept_when_the_call_fails(monkeypatch):
+    svc = FakeService(monkeypatch)
+    svc.status = 503
+    enable(monkeypatch, mode="active")
+    data = make_data()
+    c, results = await run(data)
+    assert c.stats.rust_fallbacks == len(data.heights)
+    assert c.stats.rust_requests == 1 and c.stats.rust_roundtrip_seconds > 0
+    assert [fp(r) for r in results] == [fp(python_only(data)[h]) for h in data.heights]
+    await rm.aclose()
+
+
+@pytest.mark.asyncio
+async def test_asking_for_timing_changes_nothing_on_the_wire(monkeypatch):
+    svc = FakeService(monkeypatch)
+    cfg = enable(monkeypatch, mode="active") or rm.config_for("signet")
+    data = make_data()
+    jobs = [(h, "forward", data.tweaks[h], data.utxos[h]) for h in data.heights
+            if data.tweaks.get(h) and data.utxos.get(h)]
+    kw = dict(scan_secret=SCAN_SECRET, spend_pub=SPEND_PUB,
+              label_indices=[l.m for l in LABELS], jobs=jobs)
+    plain = await rm.match_blocks(cfg, **kw)
+    timed = await rm.match_blocks(cfg, timing={}, **kw)
+    assert svc.bodies[0] == svc.bodies[1], "the request must be byte-identical either way"
+    assert {h: [m.pub_key for m in v] for h, v in plain.items()} == \
+           {h: [m.pub_key for m in v] for h, v in timed.items()}
+    await rm.aclose()
+
+
+def test_the_rust_line_is_silent_without_the_matcher_and_names_every_part():
+    quiet = scan.OracleStats(blocks=10, wall_seconds=1.0)
+    assert quiet.rust_requests == 0, "the scan only logs the line when a request was made"
+    used = scan.OracleStats(
+        rust_seconds=54.1, rust_build_seconds=1.5, rust_encode_seconds=2.5,
+        rust_roundtrip_seconds=60.0, rust_parse_seconds=0.7, rust_convert_seconds=0.4,
+        rust_service_seconds=41.0, rust_service_reported=True, rust_requests=3,
+        rust_sent_bytes=50 * 1024 * 1024, rust_received_bytes=3 * 1024 * 1024,
+    )
+    line = used.rust_line()
+    for part in ("matcher call 54.1s wall", "build 1.5s", "encode 2.5s", "round-trip 60.0s",
+                 "service says 41.0s", "50.0 MB out", "3.0 MB back", "3 requests", "summed",
+                 "parse 0.7s", "convert 0.4s"):
+        assert part in line, part
