@@ -322,6 +322,7 @@ from .models import (
     CancelTangoData,
     ProposeTangoData,
     PostTangoOfferData,
+    BoardBanData,
     AcceptTangoData,
     SignTangoData,
     PayInvoiceData,
@@ -6911,7 +6912,12 @@ async def api_tango_propose(
         fee_rate=data.fee_rate,
         a_inputs=rows,
         pieces=data.pieces,
-        expiry_seconds=TANGO_EXPIRY_SECONDS,
+        # A board proposal has to be answered quickly: the proposer's coins are
+        # locked from this moment and the maker's are not. Accepting gives the
+        # round its full day back.
+        expiry_seconds=(
+            ANSWER_WINDOW_SECONDS if offer else TANGO_EXPIRY_SECONDS
+        ),
         a_payout=a_payout,
         payout_sp_address=payout_addr or None,
         offer_id=offer["id"] if offer else None,
@@ -7238,6 +7244,12 @@ async def api_tango_accept(
         b_change_spk=b_change_spk,
         b_payout=b_payout,
         b_payout_tweak=b_payout_tweak,
+        # A board proposal was made on the short answer window. Answered, it is
+        # an ordinary round and gets the ordinary day.
+        **(
+            {"expires_at": int(time.time()) + TANGO_EXPIRY_SECONDS}
+            if rnd.offer_id else {}
+        ),
     )
     await _notify_tango(
         rnd.a_user_id, "Tango matched",
@@ -7461,6 +7473,7 @@ async def api_tango_cancel(
 # /rounds propose with an `offer_id`, checked by _tango_check_board_proposal.
 
 from .helpers.tangooffers import (  # noqa: E402
+    ANSWER_WINDOW_SECONDS,
     OFFER_TAKEN,
     OFFER_WITHDRAWN,
     RateLimiter as _BoardRateLimiter,
@@ -7471,6 +7484,11 @@ _board_list_limit = _BoardRateLimiter(limit=60, window_seconds=60)
 _board_post_limit = _BoardRateLimiter(limit=10, window_seconds=3600)
 
 _OFFER_GONE = "That offer is gone."
+
+
+def _hours_minutes(seconds: int) -> str:
+    h, m = divmod(max(0, int(seconds)) // 60, 60)
+    return f"{h}h {m:02d}m" if h else f"{m}m"
 
 
 def _offer_view(o: dict, now: int, *, mine: bool) -> dict:
@@ -7526,6 +7544,9 @@ async def _tango_check_board_proposal(
 
     gone = HTTPException(status_code=HTTPStatus.NOT_FOUND, detail=_OFFER_GONE)
     now = int(time.time())
+    # The operator's switch: with the board off, no offer can be answered.
+    if not (await get_backend_config(wallet.network)).tango_board_enabled:
+        raise gone
     offer = await get_tango_offer(data.offer_id)
     if (
         not offer
@@ -7639,8 +7660,19 @@ async def api_tango_offers(
         _offer_view(o, now, mine=True)
         for o in await list_user_tango_offers(uid, net, now)
     ]
+    enabled = bool((await get_backend_config(net)).tango_board_enabled)
+    refusal = await _board_refusal(uid, net, now)
+    suspended = (
+        int(refusal.split(":")[1]) if refusal and refusal.startswith("suspended:") else 0
+    )
     return {
-        "offers": others,
+        "enabled": enabled,
+        # Seconds until this user may post again, 0 if they may. A ban or the
+        # switch reads as `can_post: false` with nothing to count down.
+        "suspended_for": suspended,
+        "can_post": refusal is None,
+        "answer_seconds": board.ANSWER_WINDOW_SECONDS,
+        "offers": others if enabled else [],
         "mine": mine,
         "denominations": list(board.DENOMINATIONS),
         "pieces": list(board.PIECES),
@@ -7674,6 +7706,18 @@ async def api_tango_offer_post(
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
 
     now = int(time.time())
+    refusal = await _board_refusal(uid, wallet.network, now)
+    if refusal and refusal.startswith("suspended:"):
+        from .helpers.tangooffers import STRIKE_LIMIT
+
+        raise HTTPException(
+            status_code=HTTPStatus.TOO_MANY_REQUESTS,
+            detail=f"{STRIKE_LIMIT} proposals to your offers went unanswered in "
+                   f"a day, so posting is paused. You can post again in "
+                   f"{_hours_minutes(int(refusal.split(':')[1]))}.",
+        )
+    if refusal:
+        raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail=refusal)
     mine = await list_user_tango_offers(uid, wallet.network, now)
     if len(mine) >= board.MAX_OPEN_OFFERS:
         raise HTTPException(
@@ -7688,6 +7732,20 @@ async def api_tango_offer_post(
         raise HTTPException(
             status_code=HTTPStatus.CONFLICT,
             detail="You already have that offer up.",
+        )
+    # Counted on the wallet's address across ALL accounts: the same seed in
+    # several accounts passes the funding check in each.
+    from .crud import count_open_tango_offers_for_address
+
+    if (
+        await count_open_tango_offers_for_address(
+            wallet.network, wallet.sp_address, now
+        )
+        >= board.MAX_OPEN_PER_ADDRESS
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail="That wallet already has as many offers up as it can.",
         )
     # An advert nobody could honour is noise on a page other people read.
     if not await _tango_maker_can_fund(uid, wallet.network, data.denom_sats):
@@ -7706,6 +7764,7 @@ async def api_tango_offer_post(
         visibility=data.visibility,
         posted_at=now,
         expires_at=board.expires_at_for(now),
+        sp_address=wallet.sp_address,
     )
     return _offer_view(offer, now, mine=True)
 
@@ -7727,6 +7786,126 @@ async def api_tango_offer_withdraw(
         raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail=_OFFER_GONE)
     cancelled = await _close_tango_offer(oid, keep_round=None, reason=OFFER_WITHDRAWN)
     return {"withdrawn": True, "proposals_cancelled": cancelled}
+
+
+async def _strike_board_maker(user_id: str, network: str, now: int) -> None:
+    """A proposal against this user's offer ran out unanswered.
+
+    Enough of these in a day and what they have up comes down and they cannot
+    post until the oldest has aged out. Declining is an answer and never lands
+    here: only the clock does.
+    """
+    from .crud import (
+        delete_tango_offers_for_user_network,
+        list_board_strikes,
+        record_board_strike,
+    )
+    from .helpers.tangooffers import STRIKE_LIMIT, STRIKE_WINDOW_SECONDS, suspended_for
+
+    await record_board_strike(user_id, network, now)
+    times = await list_board_strikes(user_id, network, now - STRIKE_WINDOW_SECONDS)
+    if len(times) >= STRIKE_LIMIT and suspended_for(times, now):
+        await delete_tango_offers_for_user_network(user_id, network)
+        await _notify_tango(
+            user_id, "Tango offers taken down",
+            "Several proposals to your offers went unanswered, so they were taken down.",
+        )
+
+
+async def _board_refusal(user_id: str, network: str, now: int) -> Optional[str]:
+    """Why this user may not post right now, or None."""
+    from .crud import is_banned_from_board, list_board_strikes
+    from .helpers.tangooffers import STRIKE_WINDOW_SECONDS, suspended_for
+
+    cfg = await get_backend_config(network)
+    if not cfg.tango_board_enabled:
+        return "The board is switched off right now."
+    if await is_banned_from_board(user_id):
+        return "Posting offers is switched off for this account."
+    wait = suspended_for(
+        await list_board_strikes(user_id, network, now - STRIKE_WINDOW_SECONDS), now
+    )
+    if wait:
+        return f"suspended:{wait}"
+    return None
+
+
+@silnt_api_router.get("/api/v1/admin/tango/offers")
+async def api_admin_tango_offers(
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """Every open offer on every network, and who is off the board.
+
+    For the operator: the board is public to everybody who may see an offer, and
+    the one person who can take one down for somebody else is the person running
+    the instance.
+    """
+    from .crud import list_all_open_tango_offers, list_board_bans, list_proposed_rounds_for_offer
+
+    require_admin(key_info)
+    now = int(time.time())
+    offers = []
+    for o in await list_all_open_tango_offers(now):
+        view = _offer_view(o, now, mine=False)
+        view["waiting"] = len(await list_proposed_rounds_for_offer(o["id"]))
+        offers.append(view)
+    bans = [
+        {"username": b["username"], "banned_at": int(b["banned_at"])}
+        for b in await list_board_bans()
+    ]
+    return {"offers": offers, "bans": bans, "now": now}
+
+
+@silnt_api_router.delete("/api/v1/admin/tango/offers/{oid}")
+async def api_admin_tango_offer_remove(
+    oid: str,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """Take any offer down. What was waiting on it is cancelled, as on a
+    withdrawal, so nobody's coins stay held against an advert that is gone."""
+    from .crud import get_tango_offer
+
+    require_admin(key_info)
+    if not await get_tango_offer(oid):
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail=_OFFER_GONE)
+    cancelled = await _close_tango_offer(oid, keep_round=None, reason=OFFER_WITHDRAWN)
+    return {"removed": True, "proposals_cancelled": cancelled}
+
+
+@silnt_api_router.post("/api/v1/admin/tango/board/ban")
+async def api_admin_tango_board_ban(
+    data: BoardBanData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """Keep somebody off the board, or let them back on.
+
+    Banning also takes down what they have up, on every network. It does not
+    touch a round already accepted: those are two people's and are theirs to
+    finish or cancel.
+    """
+    from .crud import (
+        ban_from_board,
+        list_user_tango_offers,
+        unban_from_board,
+    )
+
+    require_admin(key_info)
+    acct = await get_account_by_username((data.username or "").strip())
+    if not acct:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND, detail="That username does not exist."
+        )
+    if not data.banned:
+        await unban_from_board(acct.id)
+        return {"banned": False, "offers_removed": 0}
+    await ban_from_board(acct.id, acct.username or acct.id, int(time.time()))
+    removed = 0
+    now = int(time.time())
+    for net in {w.network for w in await get_silnt_wallets(acct.id) if w.network}:
+        for o in await list_user_tango_offers(acct.id, net, now):
+            await _close_tango_offer(o["id"], keep_round=None, reason=OFFER_WITHDRAWN)
+            removed += 1
+    return {"banned": True, "offers_removed": removed}
 
 
 # ── the Tango sweeper ────────────────────────────────────────────────────────
@@ -7768,10 +7947,15 @@ async def run_tango_sweep() -> dict:
 
     for rnd in await list_expired_tango_rounds(now, TANGO_SWEEP_LIMIT):
         try:
+            # A board proposal that ran out still PROPOSED was never answered.
+            # Read before the status changes below.
+            unanswered = bool(rnd.offer_id) and rnd.status == "PROPOSED"
             await update_tango_round(
                 rnd.id, status="CANCELLED", reject_reason=EXPIRED
             )
             expired += 1
+            if unanswered and rnd.b_user_id:
+                await _strike_board_maker(rnd.b_user_id, rnd.network, now)
             # Both sides are told, not just one: each had coins held against
             # this round and each can now use them again. No amount, the same
             # rule as every other push here.
@@ -7789,9 +7973,12 @@ async def run_tango_sweep() -> dict:
     # What was already proposed against one keeps its own clock.
     offers_expired = 0
     try:
-        from .crud import delete_expired_tango_offers
+        from .crud import delete_expired_tango_offers, delete_old_board_strikes
+        from .helpers.tangooffers import STRIKE_WINDOW_SECONDS
 
         offers_expired = await delete_expired_tango_offers(now)
+        # Strikes older than the window no longer count for anything.
+        await delete_old_board_strikes(now - STRIKE_WINDOW_SECONDS)
     except Exception as e:
         logger.warning(f"tango sweep: could not expire offers: {e}")
 

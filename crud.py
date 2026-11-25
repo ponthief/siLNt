@@ -2089,6 +2089,12 @@ async def delete_all_silnt_data_for_user(user_id: str) -> dict:
     await db.execute(
         "DELETE FROM silnt.tango_offers WHERE user_id = :uid", {"uid": user_id}
     )
+    await db.execute(
+        "DELETE FROM silnt.tango_board_strikes WHERE user_id = :uid", {"uid": user_id}
+    )
+    await db.execute(
+        "DELETE FROM silnt.tango_board_bans WHERE user_id = :uid", {"uid": user_id}
+    )
     # Payout rows are the ONE exception to purging: they are the instance's
     # own financial record as well as this user's data, and the txid in them is
     # public chain data regardless. The identity goes, the amounts stay. See
@@ -4466,20 +4472,21 @@ async def create_tango_offer(
     visibility: str,
     expires_at: int,
     posted_at: int,
+    sp_address: Optional[str] = None,
 ) -> dict:
     oid = urlsafe_short_hash()
     await db.execute(
         """
         INSERT INTO silnt.tango_offers
             (id, user_id, username, network, denom_sats, pieces, visibility,
-             posted_at, expires_at)
+             posted_at, expires_at, sp_address)
         VALUES
-            (:id, :uid, :uname, :net, :denom, :pieces, :vis, :posted, :exp)
+            (:id, :uid, :uname, :net, :denom, :pieces, :vis, :posted, :exp, :sp)
         """,
         {
             "id": oid, "uid": user_id, "uname": username, "net": network,
             "denom": int(denom_sats), "pieces": int(pieces), "vis": visibility,
-            "posted": int(posted_at), "exp": int(expires_at),
+            "posted": int(posted_at), "exp": int(expires_at), "sp": sp_address,
         },
     )
     return await get_tango_offer(oid)
@@ -4514,6 +4521,105 @@ async def list_user_tango_offers(user_id: str, network: str, now: int) -> list[d
         ORDER BY posted_at DESC
         """,
         {"uid": user_id, "net": network, "now": int(now)},
+    )
+    return [dict(r) for r in rows]
+
+
+async def count_open_tango_offers_for_address(
+    network: str, sp_address: str, now: int
+) -> int:
+    """Open offers whose maker's wallet has this SP address, ACROSS ACCOUNTS.
+
+    The same seed imported into several accounts has one address and passes the
+    funding check in each, so the per-account cap does not bound it. Offers
+    posted before the address was recorded carry NULL and do not count.
+    """
+    if not sp_address:
+        return 0
+    row = await db.fetchone(
+        """
+        SELECT COUNT(*) AS n FROM silnt.tango_offers
+        WHERE network = :net AND sp_address = :sp AND expires_at > :now
+        """,
+        {"net": network, "sp": sp_address, "now": int(now)},
+    )
+    return int((row or {}).get("n") or 0)
+
+
+async def list_all_open_tango_offers(now: int) -> list[dict]:
+    """Every unexpired offer on every network, for the operator."""
+    rows = await db.fetchall(
+        """
+        SELECT * FROM silnt.tango_offers WHERE expires_at > :now
+        ORDER BY posted_at DESC
+        """,
+        {"now": int(now)},
+    )
+    return [dict(r) for r in rows]
+
+
+async def record_board_strike(user_id: str, network: str, now: int) -> None:
+    await db.execute(
+        """
+        INSERT INTO silnt.tango_board_strikes (user_id, network, struck_at)
+        VALUES (:uid, :net, :at)
+        """,
+        {"uid": user_id, "net": network, "at": int(now)},
+    )
+
+
+async def list_board_strikes(user_id: str, network: str, since: int) -> list[int]:
+    """When this user's proposals expired unanswered, from `since` on."""
+    rows = await db.fetchall(
+        """
+        SELECT struck_at FROM silnt.tango_board_strikes
+        WHERE user_id = :uid AND network = :net AND struck_at > :since
+        ORDER BY struck_at
+        """,
+        {"uid": user_id, "net": network, "since": int(since)},
+    )
+    return [int(r["struck_at"]) for r in rows]
+
+
+async def delete_old_board_strikes(before: int) -> int:
+    result = await db.execute(
+        "DELETE FROM silnt.tango_board_strikes WHERE struck_at <= :before",
+        {"before": int(before)},
+    )
+    return getattr(result, "rowcount", 0) or 0
+
+
+async def ban_from_board(user_id: str, username: str, now: int) -> None:
+    await db.execute(
+        "DELETE FROM silnt.tango_board_bans WHERE user_id = :uid", {"uid": user_id}
+    )
+    await db.execute(
+        """
+        INSERT INTO silnt.tango_board_bans (user_id, username, banned_at)
+        VALUES (:uid, :uname, :at)
+        """,
+        {"uid": user_id, "uname": username, "at": int(now)},
+    )
+
+
+async def unban_from_board(user_id: str) -> None:
+    await db.execute(
+        "DELETE FROM silnt.tango_board_bans WHERE user_id = :uid", {"uid": user_id}
+    )
+
+
+async def is_banned_from_board(user_id: str) -> bool:
+    row = await db.fetchone(
+        "SELECT user_id FROM silnt.tango_board_bans WHERE user_id = :uid",
+        {"uid": user_id},
+    )
+    return bool(row)
+
+
+async def list_board_bans() -> list[dict]:
+    rows = await db.fetchall(
+        "SELECT user_id, username, banned_at FROM silnt.tango_board_bans "
+        "ORDER BY banned_at DESC"
     )
     return [dict(r) for r in rows]
 

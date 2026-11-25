@@ -1545,3 +1545,54 @@ async def m047_tango_offers(db):
     await db.execute(
         "ALTER TABLE silnt.tango_rounds ADD COLUMN IF NOT EXISTS offer_id TEXT"
     )
+
+
+async def m048_tango_board_abuse(db):
+    """What the board needs to cope with people who abuse it.
+
+    `tango_offers.sp_address`: the wallet's Silent Payments address, so the
+    number of offers one WALLET has up can be counted across accounts. The same
+    seed imported into several accounts passes the funding check in each, and the
+    per-account cap bounds nothing against somebody willing to make accounts. NULL
+    on an offer posted before this, which simply does not count.
+
+    `tango_board_strikes`: one row each time a proposal made against a user's
+    offer expired unanswered. The taker's coins lock when they propose, so a maker
+    who posts and goes quiet is holding other people's coins; enough strikes in a
+    day stops them posting. Rows are deleted as they age out, like the offers.
+
+    `tango_board_bans`: an operator removing somebody from the board. Keyed by
+    user id, and removed with the account.
+
+    Epoch seconds in BIGINT, named for what they are (see m047 on created_at).
+    """
+    await db.execute(
+        "ALTER TABLE silnt.tango_offers ADD COLUMN IF NOT EXISTS sp_address TEXT"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tango_offers_addr "
+        "ON silnt.tango_offers (network, sp_address);"
+    )
+    await db.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS silnt.tango_board_strikes (
+            user_id    TEXT NOT NULL,
+            network    TEXT NOT NULL,
+            struck_at  {db.big_int} NOT NULL
+        );
+        """
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tango_strikes_user "
+        "ON silnt.tango_board_strikes (user_id, network, struck_at);"
+    )
+    await db.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS silnt.tango_board_bans (
+            user_id    TEXT PRIMARY KEY,
+            username   TEXT NOT NULL,
+            banned_at  {db.big_int} NOT NULL
+        );
+        """
+    )
+

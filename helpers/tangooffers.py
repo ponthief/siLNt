@@ -35,7 +35,12 @@ from typing import Optional
 # not divide into the coin split), and the board offers splits of 1, 2 and 3:
 # 1-2-5 steps, the obvious ladder, divide by 2 and never by 3, so the three-coin
 # split would have been unavailable at every amount.
-DENOMINATIONS = (12_000, 30_000, 60_000, 120_000, 300_000, 600_000, 1_200_000)
+#
+# 60k to 6M sats (2026-11-25: the first list started at 12k and 30k, and the user
+# judged those too small at today's price to be worth a mix once the miner fee
+# and the two-sided coordination are paid). The floor is one number in this
+# tuple; the clients render whatever the server sends.
+DENOMINATIONS = (60_000, 120_000, 300_000, 600_000, 1_200_000, 3_000_000, 6_000_000)
 
 # How many equal coins each side takes its share back as. The protocol allows 4
 # (ProposeTangoData); the board offers 1-3. Each extra piece is another 86
@@ -58,6 +63,25 @@ DEFAULT_VISIBILITY = VISIBILITY_CONNECTIONS
 MAX_OPEN_OFFERS = 3               # per user per network
 MAX_PROPOSALS_PER_OFFER = 3       # live PROPOSED rounds against one offer
 MAX_BOARD_PROPOSALS_PER_TAKER = 3  # live PROPOSED rounds a taker has out
+
+# A proposal made against an offer has to be ANSWERED, and quickly. The taker's
+# coins lock the moment they propose — the maker's do not — so a maker who posts
+# and goes quiet holds other people's coins for as long as the round's clock
+# allows. A board proposal therefore expires after this, instead of after the
+# round's 24 hours, and accepting it gives the round its full day back.
+ANSWER_WINDOW_SECONDS = 2 * 60 * 60
+
+# A proposal that expires unanswered is a strike against the maker. This many in
+# the window and they cannot post, and what they have up comes down. Answering
+# is what clears the record: declining counts, because declining is an answer.
+STRIKE_LIMIT = 3
+STRIKE_WINDOW_SECONDS = 24 * 60 * 60
+
+# Offers that one wallet's SP address may have up across ALL accounts. The same
+# seed imported into several accounts passes the funding check in every one of
+# them, so the per-account cap alone bounds nothing against someone willing to
+# make accounts.
+MAX_OPEN_PER_ADDRESS = MAX_OPEN_OFFERS
 
 # Rejection reasons written to a round's reject_reason, mirrored by
 # services/tangoTurns.ts. Machine-readable state, like EXPIRED beside them.
@@ -135,6 +159,23 @@ def sats_spendable(rows: list, reserved: set) -> int:
             continue
         total += int(r["amount"])
     return total
+
+
+def suspended_for(strike_times: list, now: int) -> int:
+    """Seconds until this maker may post again; 0 if they may now.
+
+    `strike_times` are when their unanswered proposals expired. Only those inside
+    the window count, and they may post again as soon as enough of them have aged
+    out to leave fewer than STRIKE_LIMIT.
+    """
+    inside = sorted(
+        int(t) for t in strike_times if int(t) > int(now) - STRIKE_WINDOW_SECONDS
+    )
+    if len(inside) < STRIKE_LIMIT:
+        return 0
+    # The strike that has to age out to leave STRIKE_LIMIT - 1.
+    must_expire = inside[len(inside) - STRIKE_LIMIT]
+    return max(0, must_expire + STRIKE_WINDOW_SECONDS - int(now))
 
 
 def can_fund(spendable: int, denom_sats: int) -> bool:

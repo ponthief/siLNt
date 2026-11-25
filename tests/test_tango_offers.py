@@ -188,7 +188,18 @@ class _Db:
                  network TEXT NOT NULL, denom_sats BIGINT NOT NULL,
                  pieces INTEGER NOT NULL DEFAULT 1,
                  visibility TEXT NOT NULL DEFAULT 'connections',
-                 posted_at BIGINT NOT NULL, expires_at BIGINT NOT NULL)"""
+                 posted_at BIGINT NOT NULL, expires_at BIGINT NOT NULL,
+                 sp_address TEXT)"""
+        )
+        self.c.execute(
+            """CREATE TABLE silnt.tango_board_strikes (
+                 user_id TEXT NOT NULL, network TEXT NOT NULL,
+                 struck_at BIGINT NOT NULL)"""
+        )
+        self.c.execute(
+            """CREATE TABLE silnt.tango_board_bans (
+                 user_id TEXT PRIMARY KEY, username TEXT NOT NULL,
+                 banned_at BIGINT NOT NULL)"""
         )
         self.c.execute(
             """CREATE TABLE silnt.tango_rounds (
@@ -240,10 +251,11 @@ def run(coro):
 
 
 def _post(ns, uid="u1", denom=120_000, pieces=1, vis="connections",
-          posted=1_000, expires=1_000 + 21 * 3600, net="mainnet"):
+          posted=1_000, expires=1_000 + 21 * 3600, net="mainnet", sp=None):
     return run(ns["create_tango_offer"](
         user_id=uid, username=f"name-{uid}", network=net, denom_sats=denom,
         pieces=pieces, visibility=vis, posted_at=posted, expires_at=expires,
+        sp_address=sp,
     ))
 
 
@@ -426,3 +438,165 @@ def test_expiry_is_swept_and_a_wallet_or_account_going_takes_its_offers():
     assert "delete_expired_tango_offers(now)" in _fn(VIEWS, "run_tango_sweep")
     assert "delete_tango_offers_for_user_network" in VIEWS
     assert "DELETE FROM silnt.tango_offers WHERE user_id = :uid" in CRUD
+
+
+# ── abuse: the answer window, strikes, one wallet, the operator ──────────────
+
+
+def test_the_floor_is_not_small():
+    """12k and 30k were judged too small to be worth a mix (2026-11-25). The
+    floor is one tuple entry; this pins that it did not come back."""
+    assert min(board.DENOMINATIONS) >= 60_000
+
+
+def test_a_board_proposal_gets_two_hours_and_an_answered_one_gets_its_day_back():
+    assert board.ANSWER_WINDOW_SECONDS == 2 * 3600
+    assert board.ANSWER_WINDOW_SECONDS < 86400
+    prop = _fn(VIEWS, "api_tango_propose")
+    assert "ANSWER_WINDOW_SECONDS if offer else TANGO_EXPIRY_SECONDS" in prop
+    acc = _fn(VIEWS, "api_tango_accept")
+    assert '"expires_at": int(time.time()) + TANGO_EXPIRY_SECONDS' in acc
+    assert "if rnd.offer_id" in acc
+
+
+def test_suspension_arithmetic():
+    now = 1_000_000
+    day = board.STRIKE_WINDOW_SECONDS
+    # Under the limit: free.
+    assert board.suspended_for([], now) == 0
+    assert board.suspended_for([now - 10, now - 20], now) == 0
+    # At the limit: wait until the OLDEST of the three has aged out.
+    three = [now - 3600, now - 1800, now - 60]
+    assert board.suspended_for(three, now) == (now - 3600) + day - now
+    # Strikes outside the window do not count at all.
+    old = [now - day - 5, now - day - 50, now - 60]
+    assert board.suspended_for(old, now) == 0
+    # More than the limit: enough must age out to leave LIMIT - 1, so with four
+    # strikes it is the second-oldest that sets the wait.
+    four = [now - 7000, now - 3600, now - 1800, now - 60]
+    assert board.suspended_for(four, now) == (now - 3600) + day - now
+    # And never negative.
+    assert board.suspended_for(three, now + 10 * day) == 0
+
+
+def test_strikes_are_counted_per_user_and_network_and_age_out():
+    ns, db = _crud()
+    for t in (100, 200, 300):
+        run(ns["record_board_strike"]("u1", "mainnet", t))
+    run(ns["record_board_strike"]("u1", "signet", 250))
+    run(ns["record_board_strike"]("u2", "mainnet", 260))
+    assert run(ns["list_board_strikes"]("u1", "mainnet", 0)) == [100, 200, 300]
+    assert run(ns["list_board_strikes"]("u1", "mainnet", 150)) == [200, 300]
+    assert run(ns["list_board_strikes"]("u1", "signet", 0)) == [250]
+    assert run(ns["delete_old_board_strikes"](200)) == 2
+    assert run(ns["list_board_strikes"]("u1", "mainnet", 0)) == [300]
+
+
+def test_a_wallets_address_is_counted_across_accounts_and_only_while_open():
+    ns, _ = _crud()
+    _post(ns, "u1", denom=60_000, sp="tsp1same", expires=5_000)
+    _post(ns, "u2", denom=120_000, sp="tsp1same", expires=5_000)
+    _post(ns, "u3", denom=60_000, sp="tsp1other", expires=5_000)
+    _post(ns, "u4", denom=60_000, sp=None, expires=5_000)   # posted before m048
+    count = lambda sp, now=1_000, net="mainnet": run(  # noqa: E731
+        ns["count_open_tango_offers_for_address"](net, sp, now))
+    assert count("tsp1same") == 2          # two ACCOUNTS, one address
+    assert count("tsp1other") == 1
+    assert count("tsp1same", now=5_000) == 0   # expired offers do not count
+    assert count("tsp1same", net="signet") == 0
+    assert count("") == 0 and count(None) == 0  # an unknown address never matches
+
+
+def test_bans_are_per_user_and_reversible():
+    ns, _ = _crud()
+    assert run(ns["is_banned_from_board"]("u1")) is False
+    run(ns["ban_from_board"]("u1", "alice", 10))
+    run(ns["ban_from_board"]("u1", "alice", 20))     # twice is one row
+    assert run(ns["is_banned_from_board"]("u1")) is True
+    assert run(ns["is_banned_from_board"]("u2")) is False
+    assert [b["username"] for b in run(ns["list_board_bans"]())] == ["alice"]
+    run(ns["unban_from_board"]("u1"))
+    assert run(ns["is_banned_from_board"]("u1")) is False
+
+
+def test_the_operator_sees_every_open_offer_on_every_network():
+    ns, _ = _crud()
+    _post(ns, "u1", net="mainnet", expires=5_000)
+    _post(ns, "u2", net="signet", denom=60_000, expires=5_000)
+    _post(ns, "u3", net="signet", denom=300_000, expires=500)
+    got = run(ns["list_all_open_tango_offers"](1_000))
+    assert sorted(o["user_id"] for o in got) == ["u1", "u2"]
+
+
+def test_the_sweep_strikes_only_a_proposal_that_ran_out_unanswered():
+    body = _fn(VIEWS, "run_tango_sweep")
+    assert 'unanswered = bool(rnd.offer_id) and rnd.status == "PROPOSED"' in body
+    # Read BEFORE the status is changed, or every expired round would read
+    # CANCELLED and none would ever be struck.
+    assert body.index("unanswered =") < body.index('status="CANCELLED"')
+    assert "_strike_board_maker(rnd.b_user_id, rnd.network, now)" in body
+    assert "delete_old_board_strikes" in VIEWS
+
+
+def test_enough_strikes_take_the_makers_offers_down():
+    body = _fn(VIEWS, "_strike_board_maker")
+    assert "record_board_strike" in body and "STRIKE_LIMIT" in body
+    assert "delete_tango_offers_for_user_network(user_id, network)" in body
+
+
+def test_posting_refuses_a_switched_off_board_a_ban_a_suspension_and_a_crowded_address():
+    post = _fn(VIEWS, "api_tango_offer_post")
+    for needle in (
+        "_board_refusal(uid, wallet.network, now)",
+        "count_open_tango_offers_for_address(",
+        "board.MAX_OPEN_PER_ADDRESS",
+        "sp_address=wallet.sp_address",
+    ):
+        assert needle in post, needle
+    refusal = _fn(VIEWS, "_board_refusal")
+    for needle in ("tango_board_enabled", "is_banned_from_board(user_id)", "suspended_for("):
+        assert needle in refusal, needle
+
+
+def test_the_listing_says_whether_you_may_post_and_how_long_to_wait():
+    body = _fn(VIEWS, "api_tango_offers")
+    for key in ("enabled", "suspended_for", "can_post", "answer_seconds"):
+        assert f'"{key}"' in body, key
+    # A switched-off board lists nothing to take, and still lists your own so
+    # you can withdraw them.
+    assert '"offers": others if enabled else []' in body
+
+
+def test_a_switched_off_board_cannot_be_answered():
+    body = _fn(VIEWS, "_tango_check_board_proposal")
+    assert "tango_board_enabled" in body
+    assert "raise gone" in body[body.index("tango_board_enabled"):][:200]
+
+
+def test_the_operator_endpoints_are_admin_only_and_remove_what_waits():
+    for fn in ("api_admin_tango_offers", "api_admin_tango_offer_remove",
+               "api_admin_tango_board_ban"):
+        assert "require_admin(key_info)" in _fn(VIEWS, fn), fn
+    assert "reason=OFFER_WITHDRAWN" in _fn(VIEWS, "api_admin_tango_offer_remove")
+    ban = _fn(VIEWS, "api_admin_tango_board_ban")
+    assert "ban_from_board(" in ban and "unban_from_board(" in ban
+    # Banning takes down what they have up, on every network.
+    assert "_close_tango_offer(o[\"id\"]" in ban
+
+
+def test_the_board_switch_is_a_per_network_setting_that_defaults_on():
+    assert re.search(r"tango_board_enabled: bool = True", MODELS)
+    assert "class BoardBanData" in MODELS
+
+
+def test_the_second_migration_adds_the_address_the_strikes_and_the_bans():
+    body = MIG[MIG.index("async def m048_tango_board_abuse"):]
+    for needle in ("ADD COLUMN IF NOT EXISTS sp_address TEXT",
+                   "silnt.tango_board_strikes", "silnt.tango_board_bans"):
+        assert needle in body, needle
+    assert "created_at" not in body.split('"""')[2]
+
+
+def test_account_deletion_takes_the_strikes_and_the_ban_too():
+    assert "DELETE FROM silnt.tango_board_strikes WHERE user_id = :uid" in CRUD
+    assert "DELETE FROM silnt.tango_board_bans WHERE user_id = :uid" in CRUD

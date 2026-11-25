@@ -42,6 +42,10 @@ class BackendConfig(BaseModel):
     fulcrum_port: int = 50001
     fulcrum_tls: bool = False
     login_scan_enabled: bool = True            # auto catch-up scan on wallet open
+    # The Tango board (helpers/tangooffers.py): the operator's off switch, per
+    # network. On by default; off hides every offer and refuses new ones, and
+    # leaves rounds already proposed or running exactly as they were.
+    tango_board_enabled: bool = True
     login_scan_auto_threshold: int = 432       # gap < this => scan silently; >= => prompt
 
     # ── Tango change paid out over Lightning ─────────────────────────────────
@@ -928,3 +932,10 @@ class PostTangoOfferData(BaseModel):
     denom_sats: int
     pieces: int = 1
     visibility: str = "connections"
+
+
+class BoardBanData(BaseModel):
+    """An operator putting somebody on, or taking them off, the Tango board."""
+    username: str
+    banned: bool = True
+
