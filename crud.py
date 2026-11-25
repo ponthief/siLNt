@@ -2084,6 +2084,11 @@ async def delete_all_silnt_data_for_user(user_id: str) -> dict:
     await db.execute(
         "DELETE FROM silnt.tango_ln_addresses WHERE user_id = :uid", {"uid": user_id}
     )
+    # Their board offers. An advert naming a deleted account's username would
+    # outlive the account; this list is where such things are found missing.
+    await db.execute(
+        "DELETE FROM silnt.tango_offers WHERE user_id = :uid", {"uid": user_id}
+    )
     # Payout rows are the ONE exception to purging: they are the instance's
     # own financial record as well as this user's data, and the txid in them is
     # public chain data regardless. The identity goes, the amounts stay. See
@@ -4186,6 +4191,7 @@ async def create_tango_round(
     expiry_seconds: int = 86400,
     a_payout: bool = False,
     payout_sp_address: Optional[str] = None,
+    offer_id: Optional[str] = None,
 ) -> TangoRound:
     rid = urlsafe_short_hash()
     await db.execute(
@@ -4194,12 +4200,12 @@ async def create_tango_round(
             (id, status, network,
              a_user_id, a_username, a_wallet_id, b_user_id, b_username,
              denom_sats, fee_rate, pieces, a_in_sats, a_inputs, expires_at,
-             a_payout, payout_sp_address)
+             a_payout, payout_sp_address, offer_id)
         VALUES
             (:id, 'PROPOSED', :network,
              :a_user_id, :a_username, :a_wallet_id, :b_user_id, :b_username,
              :denom_sats, :fee_rate, :pieces, :a_in_sats, :a_inputs,
-             :expires_at, :a_payout, :payout_sp_address)
+             :expires_at, :a_payout, :payout_sp_address, :offer_id)
         """,
         {
             "id": rid,
@@ -4217,6 +4223,7 @@ async def create_tango_round(
             "expires_at": int(time.time()) + expiry_seconds,
             "a_payout": bool(a_payout),
             "payout_sp_address": payout_sp_address,
+            "offer_id": offer_id,
         },
     )
     return await get_tango_round(rid)
@@ -4439,6 +4446,143 @@ async def list_live_tango_rounds_between(
         {"a": a_user_id, "b": b_user_id, "net": network},
     )
     return [TangoRound(**r) for r in rows]
+
+
+# ── the Tango board ──────────────────────────────────────────────────────────
+#
+# Offers are adverts and hold no coins (helpers/tangooffers.py). They are
+# DELETED when they end — taken, withdrawn, expired, or their owner's wallet or
+# account going — rather than marked, because who wanted to mix what, and when,
+# is metadata this wallet has no business keeping.
+
+
+async def create_tango_offer(
+    *,
+    user_id: str,
+    username: str,
+    network: str,
+    denom_sats: int,
+    pieces: int,
+    visibility: str,
+    expires_at: int,
+    posted_at: int,
+) -> dict:
+    oid = urlsafe_short_hash()
+    await db.execute(
+        """
+        INSERT INTO silnt.tango_offers
+            (id, user_id, username, network, denom_sats, pieces, visibility,
+             posted_at, expires_at)
+        VALUES
+            (:id, :uid, :uname, :net, :denom, :pieces, :vis, :posted, :exp)
+        """,
+        {
+            "id": oid, "uid": user_id, "uname": username, "net": network,
+            "denom": int(denom_sats), "pieces": int(pieces), "vis": visibility,
+            "posted": int(posted_at), "exp": int(expires_at),
+        },
+    )
+    return await get_tango_offer(oid)
+
+
+async def get_tango_offer(oid: str) -> Optional[dict]:
+    row = await db.fetchone(
+        "SELECT * FROM silnt.tango_offers WHERE id = :id", {"id": oid}
+    )
+    return dict(row) if row else None
+
+
+async def list_open_tango_offers(network: str, now: int) -> list[dict]:
+    """Every unexpired offer on a network, newest first. Who may SEE each is
+    decided by the caller (visibility needs the viewer's connections)."""
+    rows = await db.fetchall(
+        """
+        SELECT * FROM silnt.tango_offers
+        WHERE network = :net AND expires_at > :now
+        ORDER BY posted_at DESC
+        """,
+        {"net": network, "now": int(now)},
+    )
+    return [dict(r) for r in rows]
+
+
+async def list_user_tango_offers(user_id: str, network: str, now: int) -> list[dict]:
+    rows = await db.fetchall(
+        """
+        SELECT * FROM silnt.tango_offers
+        WHERE user_id = :uid AND network = :net AND expires_at > :now
+        ORDER BY posted_at DESC
+        """,
+        {"uid": user_id, "net": network, "now": int(now)},
+    )
+    return [dict(r) for r in rows]
+
+
+async def delete_tango_offer(oid: str) -> None:
+    await db.execute("DELETE FROM silnt.tango_offers WHERE id = :id", {"id": oid})
+
+
+async def delete_expired_tango_offers(now: int) -> int:
+    """The sweeper's pass. Returns how many went, for the log."""
+    result = await db.execute(
+        "DELETE FROM silnt.tango_offers WHERE expires_at <= :now", {"now": int(now)}
+    )
+    return getattr(result, "rowcount", 0) or 0
+
+
+async def delete_tango_offers_for_user_network(user_id: str, network: str) -> None:
+    await db.execute(
+        "DELETE FROM silnt.tango_offers WHERE user_id = :uid AND network = :net",
+        {"uid": user_id, "net": network},
+    )
+
+
+async def delete_tango_offers_for_user(user_id: str) -> None:
+    await db.execute(
+        "DELETE FROM silnt.tango_offers WHERE user_id = :uid", {"uid": user_id}
+    )
+
+
+async def list_proposed_rounds_for_offer(offer_id: str) -> list[TangoRound]:
+    """Rounds still waiting for the maker against one offer. Only PROPOSED: once
+    a proposal is accepted it is a round like any other and belongs to its two
+    people, not to the offer."""
+    rows = await db.fetchall(
+        "SELECT * FROM silnt.tango_rounds WHERE offer_id = :oid AND status = 'PROPOSED'",
+        {"oid": offer_id},
+    )
+    return [TangoRound(**r) for r in rows]
+
+
+async def count_board_proposals_by_taker(user_id: str) -> int:
+    """Proposals this user has out against board offers and nobody has answered.
+    Their coins are held by each, so this is what bounds how much of their own
+    wallet one person can tie up on the board."""
+    row = await db.fetchone(
+        """
+        SELECT COUNT(*) AS n FROM silnt.tango_rounds
+        WHERE a_user_id = :uid AND offer_id IS NOT NULL AND status = 'PROPOSED'
+        """,
+        {"uid": user_id},
+    )
+    return int((row or {}).get("n") or 0)
+
+
+async def get_spendable_coin_rows(user_id: str, network: str) -> list[dict]:
+    """Unspent, unfrozen coins across a user's wallets on one network: the
+    maker's side of "could this offer be honoured"."""
+    out: list[dict] = []
+    for w in await get_silnt_wallets(user_id, network):
+        rows = await db.fetchall(
+            """
+            SELECT txid, vout, amount FROM silnt.utxos
+            WHERE wallet_id = :wid AND utxo_state = 'unspent'
+              AND COALESCE(frozen, FALSE) = FALSE
+            """,
+            {"wid": w.id},
+        )
+        out.extend(dict(r) for r in rows)
+    return out
 
 
 async def get_reserved_tango_outpoints(user_id: str) -> set:

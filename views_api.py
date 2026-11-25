@@ -321,6 +321,7 @@ from .models import (
     CreateInvoiceData,
     CancelTangoData,
     ProposeTangoData,
+    PostTangoOfferData,
     AcceptTangoData,
     SignTangoData,
     PayInvoiceData,
@@ -672,6 +673,10 @@ async def api_wallet_delete(
         net = getattr(wallet, "network", "") or ""
         if net and not await count_silnt_wallets_for_user_network(wallet.user, net):
             await delete_payjoin_contacts_for_user_network(wallet.user, net)
+            # An advert for a mix goes with the last wallet that could honour it.
+            from .crud import delete_tango_offers_for_user_network
+
+            await delete_tango_offers_for_user_network(wallet.user, net)
     except Exception as e:
         logger.warning(f"Could not remove connections for deleted wallet {wallet_id}: {e}")
     await delete_wallet_label_addresses(wallet_id)
@@ -6855,9 +6860,18 @@ async def api_tango_propose(
         )
     # On THIS network. A connection is per-network since m037, so a signet
     # connection no longer authorises a mainnet round.
-    if partner.id not in set(
+    connected = partner.id in set(
         await list_accepted_contact_user_ids(uid, wallet.network)
-    ):
+    )
+    offer = None
+    if data.offer_id:
+        # A proposal that answers a board offer. The ONE hole in the connection
+        # rule, and only for a round that matches a live offer exactly: without
+        # that, "anyone" would mean anyone can push a proposal at anyone.
+        offer = await _tango_check_board_proposal(
+            uid, partner.id, connected, wallet, data
+        )
+    elif not connected:
         raise HTTPException(
             status_code=HTTPStatus.FORBIDDEN,
             detail=f"You can only Tango with someone you are connected to on "
@@ -6900,6 +6914,7 @@ async def api_tango_propose(
         expiry_seconds=TANGO_EXPIRY_SECONDS,
         a_payout=a_payout,
         payout_sp_address=payout_addr or None,
+        offer_id=offer["id"] if offer else None,
     )
     await _notify_tango(
         partner.id, "Tango offer", "Someone has sent you a Tango offer. Open WhiSPa to look."
@@ -7228,6 +7243,8 @@ async def api_tango_accept(
         rnd.a_user_id, "Tango matched",
         "The other side matched your Tango offer. Open WhiSPa to approve it.",
     )
+    if rnd.offer_id:
+        await _close_tango_offer(rnd.offer_id, keep_round=rid, reason=OFFER_TAKEN)
     return updated.dict()
 
 
@@ -7437,6 +7454,281 @@ async def api_tango_cancel(
     return {**updated.dict(), "note_saved": note_saved}
 
 
+# ── the Tango board ──────────────────────────────────────────────────────────
+#
+# An offer is an advert with no coins (helpers/tangooffers.py). The three
+# endpoints here post, list and withdraw them; answering one is the ordinary
+# /rounds propose with an `offer_id`, checked by _tango_check_board_proposal.
+
+from .helpers.tangooffers import (  # noqa: E402
+    OFFER_TAKEN,
+    OFFER_WITHDRAWN,
+    RateLimiter as _BoardRateLimiter,
+)
+
+# Generous for a person, tight for a script. Per user, in memory.
+_board_list_limit = _BoardRateLimiter(limit=60, window_seconds=60)
+_board_post_limit = _BoardRateLimiter(limit=10, window_seconds=3600)
+
+_OFFER_GONE = "That offer is gone."
+
+
+def _offer_view(o: dict, now: int, *, mine: bool) -> dict:
+    """What a client is shown. The maker's user id is NOT in it: a username is
+    the identity the board publishes, and the id is the one thing a taker has no
+    use for."""
+    return {
+        "id": o["id"],
+        "username": o["username"],
+        "network": o["network"],
+        "denom_sats": int(o["denom_sats"]),
+        "pieces": int(o["pieces"] or 1),
+        "visibility": o["visibility"],
+        "posted_at": int(o["posted_at"]),
+        "expires_at": int(o["expires_at"]),
+        # The server's clock, so a countdown is measured against it and not
+        # against a phone whose clock is wrong.
+        "seconds_left": max(0, int(o["expires_at"]) - int(now)),
+        "mine": mine,
+    }
+
+
+async def _tango_maker_can_fund(user_id: str, network: str, denom_sats: int) -> bool:
+    from .crud import get_spendable_coin_rows
+    from .helpers.tangooffers import can_fund, sats_spendable
+
+    rows = await get_spendable_coin_rows(user_id, network)
+    reserved = await get_reserved_tango_outpoints(user_id)
+    return can_fund(sats_spendable(rows, reserved), denom_sats)
+
+
+async def _tango_check_board_proposal(
+    uid: str, maker_id: str, connected: bool, wallet, data
+) -> dict:
+    """Refuse a proposal that does not match a live offer; return the offer.
+
+    Every refusal that could tell a stranger something about the maker reads
+    the same ("That offer is gone."): an offer that exists but is not for you
+    must not be distinguishable from one that does not exist.
+    """
+    from .crud import (
+        count_board_proposals_by_taker,
+        get_tango_offer,
+        list_proposed_rounds_for_offer,
+    )
+    from .helpers.tangooffers import (
+        MAX_BOARD_PROPOSALS_PER_TAKER,
+        MAX_PROPOSALS_PER_OFFER,
+        fee_cap,
+        is_open,
+        visible_to,
+    )
+
+    gone = HTTPException(status_code=HTTPStatus.NOT_FOUND, detail=_OFFER_GONE)
+    now = int(time.time())
+    offer = await get_tango_offer(data.offer_id)
+    if (
+        not offer
+        or not is_open(offer["expires_at"], now)
+        or offer["network"] != wallet.network
+        or offer["user_id"] != maker_id
+        or maker_id == uid
+        or not visible_to(offer["visibility"], connected)
+    ):
+        raise gone
+    if (
+        int(offer["denom_sats"]) != int(data.denom_sats)
+        or int(offer["pieces"] or 1) != int(data.pieces or 1)
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="That is not what the offer says: the amount and the coin "
+                   "split have to match it.",
+        )
+    if len(await list_proposed_rounds_for_offer(offer["id"])) >= MAX_PROPOSALS_PER_OFFER:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail="That offer already has proposals waiting. Try again later.",
+        )
+    if await count_board_proposals_by_taker(uid) >= MAX_BOARD_PROPOSALS_PER_TAKER:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail="You have several board proposals waiting already. Cancel "
+                   "one, or wait for an answer, before sending another.",
+        )
+    # The proposer sets the fee rate and the maker pays half of it. A partner
+    # you had connected to was trusted with that; a stranger is bounded.
+    cap = fee_cap(await get_recommended_fees(wallet.network))
+    if float(data.fee_rate) > cap:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"That fee rate is too high for a board offer. The most "
+                   f"allowed now is {cap:g} sat/vB.",
+        )
+    if not await _tango_maker_can_fund(maker_id, offer["network"], int(offer["denom_sats"])):
+        raise gone
+    return offer
+
+
+async def _close_tango_offer(offer_id: str, *, keep_round: Optional[str], reason: str) -> int:
+    """Take an offer off the board and cancel what is still waiting on it.
+
+    keep_round is the proposal the maker just accepted, which is now a round
+    like any other. Everything else PROPOSED against the offer is cancelled with
+    `reason`, because each of those holds its proposer's coins against a maker
+    who has just answered somebody else. Returns how many were cancelled.
+    """
+    from .crud import delete_tango_offer, list_proposed_rounds_for_offer
+
+    cancelled = 0
+    for other in await list_proposed_rounds_for_offer(offer_id):
+        if other.id == keep_round:
+            continue
+        try:
+            await update_tango_round(other.id, status="CANCELLED", reject_reason=reason)
+            cancelled += 1
+            await _notify_tango(
+                other.a_user_id, "Tango cancelled",
+                "A Tango offer you answered is no longer available. Your coins are free again.",
+            )
+        except Exception as e:
+            logger.warning(f"tango board: could not cancel {other.id}: {e}")
+    await delete_tango_offer(offer_id)
+    return cancelled
+
+
+@silnt_api_router.get("/api/v1/tango/offers")
+async def api_tango_offers(
+    network: str,
+    key_info: WalletTypeInfo = Depends(require_trusted_device),
+):
+    """The board for one network, and the lists the clients render from.
+
+    The denominations, coin splits and lifetime come from HERE rather than being
+    written into a client: a number copied into an app is one the server can
+    change underneath it.
+
+    Somebody else's offer is listed only if the caller may take it — "anyone",
+    or "connections" and the caller is one. Never the caller's own in the
+    others' list: those come back under `mine`.
+    """
+    from .crud import list_open_tango_offers, list_user_tango_offers
+    from .helpers import tangooffers as board
+
+    uid = key_info.wallet.user
+    if not _board_list_limit.allow(uid):
+        raise HTTPException(
+            status_code=HTTPStatus.TOO_MANY_REQUESTS,
+            detail="Slow down a little.",
+        )
+    net = (network or "").strip().lower()
+    if net not in {w.network for w in await get_silnt_wallets(uid) if w.network}:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=f"You have no wallet on {net or 'that network'}.",
+        )
+    now = int(time.time())
+    connected = set(await list_accepted_contact_user_ids(uid, net))
+    others = []
+    for o in await list_open_tango_offers(net, now):
+        if o["user_id"] == uid:
+            continue
+        if board.visible_to(o["visibility"], o["user_id"] in connected):
+            others.append(_offer_view(o, now, mine=False))
+    mine = [
+        _offer_view(o, now, mine=True)
+        for o in await list_user_tango_offers(uid, net, now)
+    ]
+    return {
+        "offers": others,
+        "mine": mine,
+        "denominations": list(board.DENOMINATIONS),
+        "pieces": list(board.PIECES),
+        "visibilities": list(board.VISIBILITIES),
+        "default_visibility": board.DEFAULT_VISIBILITY,
+        "ttl_seconds": board.OFFER_TTL_SECONDS,
+        "max_open": board.MAX_OPEN_OFFERS,
+        "now": now,
+    }
+
+
+@silnt_api_router.post("/api/v1/tango/offers")
+async def api_tango_offer_post(
+    data: PostTangoOfferData,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """Post an advert for a mix. It holds no coins."""
+    from .crud import create_tango_offer, list_user_tango_offers
+    from .helpers import tangooffers as board
+
+    uid = key_info.wallet.user
+    wallet = await _pj_own_wallet(data.wallet_id, uid)
+    if not _board_post_limit.allow(uid):
+        raise HTTPException(
+            status_code=HTTPStatus.TOO_MANY_REQUESTS,
+            detail="You have posted a lot of offers. Try again later.",
+        )
+    try:
+        board.validate_offer(data.denom_sats, data.pieces, data.visibility)
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+
+    now = int(time.time())
+    mine = await list_user_tango_offers(uid, wallet.network, now)
+    if len(mine) >= board.MAX_OPEN_OFFERS:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=f"You can have {board.MAX_OPEN_OFFERS} offers up at a time. "
+                   f"Withdraw one first.",
+        )
+    if any(
+        int(o["denom_sats"]) == data.denom_sats and int(o["pieces"] or 1) == data.pieces
+        for o in mine
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail="You already have that offer up.",
+        )
+    # An advert nobody could honour is noise on a page other people read.
+    if not await _tango_maker_can_fund(uid, wallet.network, data.denom_sats):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="Your spendable coins do not cover that amount. They must "
+                   "be confirmed, unfrozen and not already in a Tango.",
+        )
+    acct = await get_account(uid)
+    offer = await create_tango_offer(
+        user_id=uid,
+        username=(acct.username if acct else None) or uid,
+        network=wallet.network,
+        denom_sats=data.denom_sats,
+        pieces=data.pieces,
+        visibility=data.visibility,
+        posted_at=now,
+        expires_at=board.expires_at_for(now),
+    )
+    return _offer_view(offer, now, mine=True)
+
+
+@silnt_api_router.delete("/api/v1/tango/offers/{oid}")
+async def api_tango_offer_withdraw(
+    oid: str,
+    key_info: WalletTypeInfo = Depends(require_trusted_device_admin),
+):
+    """Take your own offer down. Proposals still waiting on it are cancelled,
+    which frees their proposers' coins: they were asked for by an advert that
+    no longer exists."""
+    from .crud import get_tango_offer
+
+    uid = key_info.wallet.user
+    offer = await get_tango_offer(oid)
+    # Not yours reads as not there, like a round that is not yours.
+    if not offer or offer["user_id"] != uid:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail=_OFFER_GONE)
+    cancelled = await _close_tango_offer(oid, keep_round=None, reason=OFFER_WITHDRAWN)
+    return {"withdrawn": True, "proposals_cancelled": cancelled}
+
+
 # ── the Tango sweeper ────────────────────────────────────────────────────────
 #
 # Two jobs, both of them things that cannot happen on a request.
@@ -7493,8 +7785,18 @@ async def run_tango_sweep() -> dict:
         except Exception as e:
             logger.warning(f"tango sweep: could not expire {rnd.id}: {e}")
 
+    # Offers that ran out. Deleted, not marked (see the board section in crud).
+    # What was already proposed against one keeps its own clock.
+    offers_expired = 0
+    try:
+        from .crud import delete_expired_tango_offers
+
+        offers_expired = await delete_expired_tango_offers(now)
+    except Exception as e:
+        logger.warning(f"tango sweep: could not expire offers: {e}")
+
     labelled = await run_tango_labelling()
-    return {"expired": expired, "labelled": labelled}
+    return {"expired": expired, "labelled": labelled, "offers_expired": offers_expired}
 
 
 async def run_tango_labelling() -> int:

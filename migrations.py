@@ -1497,3 +1497,51 @@ async def m046_twofa_pending_secret(db):
     await db.execute(
         "ALTER TABLE silnt.twofa ADD COLUMN IF NOT EXISTS pending_secret TEXT"
     )
+
+
+async def m047_tango_offers(db):
+    """The Tango board: adverts for a mix, and the link from a round to one.
+
+    AN OFFER HOLDS NO COINS (see helpers/tangooffers.py). It is a row that says
+    "this user will mix this denomination in this many pieces", visible to their
+    connections or to anyone, until it is taken, withdrawn or expires. It is
+    DELETED when it ends rather than kept: a durable record of who wanted to mix
+    what, and when, is exactly the metadata this wallet exists not to keep.
+
+    `posted_at` and `expires_at` are epoch seconds in BIGINT because they are
+    computed in Python (tests/test_timestamp_columns.py). The column is not
+    called created_at on purpose: that name means a TIMESTAMP in this schema.
+
+    `tango_rounds.offer_id` is what lets the maker's accept close the offer and
+    cancel the other proposals made against it, and what lets propose refuse a
+    stranger's round that does not match a live offer. NULL for every round made
+    the ordinary way. IF NOT EXISTS, like the other late columns here, so an
+    instance that arrives by any route reaches it.
+    """
+    await db.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS silnt.tango_offers (
+            id          TEXT PRIMARY KEY,
+            user_id     TEXT NOT NULL,
+            username    TEXT NOT NULL,
+            network     TEXT NOT NULL,
+            denom_sats  {db.big_int} NOT NULL,
+            pieces      INTEGER NOT NULL DEFAULT 1,
+            -- connections | anyone
+            visibility  TEXT NOT NULL DEFAULT 'connections',
+            posted_at   {db.big_int} NOT NULL,
+            expires_at  {db.big_int} NOT NULL
+        );
+        """
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tango_offers_net "
+        "ON silnt.tango_offers (network, expires_at);"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tango_offers_user "
+        "ON silnt.tango_offers (user_id, network);"
+    )
+    await db.execute(
+        "ALTER TABLE silnt.tango_rounds ADD COLUMN IF NOT EXISTS offer_id TEXT"
+    )

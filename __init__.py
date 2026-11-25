@@ -135,7 +135,7 @@ async def _tango_sweep_loop():
     while True:
         try:
             res = await run_tango_sweep()
-            if res and (res.get("expired") or res.get("labelled")):
+            if res and (res.get("expired") or res.get("labelled") or res.get("offers_expired")):
                 logger.info(f"[silnt] tango sweep: {res}")
         except Exception as exc:
             logger.error(f"[silnt] tango sweep loop error: {exc_text(exc)}")

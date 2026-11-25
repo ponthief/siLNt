@@ -855,6 +855,8 @@ class TangoRound(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     expires_at: Optional[int] = None
+    # The board offer this round answers, or None for one made the ordinary way.
+    offer_id: Optional[str] = None
 
 
 class CancelTangoData(BaseModel):
@@ -877,6 +879,10 @@ class ProposeTangoData(BaseModel):
     pieces: int = Field(default=1, ge=1, le=4)
     inputs: List[PayjoinSpInput]
     network: str = "signet"
+    # Set when this proposal answers a board offer (helpers/tangooffers.py). The
+    # server then checks it against the offer instead of requiring a connection
+    # that an "anyone" offer was never going to have.
+    offer_id: Optional[str] = None
 
 
 class AcceptTangoData(BaseModel):
@@ -910,3 +916,15 @@ class SignTangoData(BaseModel):
     # disagreement instead of reporting that a signature failed. See
     # payjoin_sp.explain_mismatch.
     unsigned_tx: Optional[str] = None
+
+
+class PostTangoOfferData(BaseModel):
+    """An advert for a mix. It names no coins: see helpers/tangooffers.py.
+
+    No Field constraints, like the models around it: the values are checked
+    against the lists in helpers/tangooffers.py, which are the authority.
+    """
+    wallet_id: str
+    denom_sats: int
+    pieces: int = 1
+    visibility: str = "connections"
