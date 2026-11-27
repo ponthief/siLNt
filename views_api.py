@@ -7491,11 +7491,32 @@ def _hours_minutes(seconds: int) -> str:
     return f"{h}h {m:02d}m" if h else f"{m}m"
 
 
-def _offer_view(o: dict, now: int, *, mine: bool) -> dict:
+def _offer_view(
+    o: dict, now: int, *, mine: bool, waiting: int = 0, proposed_by_me: bool = False
+) -> dict:
     """What a client is shown. The maker's user id is NOT in it: a username is
     the identity the board publishes, and the id is the one thing a taker has no
-    use for."""
+    use for.
+
+    STATE, because an offer is not simply "there" or "gone". It stays up until
+    its maker ACCEPTS a proposal, so for a while it can have somebody's proposal
+    waiting on it, and a screen that only says "available" and "Withdraw" is
+    wrong about what is happening. The maker is told how many are waiting; a
+    proposer is told it is theirs; everybody else is told only that it is busy,
+    never how many — a count of who is asking the maker is not for strangers.
+    """
+    from .helpers.tangooffers import MAX_PROPOSALS_PER_OFFER
+
+    state = (
+        {"waiting": int(waiting)}
+        if mine
+        else {
+            "busy": int(waiting) >= MAX_PROPOSALS_PER_OFFER,
+            "proposed_by_me": bool(proposed_by_me),
+        }
+    )
     return {
+        **state,
         "id": o["id"],
         "username": o["username"],
         "network": o["network"],
@@ -7566,7 +7587,16 @@ async def _tango_check_board_proposal(
             detail="That is not what the offer says: the amount and the coin "
                    "split have to match it.",
         )
-    if len(await list_proposed_rounds_for_offer(offer["id"])) >= MAX_PROPOSALS_PER_OFFER:
+    waiting_here = await list_proposed_rounds_for_offer(offer["id"])
+    # One proposal each: a second from the same person would only take two of the
+    # offer's three places, and the first is still waiting.
+    if any(r.a_user_id == uid for r in waiting_here):
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail="You already proposed to this offer. It is under Rounds "
+                   "until they answer.",
+        )
+    if len(waiting_here) >= MAX_PROPOSALS_PER_OFFER:
         raise HTTPException(
             status_code=HTTPStatus.CONFLICT,
             detail="That offer already has proposals waiting. Try again later.",
@@ -7650,14 +7680,29 @@ async def api_tango_offers(
         )
     now = int(time.time())
     connected = set(await list_accepted_contact_user_ids(uid, net))
+    from .crud import list_waiting_board_proposals
+
+    waiting_rows = await list_waiting_board_proposals()
+    waiting: dict = {}
+    proposed_by_me: set = set()
+    for w in waiting_rows:
+        waiting[w["offer_id"]] = waiting.get(w["offer_id"], 0) + 1
+        if w["a_user_id"] == uid:
+            proposed_by_me.add(w["offer_id"])
     others = []
     for o in await list_open_tango_offers(net, now):
         if o["user_id"] == uid:
             continue
         if board.visible_to(o["visibility"], o["user_id"] in connected):
-            others.append(_offer_view(o, now, mine=False))
+            others.append(
+                _offer_view(
+                    o, now, mine=False,
+                    waiting=waiting.get(o["id"], 0),
+                    proposed_by_me=o["id"] in proposed_by_me,
+                )
+            )
     mine = [
-        _offer_view(o, now, mine=True)
+        _offer_view(o, now, mine=True, waiting=waiting.get(o["id"], 0))
         for o in await list_user_tango_offers(uid, net, now)
     ]
     enabled = bool((await get_backend_config(net)).tango_board_enabled)

@@ -600,3 +600,47 @@ def test_the_second_migration_adds_the_address_the_strikes_and_the_bans():
 def test_account_deletion_takes_the_strikes_and_the_ban_too():
     assert "DELETE FROM silnt.tango_board_strikes WHERE user_id = :uid" in CRUD
     assert "DELETE FROM silnt.tango_board_bans WHERE user_id = :uid" in CRUD
+
+
+# ── an offer is not just "there" or "gone": its state is shown ───────────────
+
+
+def test_the_board_lists_which_proposals_are_still_waiting():
+    ns, db = _crud()
+    for rid, status, offer, taker in [
+        ("r1", "PROPOSED", "o1", "t1"),
+        ("r2", "PROPOSED", "o1", "t2"),
+        ("r3", "ACCEPTED", "o1", "t3"),      # answered: not waiting
+        ("r4", "CANCELLED", "o2", "t1"),     # over: not waiting
+        ("r5", "PROPOSED", None, "t1"),      # an ordinary round, not the board
+    ]:
+        db.c.execute("INSERT INTO silnt.tango_rounds VALUES (?,?,?,?)",
+                     (rid, status, taker, offer))
+    got = run(ns["list_waiting_board_proposals"]())
+    assert sorted((g["offer_id"], g["a_user_id"]) for g in got) == [("o1", "t1"), ("o1", "t2")]
+
+
+def test_the_makers_view_counts_waiting_and_everyone_elses_only_says_busy():
+    view = _fn(VIEWS, "_offer_view")
+    # The maker is told how many; a proposer is told it is theirs; strangers get
+    # a yes/no and never a count of who is asking.
+    assert '{"waiting": int(waiting)}' in view
+    assert '"busy": int(waiting) >= MAX_PROPOSALS_PER_OFFER' in view
+    assert '"proposed_by_me": bool(proposed_by_me)' in view
+    # `waiting` is only ever emitted on the maker's own view.
+    assert view.count('"waiting"') == 1
+
+
+def test_the_listing_fills_in_that_state_from_one_query():
+    body = _fn(VIEWS, "api_tango_offers")
+    assert "list_waiting_board_proposals()" in body
+    assert "proposed_by_me" in body and "waiting=waiting.get(o[\"id\"], 0)" in body
+
+
+def test_one_person_cannot_hold_two_of_an_offers_places():
+    body = _fn(VIEWS, "_tango_check_board_proposal")
+    assert "any(r.a_user_id == uid for r in waiting_here)" in body
+    assert "You already proposed to this offer" in body
+    # Checked BEFORE the cap, or a full offer would tell you it was full when the
+    # truth is that one of the places is yours.
+    assert body.index("any(r.a_user_id == uid") < body.index("MAX_PROPOSALS_PER_OFFER:")

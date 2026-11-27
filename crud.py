@@ -4660,6 +4660,22 @@ async def list_proposed_rounds_for_offer(offer_id: str) -> list[TangoRound]:
     return [TangoRound(**r) for r in rows]
 
 
+async def list_waiting_board_proposals() -> list[dict]:
+    """(offer_id, a_user_id) of every board proposal still waiting for its maker.
+
+    One query for the whole board rather than one per offer: the list endpoint
+    needs, for each offer, how many are waiting and whether the viewer is one of
+    the proposers, and a board is small (3 offers a user, 3 proposals an offer).
+    """
+    rows = await db.fetchall(
+        """
+        SELECT offer_id, a_user_id FROM silnt.tango_rounds
+        WHERE offer_id IS NOT NULL AND status = 'PROPOSED'
+        """
+    )
+    return [dict(r) for r in rows]
+
+
 async def count_board_proposals_by_taker(user_id: str) -> int:
     """Proposals this user has out against board offers and nobody has answered.
     Their coins are held by each, so this is what bounds how much of their own
