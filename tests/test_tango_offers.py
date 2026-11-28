@@ -656,9 +656,36 @@ def test_matching_cancels_the_other_proposals_the_remaining_coins_cannot_fund():
     # Only proposals waiting on THIS user, never the round just matched.
     assert "other.id == keep_round" in fn and 'other.status != "PROPOSED"' in fn
     assert "other.b_user_id != uid" in fn
-    # The same funding test as the board, and the reason is a named constant.
-    assert "_tango_maker_can_fund(uid, network, int(other.denom_sats))" in fn
+    # The round's own plan(), not the board's rough margin (which passed a round
+    # the client then could not match), and the reason is a named constant.
+    assert "_tango_can_still_match(uid, network, other)" in fn
+    assert "_tango_maker_can_fund" not in fn
+    can = _fn(VIEWS, "_tango_can_still_match")
+    assert "plan(a_rows, mine," in can and "get_reserved_tango_outpoints" in can
     assert "reject_reason=OUT_OF_COINS" in fn
     # It runs after the accept succeeded and must never undo it.
     assert "except Exception" in fn
     assert board.OUT_OF_COINS == "out of coins"
+
+
+def test_the_boards_margin_is_not_enough_to_match_a_round():
+    # The reason the cancel uses plan() and not can_fund(): at a real fee rate
+    # coins that clear "amount + margin" can still be short of amount + this
+    # side's half of the fee, so a proposal could pass the rough test and be
+    # unanswerable. Reported 2026-11-28 as not cancelled.
+    pj = sys.modules[f"{PKG}.helpers.payjoin_sp"]
+
+    def coin(amount, n):
+        return pj.PayjoinInput(txid=f"{n:064x}", vout=0, amount=amount, pub_key=bytes(32))
+
+    a = [coin(500_000, 1)]
+    b = [coin(62_100, 2)]
+    assert board.can_fund(62_100, 60_000)
+    try:
+        tango.plan(a, b, 60_000, 20.0, 1)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected 62,100 sats to be short of 60,000 plus a fee share")
+    # And a coin that does cover it is accepted by the same call.
+    tango.plan(a, [coin(80_000, 3)], 60_000, 20.0, 1)

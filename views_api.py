@@ -7622,6 +7622,41 @@ async def _tango_check_board_proposal(
     return offer
 
 
+async def _tango_can_still_match(uid: str, network: str, rnd) -> bool:
+    """Could this user still match this round with the coins that are free?
+
+    Tries their free coins largest first, a growing handful at a time, against
+    plan() with the round's real first side, so the answer includes the fee that
+    the extra inputs themselves cost. Cancelling only when NO handful works
+    keeps it from cancelling anything the user could still answer.
+    """
+    from .crud import get_spendable_coin_rows
+    from .helpers.payjoin_sp import PayjoinInput
+    from .helpers.tango import outpoint_key, plan
+
+    reserved = await get_reserved_tango_outpoints(uid)
+    free = [
+        r for r in await get_spendable_coin_rows(uid, network)
+        if outpoint_key(r["txid"], r["vout"]) not in reserved
+    ]
+    free.sort(key=lambda r: int(r["amount"]), reverse=True)
+    a_rows = _pj_payjoin_inputs(_pj_inputs(rnd.a_inputs))
+    for k in range(1, min(len(free), 200) + 1):
+        mine = [
+            PayjoinInput(
+                txid=str(r["txid"]).lower(), vout=int(r["vout"]),
+                amount=int(r["amount"]), pub_key=bytes(32),
+            )
+            for r in free[:k]
+        ]
+        try:
+            plan(a_rows, mine, int(rnd.denom_sats), rnd.fee_rate, rnd.pieces or 1)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
 async def _cancel_unfundable_proposals(uid: str, network: str, *, keep_round: str) -> int:
     """After this user matched a round, cancel the other proposals waiting on
     THEM that the coins left cannot fund.
@@ -7629,9 +7664,11 @@ async def _cancel_unfundable_proposals(uid: str, network: str, *, keep_round: st
     Matching puts coins into a round, so a second proposal to the same person may
     now be unanswerable. Left alone it holds its proposer's coins for the rest of
     its window (a day, or two hours from the board) while nobody can match it.
-    Same funding test the board uses at post and at proposal; a sanity check, not
-    a guarantee, so a proposal it keeps may still fail at accept, which refuses
-    honestly. Never raises: the accept it follows has already succeeded.
+    The test is the round's own plan(), not the board's rough margin: "enough for
+    the amount" is not "enough for the amount plus this round's half of the fee",
+    and a proposal that passed the first and failed the second is exactly the one
+    reported as not cancelled (2026-11-28). Never raises: the accept it follows
+    has already succeeded.
     """
     from .crud import list_tango_rounds_for_user
     from .helpers.tangooffers import OUT_OF_COINS
@@ -7643,7 +7680,7 @@ async def _cancel_unfundable_proposals(uid: str, network: str, *, keep_round: st
                 continue
             if other.b_user_id != uid:
                 continue
-            if await _tango_maker_can_fund(uid, network, int(other.denom_sats)):
+            if await _tango_can_still_match(uid, network, other):
                 continue
             await update_tango_round(other.id, status="CANCELLED", reject_reason=OUT_OF_COINS)
             cancelled += 1

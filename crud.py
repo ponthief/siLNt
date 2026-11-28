@@ -2521,44 +2521,6 @@ def _silnt_env_key() -> tuple:
     return "", ""
 
 
-def _silnt_file_key() -> str:
-    """The key in `.silnt_enc_key_v1` if there is one. Never creates it."""
-    from pathlib import Path
-    try:
-        from lnbits.settings import settings as _s
-        folder = getattr(_s, "lnbits_data_folder", None)
-    except Exception:
-        folder = None
-    if not folder:
-        return ""
-    try:
-        key = Path(folder, _SILNT_KEY_FILE).read_text().strip()
-    except OSError:
-        return ""
-    return key if len(key) >= 32 else ""
-
-
-def _silnt_key_alternates() -> list:
-    """The extension's OTHER own keys: [(source, key), ...], never the active one.
-
-    Two can exist at once. The file key is generated whenever a start cannot
-    see SILNT_ENC_KEY, so every row written until the variable became visible
-    is under it, and from then on the env key is the active one. Without this a
-    `v2:` row written under the file key would stop decrypting the moment the
-    env key took over — exactly the loss the extension's own key exists to end.
-
-    These are the extension's keys and nobody else's: a `v2:` row is still never
-    tried against LNbits' secrets.
-    """
-    active = _silnt_enc_key()
-    env, env_source = _silnt_env_key()
-    out: list = []
-    for source, key in (("key file", _silnt_file_key()), (env_source, env)):
-        if key and len(key) >= 32 and key != active and all(key != k for _, k in out):
-            out.append((source, key))
-    return out
-
-
 def _note_active_key(source: str, key: str) -> None:
     """Say once which key is active. The answer to "is my SILNT_ENC_KEY being
     used?" should be a line in the log, not a trip into the data folder."""
@@ -2761,32 +2723,13 @@ def _pj_decrypt(ciphertext: str) -> str:
             return _strip_residual_padding(
                 AESCipher(key=_silnt_enc_key()).decrypt(body)
             )
-        except Exception as first:
-            # A row written under the extension's OTHER key (see
-            # _silnt_key_alternates). Only accepted if what comes out is text:
-            # about one wrong key in 256 passes the padding check.
-            try:
-                others = _silnt_key_alternates()
-            except Exception:
-                raise first
-            for source, key in others:
-                try:
-                    plain = _strip_residual_padding(AESCipher(key=key).decrypt(body))
-                except Exception:
-                    continue
-                if not _plausible_plaintext(plain):
-                    continue
-                if f"v2:{source}" not in _ALT_KEY_LOGGED:
-                    _ALT_KEY_LOGGED.add(f"v2:{source}")
-                    from loguru import logger as _logger
-                    _logger.warning(
-                        f"[crypto] a v2 row opened with the {source} "
-                        f"(key {_key_fingerprint(key)}), not the active key "
-                        f"(key {_key_fingerprint(_silnt_enc_key())}); the hourly "
-                        "pass moves it under the active one"
-                    )
-                return plain
-            raise first
+        except Exception:
+            # One key, the active one. A second extension key used to be tried
+            # here (the file key, for rows written while SILNT_ENC_KEY was
+            # invisible); it was dropped on 2026-11-28, on the user's word that
+            # every row had been moved under the active key. A row that does not
+            # open is unreadable, and the caller says so.
+            raise
 
     primary = _payjoin_enc_key()
     try:
@@ -3413,8 +3356,7 @@ async def reencrypt_legacy_rows() -> dict:
     """
     from loguru import logger as _logger
 
-    done = unreadable = skipped = rekeyed = 0
-    v2_total = v2_stuck = 0
+    done = unreadable = skipped = 0
     for table, pks, col in _REENCRYPT_TARGETS:
         try:
             rows = await db.fetchall(
@@ -3456,96 +3398,6 @@ async def reencrypt_legacy_rows() -> dict:
             )
             done += 1
 
-    # ── v2 rows written under the extension's OTHER key ──
-    # The file key is generated whenever a start cannot see SILNT_ENC_KEY, so
-    # rows written in that window are v2 and under it; once the env key is the
-    # active one they open only through the alternate. Move them across, with
-    # the same three rules as above (decrypts, reads back, conditional write).
-    try:
-        others = _silnt_key_alternates()
-        active_key = _silnt_enc_key()
-    except Exception:
-        others, active_key = [], None
-    if others and active_key:
-        from lnbits.utils.crypto import AESCipher
-        for table, pks, col in _REENCRYPT_TARGETS:
-            try:
-                rows = await db.fetchall(
-                    f"SELECT {', '.join(pks)}, {col} AS _v FROM {table} "
-                    f"WHERE {col} LIKE 'v2:%'",
-                    {},
-                )
-            except Exception as e:
-                _logger.warning(f"[crypto] re-key skipped {table}.{col}: {e}")
-                continue
-            for r in rows:
-                old = r["_v"]
-                v2_total += 1
-                try:  # already under the active key: nothing to do
-                    AESCipher(key=active_key).decrypt(old[len("v2:"):])
-                    continue
-                except Exception:
-                    pass
-                try:
-                    plain = _pj_decrypt(old)  # opens via the other key, or raises
-                except Exception:
-                    unreadable += 1
-                    v2_stuck += 1
-                    continue
-                if not plain:
-                    skipped += 1
-                    v2_stuck += 1
-                    continue
-                try:
-                    new = _pj_encrypt(plain)
-                    back = AESCipher(key=active_key).decrypt(new[len("v2:"):])
-                    if not new.startswith("v2:") or _strip_residual_padding(back) != plain:
-                        skipped += 1
-                        v2_stuck += 1
-                        continue
-                except Exception:
-                    skipped += 1
-                    v2_stuck += 1
-                    continue
-                where = " AND ".join(f"{k} = :p{i}" for i, k in enumerate(pks))
-                params = {f"p{i}": r[k] for i, k in enumerate(pks)}
-                params.update({"new": new, "old": old})
-                await db.execute(
-                    f"UPDATE {table} SET {col} = :new WHERE {where} AND {col} = :old",
-                    params,
-                )
-                rekeyed += 1
-        if "two_keys" not in _silnt_key_cache:
-            _silnt_key_cache["two_keys"] = True
-            _logger.warning(
-                "[crypto] two extension keys exist: active is "
-                f"{_silnt_key_cache.get('source', '?')} "
-                f"(key {_key_fingerprint(active_key)}); the other is "
-                + ", ".join(f"the {src} (key {_key_fingerprint(k)})" for src, k in others)
-                + ". Rows under the other key stay readable and are moved to the "
-                "active one. Keep both until a pass reports nothing left to move."
-            )
-        if rekeyed:
-            _logger.info(f"[crypto] moved {rekeyed} row(s) under the active extension key")
-        # SAY WHAT IS LEFT, once per change. The pass used to log only when it
-        # moved something, so after the last row went the log said nothing, and
-        # silence could not be told from a pass that was not running. Reported
-        # 2026-11-14: "there were 5 rows moved… no update on what is left".
-        status = ("clean", v2_total) if not v2_stuck else ("stuck", v2_stuck)
-        if _silnt_key_cache.get("v2_status") != status:
-            _silnt_key_cache["v2_status"] = status
-            if v2_stuck:
-                _logger.warning(
-                    f"[crypto] {v2_stuck} v2 row(s) open under neither extension "
-                    "key (or could not be rewritten) and were left untouched; "
-                    "keep both keys"
-                )
-            else:
-                _logger.info(
-                    f"[crypto] all {v2_total} v2 row(s) now open under the active "
-                    "extension key; the other key is no longer needed by any row "
-                    "(copy it aside before deleting it)"
-                )
     if done or unreadable:
         _logger.info(
             f"[crypto] re-encrypted {done} row(s) under the extension key; "
@@ -3558,8 +3410,7 @@ async def reencrypt_legacy_rows() -> dict:
             "cannot be read — restore .silnt_enc_key_v1 or set SILNT_ENC_KEY."
         )
         _silnt_key_cache["generated"] = False
-    return {"done": done, "unreadable": unreadable, "skipped": skipped,
-            "rekeyed": rekeyed, "v2_left": v2_stuck}
+    return {"done": done, "unreadable": unreadable, "skipped": skipped}
 
 
 # ── SP send contacts (per-user private address book) ──────────────────────────

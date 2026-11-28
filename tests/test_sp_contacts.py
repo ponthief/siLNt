@@ -552,23 +552,26 @@ def test_dotenv_parsing_is_the_ordinary_kind(tmp_path):
             ns["_restore"]()
 
 
-def test_a_row_under_the_generated_file_key_is_still_read_once_the_env_key_takes_over(tmp_path):
-    # The window: the variable is invisible, so the file key is generated and
-    # a row is written under it.
+def test_a_row_under_the_old_file_key_is_no_longer_read_once_the_env_key_is_active(tmp_path):
+    # The second extension key was dropped on 2026-11-28, on the user's word
+    # that every row had been moved under the active one. What is written now is
+    # under the env key; a row still under the file key is unreadable, and says
+    # so rather than being tried against a key that is no longer consulted.
     before = _crypto_ns(tmp_path, auth_secret_key="x")
     try:
         stored = before["_pj_encrypt"]("tsp1qexample")
         assert stored.startswith("v2:")
     finally:
         before["_restore"]()
-    # Then the env key becomes visible, and is the active one.
     after = _crypto_ns(tmp_path, auth_secret_key="x", dotenv=f"SILNT_ENC_KEY={KEY_A}\n")
     try:
         assert after["_silnt_enc_key"]() == KEY_A
-        assert after["_pj_decrypt"](stored) == "tsp1qexample"
-        # …and what is written from now on is under the env key.
+        import pytest
+        with pytest.raises(Exception):
+            after["_pj_decrypt"](stored)
         fresh = after["_pj_encrypt"]("tsp1qnew")
         assert after["FakeCipher"](KEY_A).decrypt(fresh[3:]) == "tsp1qnew"
+        assert after["_pj_decrypt"](fresh) == "tsp1qnew"
     finally:
         after["_restore"]()
 
@@ -590,72 +593,23 @@ def test_a_v2_row_under_no_key_this_instance_has_still_raises(tmp_path):
         b["_restore"]()
 
 
-def test_the_other_key_is_the_extensions_own_never_lnbits(tmp_path):
-    ns = _crypto_ns(tmp_path, auth_secret_key="lnbits-secret",
-                    dotenv=f"SILNT_ENC_KEY={KEY_A}\n")
-    try:
-        (tmp_path / ".silnt_enc_key_v1").write_text(KEY_B)
-        sources = [src for src, _ in ns["_silnt_key_alternates"]()]
-        assert sources == ["key file"]
-        keys = [k for _, k in ns["_silnt_key_alternates"]()]
-        assert "lnbits-secret" not in keys and KEY_A not in keys
-    finally:
-        ns["_restore"]()
+def test_there_is_one_extension_key_and_no_fallback_to_another():
+    src = (ROOT / "crud.py").read_text()
+    for gone in ("_silnt_key_alternates", "_silnt_file_key", "rekeyed", "two_keys", "v2_status"):
+        assert gone not in src, gone
+    # A v2 row is still never tried against LNbits' secrets.
+    body = src[src.index("def _pj_decrypt("):src.index("    primary = _payjoin_enc_key()")]
+    assert "_payjoin_enc_key_candidates" not in body
 
 
-def test_the_migration_moves_file_key_rows_under_the_env_key(tmp_path):
+def test_the_migration_leaves_v2_rows_alone_and_moves_only_legacy_ones(tmp_path):
     import asyncio
 
     ns = _crypto_ns(tmp_path, auth_secret_key="x", dotenv=f"SILNT_ENC_KEY={KEY_A}\n")
     try:
-        (tmp_path / ".silnt_enc_key_v1").write_text(KEY_B)
-        Cipher = ns["FakeCipher"]
-        under_file = "v2:" + Cipher(KEY_B).encrypt(b"tsp1qfromfile")
-        under_env = "v2:" + Cipher(KEY_A).encrypt(b"tsp1qfromenv")
-        under_none = "v2:" + Cipher("c" * 40).encrypt(b"tsp1qlost")
-        db = _FakeDb({
-            ("silnt.sp_contacts", "value"): [
-                {"id": "f", "_v": under_file},
-                {"id": "e", "_v": under_env},
-                {"id": "n", "_v": under_none},
-            ],
-        })
-        src = (ROOT / "crud.py").read_text()
-        block = src[src.index("_REENCRYPT_TARGETS = ("):src.index(
-            "# ── SP send contacts (per-user private address book)")]
-        ns2 = dict(ns)
-        ns2.update({"db": db, "_CIPHERTEXT_PREFIX": "U2FsdGVk"})
-        exec(block, ns2)
-        result = asyncio.run(ns2["reencrypt_legacy_rows"]())
-
-        assert result["rekeyed"] == 1, result
-        assert result["unreadable"] == 1, result          # the one nobody has a key for
-        assert result["v2_left"] == 1, result             # and it is reported as left
-        assert len(db.updates) == 1
-        sql, params = db.updates[0]
-        assert params["p0"] == "f" and params["old"] == under_file
-        assert "AND value = :old" in sql                   # conditional on what was read
-        # What was written is under the ACTIVE key, and reads back.
-        assert Cipher(KEY_A).decrypt(params["new"][3:]) == "tsp1qfromfile"
-        # A second pass finds nothing left to move.
-        db.updates.clear()
-        db.rows[("silnt.sp_contacts", "value")][0]["_v"] = params["new"]
-        again = asyncio.run(ns2["reencrypt_legacy_rows"]())
-        assert again["rekeyed"] == 0 and not db.updates, again
-    finally:
-        ns["_restore"]()
-
-
-def test_the_pass_says_when_nothing_is_left_under_the_other_key(tmp_path):
-    import asyncio
-
-    ns = _crypto_ns(tmp_path, auth_secret_key="x", dotenv=f"SILNT_ENC_KEY={KEY_A}\n")
-    try:
-        (tmp_path / ".silnt_enc_key_v1").write_text(KEY_B)
         Cipher = ns["FakeCipher"]
         db = _FakeDb({
             ("silnt.sp_contacts", "value"): [
-                {"id": "f", "_v": "v2:" + Cipher(KEY_B).encrypt(b"tsp1qfromfile")},
                 {"id": "e", "_v": "v2:" + Cipher(KEY_A).encrypt(b"tsp1qfromenv")},
             ],
         })
@@ -665,8 +619,8 @@ def test_the_pass_says_when_nothing_is_left_under_the_other_key(tmp_path):
         ns2 = dict(ns)
         ns2.update({"db": db, "_CIPHERTEXT_PREFIX": "U2FsdGVk"})
         exec(block, ns2)
-        first = asyncio.run(ns2["reencrypt_legacy_rows"]())
-        assert first["rekeyed"] == 1 and first["v2_left"] == 0, first
-        assert ns2["_silnt_key_cache"]["v2_status"] == ("clean", 2)
+        result = asyncio.run(ns2["reencrypt_legacy_rows"]())
+        assert set(result) == {"done", "unreadable", "skipped"}, result
+        assert not db.updates
     finally:
         ns["_restore"]()
