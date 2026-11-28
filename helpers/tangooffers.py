@@ -87,6 +87,10 @@ MAX_OPEN_PER_ADDRESS = MAX_OPEN_OFFERS
 # services/tangoTurns.ts. Machine-readable state, like EXPIRED beside them.
 OFFER_TAKEN = "offer taken"
 OFFER_WITHDRAWN = "offer withdrawn"
+# A proposal its acceptor can no longer fund, because the coins went into another
+# round they matched first. Cancelled for them rather than left to expire: the
+# proposer's coins are locked until it does, and nobody can answer it.
+OUT_OF_COINS = "out of coins"
 
 # The maker's coins are checked at post and at proposal so the board does not
 # fill with offers nobody could honour. This is a SANITY check, not a guarantee:

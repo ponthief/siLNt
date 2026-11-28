@@ -644,3 +644,21 @@ def test_one_person_cannot_hold_two_of_an_offers_places():
     # Checked BEFORE the cap, or a full offer would tell you it was full when the
     # truth is that one of the places is yours.
     assert body.index("any(r.a_user_id == uid") < body.index("MAX_PROPOSALS_PER_OFFER:")
+
+
+def test_matching_cancels_the_other_proposals_the_remaining_coins_cannot_fund():
+    # Reported 2026-11-28: matching one proposal left a second, now unaffordable,
+    # one waiting for its proposer's coins to time out (a day, or two hours from
+    # the board) while nobody could answer it.
+    body = _fn(VIEWS, "api_tango_accept")
+    assert "_cancel_unfundable_proposals(uid, rnd.network, keep_round=rid)" in body
+    fn = _fn(VIEWS, "_cancel_unfundable_proposals")
+    # Only proposals waiting on THIS user, never the round just matched.
+    assert "other.id == keep_round" in fn and 'other.status != "PROPOSED"' in fn
+    assert "other.b_user_id != uid" in fn
+    # The same funding test as the board, and the reason is a named constant.
+    assert "_tango_maker_can_fund(uid, network, int(other.denom_sats))" in fn
+    assert "reject_reason=OUT_OF_COINS" in fn
+    # It runs after the accept succeeded and must never undo it.
+    assert "except Exception" in fn
+    assert board.OUT_OF_COINS == "out of coins"

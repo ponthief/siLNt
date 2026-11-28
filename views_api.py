@@ -7257,6 +7257,7 @@ async def api_tango_accept(
     )
     if rnd.offer_id:
         await _close_tango_offer(rnd.offer_id, keep_round=rid, reason=OFFER_TAKEN)
+    await _cancel_unfundable_proposals(uid, rnd.network, keep_round=rid)
     return updated.dict()
 
 
@@ -7619,6 +7620,40 @@ async def _tango_check_board_proposal(
     if not await _tango_maker_can_fund(maker_id, offer["network"], int(offer["denom_sats"])):
         raise gone
     return offer
+
+
+async def _cancel_unfundable_proposals(uid: str, network: str, *, keep_round: str) -> int:
+    """After this user matched a round, cancel the other proposals waiting on
+    THEM that the coins left cannot fund.
+
+    Matching puts coins into a round, so a second proposal to the same person may
+    now be unanswerable. Left alone it holds its proposer's coins for the rest of
+    its window (a day, or two hours from the board) while nobody can match it.
+    Same funding test the board uses at post and at proposal; a sanity check, not
+    a guarantee, so a proposal it keeps may still fail at accept, which refuses
+    honestly. Never raises: the accept it follows has already succeeded.
+    """
+    from .crud import list_tango_rounds_for_user
+    from .helpers.tangooffers import OUT_OF_COINS
+
+    cancelled = 0
+    try:
+        for other in await list_tango_rounds_for_user(uid, network):
+            if other.id == keep_round or other.status != "PROPOSED":
+                continue
+            if other.b_user_id != uid:
+                continue
+            if await _tango_maker_can_fund(uid, network, int(other.denom_sats)):
+                continue
+            await update_tango_round(other.id, status="CANCELLED", reject_reason=OUT_OF_COINS)
+            cancelled += 1
+            await _notify_tango(
+                other.a_user_id, "Tango cancelled",
+                "A Tango you proposed is no longer available. Your coins are free again.",
+            )
+    except Exception as e:
+        logger.warning(f"tango: could not cancel unfundable proposals for {uid}: {e}")
+    return cancelled
 
 
 async def _close_tango_offer(offer_id: str, *, keep_round: Optional[str], reason: str) -> int:
