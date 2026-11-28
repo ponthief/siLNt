@@ -689,3 +689,17 @@ def test_the_boards_margin_is_not_enough_to_match_a_round():
         raise AssertionError("expected 62,100 sats to be short of 60,000 plus a fee share")
     # And a coin that does cover it is accepted by the same call.
     tango.plan(a, [coin(80_000, 3)], 60_000, 20.0, 1)
+
+
+def test_the_listing_says_what_this_user_could_afford():
+    # Reported 2026-11-28: a user with 12K sats could press Take on a 60K offer
+    # and had a Post button for amounts they could not fund. The clients draw
+    # that from the server's answer and do no sum of their own.
+    body = _fn(VIEWS, "api_tango_offers")
+    assert "sats_spendable(" in body and "get_reserved_tango_outpoints(uid)" in body
+    assert 'view["affordable"] = can_fund(spendable, int(o["denom_sats"]))' in body
+    assert '"affordable_denominations"' in body
+    assert "can_fund(spendable, int(d))" in body
+    # And it is the same test the propose and post paths use.
+    assert board.can_fund(12_000, 60_000) is False
+    assert board.can_fund(62_000, 60_000) is True

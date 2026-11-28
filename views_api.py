@@ -7761,18 +7761,29 @@ async def api_tango_offers(
         waiting[w["offer_id"]] = waiting.get(w["offer_id"], 0) + 1
         if w["a_user_id"] == uid:
             proposed_by_me.add(w["offer_id"])
+    # What this user could actually put in, once, so every offer and every
+    # denomination below is answered from the same figure. The clients draw a
+    # disabled Take or Post from these booleans and do the sum nowhere
+    # themselves (2026-11-28: a user with 12K sats could press Take on 60K).
+    from .crud import get_spendable_coin_rows
+    from .helpers.tangooffers import can_fund, sats_spendable
+
+    spendable = sats_spendable(
+        await get_spendable_coin_rows(uid, net),
+        await get_reserved_tango_outpoints(uid),
+    )
     others = []
     for o in await list_open_tango_offers(net, now):
         if o["user_id"] == uid:
             continue
         if board.visible_to(o["visibility"], o["user_id"] in connected):
-            others.append(
-                _offer_view(
-                    o, now, mine=False,
-                    waiting=waiting.get(o["id"], 0),
-                    proposed_by_me=o["id"] in proposed_by_me,
-                )
+            view = _offer_view(
+                o, now, mine=False,
+                waiting=waiting.get(o["id"], 0),
+                proposed_by_me=o["id"] in proposed_by_me,
             )
+            view["affordable"] = can_fund(spendable, int(o["denom_sats"]))
+            others.append(view)
     mine = [
         _offer_view(o, now, mine=True, waiting=waiting.get(o["id"], 0))
         for o in await list_user_tango_offers(uid, net, now)
@@ -7792,6 +7803,10 @@ async def api_tango_offers(
         "offers": others if enabled else [],
         "mine": mine,
         "denominations": list(board.DENOMINATIONS),
+        # The ones this user could post, from the same sum as `affordable`.
+        "affordable_denominations": [
+            d for d in board.DENOMINATIONS if can_fund(spendable, int(d))
+        ],
         "pieces": list(board.PIECES),
         "visibilities": list(board.VISIBILITIES),
         "default_visibility": board.DEFAULT_VISIBILITY,
